@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simple SFTP Client</title>
+<style>
+  @font-face{font-family:"Sora";src:url("fonts/Sora-Light.woff2") format("woff2");font-weight:300;}
+  @font-face{font-family:"Sora";src:url("fonts/Sora-Regular.woff2") format("woff2");font-weight:400;}
+  @font-face{font-family:"Sora";src:url("fonts/Sora-Medium.woff2") format("woff2");font-weight:500;}
+  @font-face{font-family:"Sora";src:url("fonts/Sora-SemiBold.woff2") format("woff2");font-weight:600;}
+  @font-face{font-family:"Sora";src:url("fonts/Sora-Bold.woff2") format("woff2");font-weight:700;}
+  @font-face{font-family:"JetBrains Mono";src:url("fonts/JetBrainsMono-Regular.woff2") format("woff2");font-weight:400;}
+  @font-face{font-family:"JetBrains Mono";src:url("fonts/JetBrainsMono-Medium.woff2") format("woff2");font-weight:500;}
+  :root{
+    --bg:#0a0e14;--bg-2:#0e131c;--panel:#121823;--panel-2:#161d2a;--border:#20293a;--border-2:#2b3650;
+    --text:#dfe7f2;--text-dim:#8a98b0;--text-faint:#5a6678;--accent:#4dd6c1;--accent-2:#2bb6a3;--glow:rgba(77,214,193,.35);
+    --amber:#f0b860;--red:#ff6b7a;--green:#5ce39b;--blue:#6db3ff;--radius:14px;--radius-sm:9px;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;margin:0;}
+  body{font-family:"Sora",sans-serif;color:var(--text);font-size:13px;
+    background:radial-gradient(900px 500px at 12% -10%,rgba(77,214,193,.10),transparent 60%),
+      radial-gradient(800px 500px at 100% 0%,rgba(109,179,255,.07),transparent 55%),var(--bg);
+    -webkit-user-select:none;user-select:none;overflow:hidden;}
+  .mono{font-family:"JetBrains Mono",monospace;}
+  .app{display:flex;flex-direction:column;height:100vh;padding:12px 14px 8px;gap:10px;}
+  .panel{background:linear-gradient(180deg,var(--panel),var(--bg-2));border:1px solid var(--border);border-radius:var(--radius);}
+  .field-label{display:block;font-size:10.5px;color:var(--text-dim);margin-bottom:4px;}
+  input,select{font-family:inherit;font-size:12.5px;color:var(--text);background:var(--panel-2);border:1px solid var(--border-2);
+    border-radius:var(--radius-sm);padding:7px 10px;outline:none;transition:border-color .15s,box-shadow .15s;}
+  input::placeholder{color:var(--text-faint);}
+  input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(77,214,193,.12);}
+  input:disabled,select:disabled{opacity:.5;}
+  select{appearance:none;cursor:pointer;padding-right:26px;
+    background-image:linear-gradient(45deg,transparent 50%,var(--text-dim) 50%),linear-gradient(135deg,var(--text-dim) 50%,transparent 50%);
+    background-position:calc(100% - 14px) center,calc(100% - 9px) center;background-size:5px 5px,5px 5px;background-repeat:no-repeat;}
+  button{font-family:inherit;font-size:12.5px;font-weight:600;cursor:pointer;border-radius:var(--radius-sm);
+    padding:7px 13px;border:1px solid transparent;transition:transform .15s,border-color .15s,box-shadow .15s,background .15s;}
+  .btn-primary{color:#042b27;background:linear-gradient(180deg,var(--accent),var(--accent-2));box-shadow:0 2px 12px var(--glow);}
+  .btn-primary:hover:not(:disabled){transform:translateY(-1px);}
+  .btn-danger{color:#2b0d10;background:linear-gradient(180deg,#ff8a96,var(--red));}
+  .btn-danger:hover:not(:disabled){transform:translateY(-1px);}
+  .btn-ghost{color:var(--text);background:var(--panel-2);border-color:var(--border-2);}
+  .btn-ghost:hover:not(:disabled){border-color:var(--accent);transform:translateY(-1px);}
+  .btn-sm{padding:5px 9px;font-size:11.5px;}
+  button:disabled{opacity:.4;cursor:not-allowed;box-shadow:none;transform:none;}
+
+  /* connection bar */
+  .conn{padding:11px 14px;display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;}
+  .conn .f{display:flex;flex-direction:column;}
+  .conn .f.host input{width:150px;} .conn .f.port input{width:62px;} .conn .f.user input{width:120px;}
+  .conn .f.secret input{width:150px;} .conn .f.start input{width:130px;}
+  .seg{display:inline-flex;background:var(--panel-2);border:1px solid var(--border-2);border-radius:var(--radius-sm);padding:3px;gap:2px;}
+  .seg button{padding:5px 10px;font-weight:500;background:transparent;border:none;color:var(--text-dim);border-radius:6px;}
+  .seg button.on{background:linear-gradient(180deg,var(--accent),var(--accent-2));color:#042b27;}
+  .conn-status{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--text-dim);padding-bottom:8px;margin-left:auto;}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--text-faint);}
+  .dot.live{background:var(--green);} .dot.warn{background:var(--amber);} .dot.err{background:var(--red);} .dot.busy{background:var(--amber);}
+
+  /* panes */
+  .panes{flex:1 1 auto;display:flex;gap:10px;min-height:0;}
+  .pane{flex:1 1 0;display:flex;flex-direction:column;min-width:0;overflow:hidden;}
+  .center{flex:0 0 92px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;}
+  .center button{width:78px;}
+  .pane-head{padding:9px 11px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:7px;}
+  .pane-title{font-weight:600;font-size:12.5px;display:flex;align-items:center;gap:7px;}
+  .navrow{display:flex;align-items:center;gap:5px;}
+  .navrow .crumbs{flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:"JetBrains Mono",monospace;
+    font-size:11px;color:var(--text-dim);background:var(--panel-2);border:1px solid var(--border);border-radius:7px;padding:5px 9px;}
+  .icon-btn{padding:5px 8px;font-size:12px;background:var(--panel-2);border:1px solid var(--border-2);color:var(--text-dim);border-radius:7px;}
+  .icon-btn:hover:not(:disabled){color:var(--text);border-color:var(--accent);}
+  .filter input{width:100%;padding:5px 9px;font-size:11.5px;}
+  .pane-body{flex:1 1 auto;overflow:auto;}
+  table{border-collapse:collapse;width:100%;font-size:12px;}
+  thead th{position:sticky;top:0;z-index:1;text-align:left;font-weight:600;font-size:10.5px;color:var(--text-dim);
+    background:var(--bg-2);padding:7px 10px;border-bottom:1px solid var(--border);cursor:pointer;white-space:nowrap;}
+  tbody td{padding:6px 10px;border-bottom:1px solid rgba(32,41,58,.45);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  tbody td.name{max-width:340px;} td.size,td.mod{font-family:"JetBrains Mono",monospace;color:var(--text-dim);font-size:11px;}
+  tbody tr{cursor:pointer;} tbody tr:hover{background:rgba(77,214,193,.06);}
+  tbody tr.sel{background:rgba(77,214,193,.16)!important;box-shadow:inset 3px 0 0 var(--accent);}
+  .ic{margin-right:7px;color:var(--accent);} .ic.file{color:var(--text-faint);}
+  /* compare colours */
+  tr.c-newer_local td.name{color:var(--green);} tr.c-newer_remote td.name{color:var(--amber);}
+  tr.c-local_only td.name,tr.c-remote_only td.name{color:var(--blue);}
+  .pane.dragover{outline:2px dashed var(--accent);outline-offset:-4px;}
+
+  /* queue */
+  .queue{padding:9px 12px;display:flex;align-items:center;gap:14px;}
+  .qbar{flex:1 1 auto;height:7px;background:var(--panel-2);border:1px solid var(--border);border-radius:5px;overflow:hidden;}
+  .qbar > div{height:100%;width:0;background:linear-gradient(90deg,var(--accent-2),var(--accent));transition:width .15s;}
+  .qmeta{font-size:11px;color:var(--text-dim);white-space:nowrap;font-family:"JetBrains Mono",monospace;}
+
+  .statusbar{display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--text-dim);padding:0 4px;}
+  .left{display:flex;align-items:center;gap:14px;}
+  .toggle{display:inline-flex;align-items:center;gap:7px;cursor:pointer;}
+  .switch{width:32px;height:17px;border-radius:9px;background:var(--panel-2);border:1px solid var(--border-2);position:relative;}
+  .switch::after{content:"";position:absolute;top:1px;left:1px;width:13px;height:13px;border-radius:50%;background:var(--text-faint);transition:left .15s,background .15s;}
+  .toggle.on .switch{background:var(--accent-2);border-color:var(--accent);} .toggle.on .switch::after{left:16px;background:#042b27;}
+  #updateBanner{display:none;align-items:center;gap:10px;background:rgba(77,214,193,.12);border:1px solid var(--accent-2);
+    border-radius:var(--radius-sm);padding:6px 12px;font-size:12px;}
+  #updateBanner.show{display:flex;}
+
+  /* modals + context menu */
+  .modal{position:fixed;inset:0;background:rgba(6,9,14,.78);display:none;align-items:center;justify-content:center;z-index:60;}
+  .modal.show{display:flex;}
+  .card{width:560px;max-width:92%;max-height:84vh;overflow:auto;background:linear-gradient(180deg,var(--panel),var(--bg-2));
+    border:1px solid var(--border-2);border-radius:var(--radius);box-shadow:0 20px 60px rgba(0,0,0,.5);padding:20px 22px;}
+  .card h3{margin:0 0 14px;font-size:16px;}
+  .card .row{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:flex-end;}
+  .card .row .f{display:flex;flex-direction:column;flex:1 1 auto;} .card .row .f input,.card .row .f select{width:100%;}
+  .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:8px;}
+  pre.pub{background:var(--panel-2);border:1px solid var(--border);border-radius:7px;padding:10px;font-family:"JetBrains Mono",monospace;
+    font-size:11px;white-space:pre-wrap;word-break:break-all;color:var(--text-dim);max-height:120px;overflow:auto;-webkit-user-select:text;user-select:text;}
+  .sess-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;}
+  .sess-item .nm{flex:1 1 auto;} .sess-item .meta{font-size:11px;color:var(--text-dim);}
+  #ctx{position:fixed;display:none;z-index:80;background:var(--panel-2);border:1px solid var(--border-2);border-radius:9px;
+    box-shadow:0 12px 30px rgba(0,0,0,.5);padding:5px;min-width:170px;}
+  #ctx button{display:block;width:100%;text-align:left;background:transparent;border:none;color:var(--text);padding:7px 11px;border-radius:6px;font-weight:400;font-size:12.5px;}
+  #ctx button:hover{background:rgba(77,214,193,.12);} #ctx .sepd{height:1px;background:var(--border);margin:4px 0;}
+  #ctx button.danger{color:var(--red);}
+  #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--panel-2);border:1px solid var(--border-2);
+    color:var(--text);padding:10px 16px;border-radius:9px;font-size:12px;opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;
+    box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:90;max-width:70%;} #toast.show{opacity:1;transform:translateX(-50%) translateY(0);} #toast.err{border-color:var(--red);}
+  ::-webkit-scrollbar{width:11px;height:11px;} ::-webkit-scrollbar-thumb{background:var(--border-2);border-radius:6px;border:2px solid var(--bg);}
+  .grow{flex:1 1 auto;}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- connection -->
+  <div class="panel conn">
+    <div class="f"><label class="field-label">Saved</label>
+      <select id="sessions" style="width:150px"><option value="">(none)</option></select></div>
+    <button id="manageBtn" class="btn-ghost btn-sm" style="margin-bottom:0">Manage</button>
+    <div class="f host"><label class="field-label">Host</label><input id="host" type="text" spellcheck="false"></div>
+    <div class="f port"><label class="field-label">Port</label><input id="port" type="text" value="22" spellcheck="false"></div>
+    <div class="f user"><label class="field-label">Username</label><input id="user" type="text" spellcheck="false" autocomplete="off"></div>
+    <div class="f"><label class="field-label">Auth</label>
+      <div id="authSeg" class="seg"><button data-v="password" class="on">Password</button><button data-v="key">Key</button></div></div>
+    <div class="f secret" id="passWrap"><label class="field-label">Password</label><input id="pass" type="password" autocomplete="off"></div>
+    <div class="f secret" id="keyWrap" style="display:none"><label class="field-label">Private key path</label><input id="keypath" type="text" class="mono" spellcheck="false"></div>
+    <div class="f start"><label class="field-label">Start path</label><input id="startpath" type="text" class="mono" placeholder="(home)" spellcheck="false"></div>
+    <label class="toggle" id="rememberWrap" style="margin-bottom:8px"><span class="switch"></span><span>Remember pw</span></label>
+    <button id="testBtn" class="btn-ghost btn-sm" style="margin-bottom:0">Test</button>
+    <button id="connBtn" class="btn-primary" style="margin-bottom:0">Connect</button>
+    <button id="saveBtn" class="btn-ghost btn-sm" style="margin-bottom:0">Save</button>
+    <button id="keygenBtn" class="btn-ghost btn-sm" style="margin-bottom:0">Keygen</button>
+    <div class="conn-status"><span id="connDot" class="dot"></span><span id="connText">Not connected</span></div>
+  </div>
+
+  <div id="updateBanner"><span id="updateMsg"></span><button id="updateView" class="btn-primary btn-sm">View release</button>
+    <button id="updateDismiss" class="btn-ghost btn-sm">Dismiss</button></div>
+
+  <!-- panes -->
+  <div class="panes">
+    <div class="pane panel" id="paneLocal" data-side="local">
+      <div class="pane-head">
+        <div class="pane-title">Local</div>
+        <div class="navrow">
+          <button class="icon-btn" data-act="back">&#8592;</button>
+          <button class="icon-btn" data-act="fwd">&#8594;</button>
+          <button class="icon-btn" data-act="up">&#8593;</button>
+          <button class="icon-btn" data-act="refresh">&#8635;</button>
+          <span class="crumbs" id="crumbsLocal"></span>
+        </div>
+        <div class="filter"><input id="filterLocal" type="text" placeholder="Filter this folder..."></div>
+      </div>
+      <div class="pane-body"><table><thead><tr><th data-k="name">Name</th><th data-k="size">Size</th><th data-k="mtime">Modified</th></tr></thead><tbody id="tbodyLocal"></tbody></table></div>
+    </div>
+
+    <div class="center">
+      <button id="upBtn" class="btn-primary" disabled title="Upload selected">Upload &#8594;</button>
+      <button id="downBtn" class="btn-primary" disabled title="Download selected">&#8592; Download</button>
+      <button id="compareBtn" class="btn-ghost btn-sm" disabled>Compare</button>
+      <button id="syncUpBtn" class="btn-ghost btn-sm" disabled>Sync &#8594;</button>
+      <button id="syncDownBtn" class="btn-ghost btn-sm" disabled>&#8592; Sync</button>
+      <button id="watchBtn" class="btn-ghost btn-sm" disabled>Watch</button>
+    </div>
+
+    <div class="pane panel" id="paneRemote" data-side="remote">
+      <div class="pane-head">
+        <div class="pane-title">Remote <span id="latency" class="meta" style="font-size:11px;color:var(--text-faint)"></span></div>
+        <div class="navrow">
+          <button class="icon-btn" data-act="back">&#8592;</button>
+          <button class="icon-btn" data-act="fwd">&#8594;</button>
+          <button class="icon-btn" data-act="up">&#8593;</button>
+          <button class="icon-btn" data-act="refresh">&#8635;</button>
+          <span class="crumbs" id="crumbsRemote">(not connected)</span>
+        </div>
+        <div class="filter"><input id="filterRemote" type="text" placeholder="Filter this folder..." disabled></div>
+      </div>
+      <div class="pane-body"><table><thead><tr><th data-k="name">Name</th><th data-k="size">Size</th><th data-k="mtime">Modified</th></tr></thead><tbody id="tbodyRemote"></tbody></table></div>
+    </div>
+  </div>
+
+  <!-- queue -->
+  <div class="panel queue">
+    <span class="qmeta" id="qName">Idle</span>
+    <div class="qbar"><div id="qFill"></div></div>
+    <span class="qmeta" id="qMeta"></span>
+    <button id="cancelBtn" class="btn-ghost btn-sm" disabled>Cancel</button>
+  </div>
+
+  <div class="statusbar">
+    <div class="left">
+      <span id="statusText"></span>
+      <div id="debugToggle" class="toggle"><span class="switch"></span><span>Debug log</span></div>
+    </div>
+    <span class="grow"></span>
+    <span id="verText" class="meta" style="color:var(--text-faint)"></span>
+    <button id="updateCheck" class="btn-ghost btn-sm" style="margin-left:12px">Check for updates</button>
+  </div>
+</div>
+
+<!-- modals -->
+<div id="keygenModal" class="modal"><div class="card">
+  <h3>Generate key pair</h3>
+  <div class="row"><div class="f"><label class="field-label">Type</label><select id="kgType"></select></div>
+    <div class="f" style="flex:2 1 auto"><label class="field-label">Save private key as (full path)</label><input id="kgPath" class="mono" placeholder="C:\Users\you\.ssh\id_ed25519"></div></div>
+  <div class="row"><div class="f"><label class="field-label">Passphrase (optional)</label><input id="kgPass" type="password"></div></div>
+  <div id="kgResult" style="display:none"><label class="field-label">Public key (copy to the server)</label><pre class="pub" id="kgPub"></pre>
+    <div style="margin:8px 0"><button id="kgInstall" class="btn-ghost btn-sm" disabled title="Append to ~/.ssh/authorized_keys on the connected server">Install on connected server</button>
+    <button id="kgCopy" class="btn-ghost btn-sm">Copy public key</button></div></div>
+  <div class="modal-actions"><button id="kgClose" class="btn-ghost">Close</button><button id="kgGo" class="btn-primary">Generate</button></div>
+</div></div>
+
+<div id="sessModal" class="modal"><div class="card"><h3>Saved sessions</h3><div id="sessList"></div>
+  <div class="modal-actions"><button id="sessClose" class="btn-ghost">Close</button></div></div></div>
+
+<div id="confirmModal" class="modal"><div class="card"><h3 id="cfTitle">Confirm</h3>
+  <p id="cfText" style="font-size:12.5px;line-height:1.5;color:var(--text)"></p>
+  <div class="modal-actions"><button id="cfCancel" class="btn-ghost">Cancel</button><button id="cfOk" class="btn-danger">OK</button></div></div></div>
+
+<div id="promptModal" class="modal"><div class="card"><h3 id="pmTitle">Input</h3>
+  <div class="row"><div class="f"><input id="pmInput" type="text"></div></div>
+  <div class="modal-actions"><button id="pmCancel" class="btn-ghost">Cancel</button><button id="pmOk" class="btn-primary">OK</button></div></div></div>
+
+<div id="ctx"></div>
+<div id="toast"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+let API=null, connected=false, busy=false;
+let authMode="password", rememberPw=false;
+const state={ local:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1},
+              remote:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1} };
+let compareMap=null;
+
+function toast(m,e){const t=$("toast");t.textContent=m;t.className=(e?"err ":"")+"show";setTimeout(()=>t.className=t.className.replace("show","").trim(),3400);}
+function hsize(n){if(n==null)return"";n=+n;const u=["B","KB","MB","GB","TB"];let i=0;while(n>=1024&&i<4){n/=1024;i++;}return (i?n.toFixed(1):n.toFixed(0))+" "+u[i];}
+function fmod(ts){if(!ts)return"";const d=new Date(ts*1000);return d.toISOString().slice(0,16).replace("T"," ");}
+
+window.addEventListener("pywebviewready",init);
+window.appEvent=function(ev,p){
+  if(ev==="progress"){ $("qName").textContent=p.name; $("qFill").style.width=p.pct+"%";
+    $("qMeta").textContent=`${p.index+1}/${p.total}  ${p.pct}%  ${p.speed||""}${p.eta?"  ETA "+p.eta+"s":""}`; }
+  else if(ev==="transfer_done"){ busy=false; $("cancelBtn").disabled=true; $("qFill").style.width="0%";
+    $("qName").textContent="Idle"; $("qMeta").textContent=p.cancelled?"Cancelled":`Done${p.errors.length?" ("+p.errors.length+" failed)":""}${p.skipped?", "+p.skipped+" skipped":""}`;
+    refresh("local"); refresh("remote"); }
+  else if(ev==="size_progress"){ $("statusText").textContent=`Calculating size... ${p.files} files, ${p.bytes}`; }
+  else if(ev==="watch"){ $("statusText").textContent=p.ok?("Watch: uploaded "+p.file):("Watch error: "+p.file); }
+};
+
+async function init(){
+  API=window.pywebview.api;
+  const meta=await API.get_meta();
+  $("verText").textContent="v"+meta.version;
+  const kg=$("kgType"); meta.key_types.forEach(t=>{const o=document.createElement("option");o.value=t;o.textContent=t;kg.appendChild(o);});
+  fillSessions(meta.sessions);
+  // auth seg
+  document.querySelectorAll("#authSeg button").forEach(b=>b.onclick=()=>{
+    document.querySelectorAll("#authSeg button").forEach(x=>x.classList.remove("on")); b.classList.add("on");
+    authMode=b.dataset.v; $("passWrap").style.display=authMode==="password"?"flex":"none"; $("keyWrap").style.display=authMode==="key"?"flex":"none";});
+  $("rememberWrap").onclick=()=>{rememberPw=!rememberPw;$("rememberWrap").classList.toggle("on",rememberPw);};
+  $("connBtn").onclick=onConn; $("testBtn").onclick=onTest; $("saveBtn").onclick=onSave; $("manageBtn").onclick=openSessions;
+  $("sessions").onchange=onPickSession;
+  $("upBtn").onclick=()=>startTransfer("upload"); $("downBtn").onclick=()=>startTransfer("download");
+  $("compareBtn").onclick=onCompare; $("syncUpBtn").onclick=()=>onSync("upload"); $("syncDownBtn").onclick=()=>onSync("download");
+  $("watchBtn").onclick=onWatch; $("cancelBtn").onclick=()=>API.cancel();
+  $("keygenBtn").onclick=()=>$("keygenModal").classList.add("show");
+  $("kgClose").onclick=()=>$("keygenModal").classList.remove("show"); $("kgGo").onclick=onKeygen;
+  $("kgCopy").onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText($("kgPub").textContent);toast("Public key copied");};
+  $("kgInstall").onclick=onInstallKey;
+  $("sessClose").onclick=()=>$("sessModal").classList.remove("show");
+  $("debugToggle").onclick=async()=>{const on=!$("debugToggle").classList.contains("on");const r=await API.set_debug(on);$("debugToggle").classList.toggle("on",r.enabled);toast(r.enabled?"Debug log on":"Debug log off");};
+  $("updateCheck").onclick=()=>doUpdate(true); $("updateDismiss").onclick=()=>$("updateBanner").classList.remove("show");
+  ["local","remote"].forEach(side=>{
+    $("filter"+cap(side)).addEventListener("input",e=>{state[side].filter=e.target.value.toLowerCase();renderPane(side);});
+    document.querySelectorAll(`#pane${cap(side)} .icon-btn`).forEach(b=>b.onclick=()=>nav(side,b.dataset.act));
+    document.querySelectorAll(`#pane${cap(side)} thead th`).forEach(th=>th.onclick=()=>{const k=th.dataset.k;const s=state[side];if(s.sort===k)s.dir=-s.dir;else{s.sort=k;s.dir=1;}renderPane(side);});
+    setupDrop(side);
+  });
+  $("pass").addEventListener("keydown",e=>{if(e.key==="Enter")onConn();});
+  document.addEventListener("click",()=>$("ctx").style.display="none");
+  loadLocal(""); // shows drives on Windows / home elsewhere
+  setTimeout(()=>doUpdate(false),1500); // quiet startup check
+}
+function cap(s){return s[0].toUpperCase()+s.slice(1);}
+
+function fillSessions(list){ const s=$("sessions"); s.innerHTML='<option value="">(none)</option>';
+  (list||[]).forEach(x=>{const o=document.createElement("option");o.value=x.name;o.textContent=x.name;o._d=x;s.appendChild(o);}); s._list=list||[]; }
+async function onPickSession(){ const name=$("sessions").value; const x=($("sessions")._list||[]).find(s=>s.name===name); if(!x)return;
+  $("host").value=x.host||""; $("port").value=x.port||"22"; $("user").value=x.username||""; $("startpath").value=x.start_path||"";
+  if(x.auth==="key"){ document.querySelector('#authSeg button[data-v="key"]').click(); $("keypath").value=x.key_path||""; }
+  else { document.querySelector('#authSeg button[data-v="password"]').click(); }
+  if(x.remember){ const r=await API.get_remembered(x.host,x.username); if(r.password){$("pass").value=r.password;} } }
+
+function connParams(){ return { host:$("host").value, port:$("port").value, username:$("user").value,
+  password:authMode==="password"?$("pass").value:"", key_path:authMode==="key"?$("keypath").value:"",
+  passphrase:authMode==="key"?$("pass").value:"", start_path:$("startpath").value }; }
+
+async function onConn(){
+  if(connected){ await API.disconnect(); connected=false; setConn("","Disconnected");
+    $("connBtn").textContent="Connect"; $("connBtn").className="btn-primary";
+    ["upBtn","downBtn","compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=true);
+    state.remote.entries=[]; renderPane("remote"); $("crumbsRemote").textContent="(not connected)"; $("latency").textContent=""; return; }
+  setConn("busy","Connecting..."); $("connBtn").disabled=true;
+  const r=await API.connect(connParams()); $("connBtn").disabled=false;
+  if(!r.ok){ setConn("err","Failed"); toast(r.error||"Connection failed",true); return; }
+  connected=true; setConn("live","Connected"); $("connBtn").textContent="Disconnect"; $("connBtn").className="btn-danger";
+  ["compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=false);
+  $("filterRemote").disabled=false;
+  loadRemote(r.cwd); pollHealth();
+}
+async function onTest(){ setConn("busy","Testing..."); const r=await API.test_connection(connParams());
+  setConn(connected?"live":"", connected?"Connected":"Not connected"); toast(r.ok?"Connection OK":("Test failed: "+(r.error||"")),!r.ok); }
+function setConn(s,t){ $("connDot").className="dot"+(s?" "+s:""); $("connText").textContent=t; }
+
+async function onSave(){ const name=await prompt2("Save session as","Name"); if(!name)return;
+  const p=connParams(); const r=await API.save_session({name, host:p.host, port:p.port, username:p.username,
+    auth:authMode, key_path:p.key_path, start_path:p.start_path, remember:rememberPw});
+  fillSessions(r.sessions); $("sessions").value=name; toast("Saved"); }
+
+let pollTimer=null;
+function pollHealth(){ clearTimeout(pollTimer); if(!connected)return;
+  API.ping().then(r=>{ if(!r.ok){ $("connDot").className="dot warn"; $("latency").textContent="(reconnect needed)"; }
+    else { $("connDot").className="dot live"; $("latency").textContent=r.ms+" ms"; } pollTimer=setTimeout(pollHealth,5000); }); }
+
+/* ───── listing/nav ───── */
+async function loadLocal(path){ const r=await API.list_local(path); if(!r.ok){toast(r.error,true);return;}
+  pushHist("local",r.cwd); state.local.cwd=r.cwd; state.local.entries=r.entries; state.local.sel=new Set(); compareMap=null; renderPane("local"); setCrumbs("local",r.cwd); }
+async function loadRemote(path){ if(!connected)return; const r=await API.list_remote(path); if(!r.ok){toast(r.error,true);return;}
+  pushHist("remote",r.cwd); state.remote.cwd=r.cwd; state.remote.entries=r.entries; state.remote.sel=new Set(); compareMap=null; renderPane("remote"); setCrumbs("remote",r.cwd); }
+function refresh(side){ side==="local"?reloadLocal():loadRemote(state.remote.cwd); }
+function reloadLocal(){ API.list_local(state.local.cwd).then(r=>{if(r.ok){state.local.entries=r.entries;renderPane("local");}}); }
+function pushHist(side,cwd){ const s=state[side]; if(s.hist[s.hi]===cwd)return; s.hist=s.hist.slice(0,s.hi+1); s.hist.push(cwd); s.hi=s.hist.length-1; }
+function setCrumbs(side,cwd){ $("crumbs"+cap(side)).textContent=cwd; }
+async function nav(side,act){ const s=state[side];
+  if(act==="refresh"){refresh(side);return;}
+  if(act==="up"){ const r=side==="local"?await API.list_local(s.cwd):await API.list_remote(s.cwd); const parent=r.parent; if(parent!=null) (side==="local"?loadLocal:loadRemote)(parent); return; }
+  if(act==="back"&&s.hi>0){ s.hi--; gotoHist(side); } if(act==="fwd"&&s.hi<s.hist.length-1){ s.hi++; gotoHist(side); } }
+function gotoHist(side){ const s=state[side]; const cwd=s.hist[s.hi];
+  (side==="local"?API.list_local(cwd):API.list_remote(cwd)).then(r=>{ if(r.ok){ s.cwd=r.cwd; s.entries=r.entries; s.sel=new Set(); renderPane(side); setCrumbs(side,r.cwd);} }); }
+
+function renderPane(side){
+  const s=state[side]; const tb=$("tbody"+cap(side)); tb.innerHTML="";
+  let entries=s.entries.slice();
+  if(s.filter) entries=entries.filter(e=>e.name.toLowerCase().includes(s.filter));
+  entries.sort((a,b)=>{ if(a.is_dir!==b.is_dir)return a.is_dir?-1:1; let x=a[s.sort],y=b[s.sort];
+    if(s.sort==="name"){x=(""+x).toLowerCase();y=(""+y).toLowerCase();} return x<y?-s.dir:x>y?s.dir:0; });
+  const frag=document.createDocumentFragment();
+  entries.forEach(e=>{ const idx=s.entries.indexOf(e); const tr=document.createElement("tr");
+    if(s.sel.has(idx))tr.className="sel";
+    if(compareMap&&!e.is_dir&&compareMap[side]&&compareMap[side][e.name])tr.classList.add("c-"+compareMap[side][e.name]);
+    tr.draggable=!e.is_dir||true;
+    tr.innerHTML=`<td class="name"><span class="ic ${e.is_dir?'':'file'}">${e.is_dir?'\u25B8':'\u00B7'}</span>${esc(e.name)}</td>`+
+      `<td class="size">${e.is_dir?'':hsize(e.size)}</td><td class="mod">${fmod(e.mtime)}</td>`;
+    tr.onclick=(ev)=>{ if(ev.ctrlKey||ev.metaKey){ s.sel.has(idx)?s.sel.delete(idx):s.sel.add(idx); } else { s.sel=new Set([idx]); } renderPane(side); updateXfer(); };
+    tr.ondblclick=()=>{ if(e.is_dir){ (side==="local"?loadLocal:loadRemote)(joinp(side,s.cwd,e.name)); } else if(side==="remote"){ startTransfer("download",[idx]); } else { API.open_local(s.cwd,e.name); } };
+    tr.oncontextmenu=(ev)=>{ ev.preventDefault(); if(!s.sel.has(idx)){s.sel=new Set([idx]);renderPane(side);updateXfer();} showCtx(ev,side,e); };
+    tr.ondragstart=(ev)=>{ if(!s.sel.has(idx)){s.sel=new Set([idx]);renderPane(side);updateXfer();} ev.dataTransfer.setData("text/side",side); };
+    frag.appendChild(tr); });
+  tb.appendChild(frag);
+}
+function esc(s){return (s+"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+function joinp(side,cwd,name){ if(side==="local"){ if(cwd==="DRIVES")return name; return cwd.replace(/[\\/]+$/,"")+"\\"+name; } return (cwd==="/"?"":cwd)+"/"+name; }
+function updateXfer(){ $("upBtn").disabled=!(connected&&state.local.sel.size); $("downBtn").disabled=!(connected&&state.remote.sel.size); }
+
+function selItems(side){ const s=state[side]; return [...s.sel].map(i=>s.entries[i]).filter(Boolean).map(e=>({name:e.name,is_dir:e.is_dir})); }
+
+/* ───── transfers ───── */
+async function startTransfer(direction,forceIdx){
+  if(!connected||busy)return;
+  let jobs;
+  if(forceIdx){ const side=direction==="download"?"remote":"local"; jobs=forceIdx.map(i=>({name:state[side].entries[i].name,is_dir:state[side].entries[i].is_dir})); }
+  else jobs=selItems(direction==="upload"?"local":"remote");
+  if(!jobs.length)return;
+  // safe overwrite: detect name collisions on the destination
+  const destSide=direction==="upload"?"remote":"local";
+  const destNames=new Set(state[destSide].entries.map(e=>e.name));
+  const collide=jobs.filter(j=>destNames.has(j.name));
+  let policy="overwrite";
+  if(collide.length){ const choice=await confirm3("Overwrite?", collide.length+" item(s) already exist in the destination. Overwrite them, or skip existing?","Overwrite","Skip existing");
+    if(choice===null)return; if(choice==="skip"){ jobs=jobs.filter(j=>!destNames.has(j.name)); if(!jobs.length){toast("Nothing to transfer (all skipped)");return;} } }
+  busy=true; $("cancelBtn").disabled=false; $("statusText").textContent="";
+  const r=await API.transfer(jobs,direction,state.local.cwd,state.remote.cwd,policy);
+  if(!r.ok){ busy=false; $("cancelBtn").disabled=true; toast(r.error||"Transfer failed",true); }
+}
+function setupDrop(side){ const pane=$("pane"+cap(side));
+  pane.addEventListener("dragover",e=>{e.preventDefault();pane.classList.add("dragover");});
+  pane.addEventListener("dragleave",()=>pane.classList.remove("dragover"));
+  pane.addEventListener("drop",e=>{ e.preventDefault(); pane.classList.remove("dragover"); const from=e.dataTransfer.getData("text/side");
+    if(from&&from!==side){ startTransfer(from==="local"?"upload":"download"); } }); }
+
+/* ───── compare / sync / watch ───── */
+async function onCompare(){ if(!connected)return; const r=await API.compare(state.local.cwd,state.remote.cwd);
+  if(!r.ok){toast(r.error,true);return;} const res=r.result; compareMap={local:{},remote:{}};
+  for(const n in res){ compareMap.local[n]=res[n]; compareMap.remote[n]=res[n]; } renderPane("local"); renderPane("remote");
+  const c={};["same","newer_local","newer_remote","local_only","remote_only"].forEach(k=>c[k]=0); for(const n in res)c[res[n]]++;
+  $("statusText").textContent=`Compared: ${c.newer_local} newer here, ${c.newer_remote} newer remote, ${c.local_only} local-only, ${c.remote_only} remote-only`; }
+async function onSync(direction){ if(!connected||busy)return;
+  const msg=direction==="upload"?"Upload new/changed files from local to remote?":"Download new/changed files from remote to local?";
+  if(!await confirm2("Sync folder",msg))return; busy=true; $("cancelBtn").disabled=false;
+  const r=await API.sync(state.local.cwd,state.remote.cwd,direction,true);
+  if(!r.ok){busy=false;$("cancelBtn").disabled=true;toast(r.error||"Sync failed",true);return;}
+  if(r.total===0){busy=false;$("cancelBtn").disabled=true;toast("Already in sync, nothing to transfer");} }
+let watching=false;
+async function onWatch(){ if(!connected)return;
+  if(watching){ await API.stop_watch(); watching=false; $("watchBtn").classList.remove("btn-primary"); $("watchBtn").classList.add("btn-ghost"); $("watchBtn").textContent="Watch"; $("statusText").textContent="Watch stopped"; return; }
+  if(!await confirm2("Watch local folder","Auto-upload changes from this local folder to the current remote folder while on?"))return;
+  const r=await API.start_watch(state.local.cwd,state.remote.cwd); if(!r.ok){toast(r.error,true);return;}
+  watching=true; $("watchBtn").classList.add("btn-primary"); $("watchBtn").classList.remove("btn-ghost"); $("watchBtn").textContent="Watching"; $("statusText").textContent="Watching "+state.local.cwd; }
+
+/* ───── context menu ───── */
+function showCtx(ev,side,e){ const m=$("ctx"); m.innerHTML="";
+  const add=(label,fn,danger)=>{const b=document.createElement("button");b.textContent=label;if(danger)b.className="danger";b.onclick=()=>{m.style.display="none";fn();};m.appendChild(b);};
+  const sep=()=>{const d=document.createElement("div");d.className="sepd";m.appendChild(d);};
+  if(side==="local"){ add("Upload",()=>startTransfer("upload")); if(!e.is_dir)add("Open",()=>API.open_local(state.local.cwd,e.name)); }
+  else { add("Download",()=>startTransfer("download")); if(e.is_dir)add("Calculate size",()=>calcSize(e.name)); }
+  sep(); add("Rename",()=>renameItem(side,e)); add("New folder",()=>newFolder(side)); sep();
+  add("Delete",()=>deleteSel(side),true);
+  m.style.display="block"; m.style.left=Math.min(ev.clientX,window.innerWidth-190)+"px"; m.style.top=Math.min(ev.clientY,window.innerHeight-220)+"px"; }
+async function renameItem(side,e){ const nn=await prompt2("Rename","New name",e.name); if(!nn||nn===e.name)return;
+  const r=await API.rename(side,state[side].cwd,e.name,nn); if(!r.ok){toast(r.error,true);return;} refresh(side); }
+async function newFolder(side){ const nn=await prompt2("New folder","Folder name"); if(!nn)return;
+  const r=await API.make_dir(side,state[side].cwd,nn); if(!r.ok){toast(r.error,true);return;} refresh(side); }
+async function deleteSel(side){ const items=selItems(side); if(!items.length)return;
+  if(!await confirm2("Delete",`Delete ${items.length} item(s) from ${side}? This cannot be undone.`))return;
+  const r=await API.delete(side,state[side].cwd,items); if(r.errors&&r.errors.length)toast(r.errors.length+" could not be deleted",true); refresh(side); }
+async function calcSize(name){ $("statusText").textContent="Calculating size..."; $("cancelBtn").disabled=false;
+  const r=await API.calc_remote_size(state.remote.cwd,name); $("cancelBtn").disabled=true;
+  if(r.ok)$("statusText").textContent=`${name}: ${r.human} across ${r.files} file(s)`; else toast(r.error,true); }
+
+/* ───── keygen ───── */
+let lastPub="";
+async function onKeygen(){ const path=$("kgPath").value.trim(); if(!path){toast("Enter a save path",true);return;}
+  $("kgGo").disabled=true; const r=await API.generate_key($("kgType").value,path,$("kgPass").value); $("kgGo").disabled=false;
+  if(!r.ok){toast(r.error,true);return;} lastPub=r.public; $("kgPub").textContent=r.public; $("kgResult").style.display="block";
+  $("kgInstall").disabled=!connected; toast("Key pair created"); }
+async function onInstallKey(){ if(!connected||!lastPub)return; const r=await API.install_pubkey(lastPub);
+  toast(r.ok?(r.already?"Key already present on server":"Public key installed on server"):("Failed: "+r.error),!r.ok); }
+
+/* ───── sessions manage ───── */
+function openSessions(){ const list=$("sessions")._list||[]; const box=$("sessList"); box.innerHTML="";
+  if(!list.length)box.innerHTML='<div class="meta" style="color:var(--text-dim)">No saved sessions yet.</div>';
+  list.forEach(x=>{ const d=document.createElement("div"); d.className="sess-item";
+    d.innerHTML=`<div class="nm">${esc(x.name)}<div class="meta">${esc(x.username)}@${esc(x.host)}:${x.port||22} \u00b7 ${x.auth}${x.remember?" \u00b7 pw saved":""}</div></div>`;
+    const del=document.createElement("button"); del.className="btn-ghost btn-sm"; del.textContent="Delete";
+    del.onclick=async()=>{ const r=await API.delete_session(x.name); fillSessions(r.sessions); openSessions(); }; d.appendChild(del); box.appendChild(d); });
+  $("sessModal").classList.add("show"); }
+
+/* ───── update check ───── */
+async function doUpdate(manual){ const r=await API.check_update();
+  if(!r.ok){ if(manual)toast("Update check failed (offline?)",true); return; }
+  if(r.update){ $("updateMsg").innerHTML=`<b>v${r.latest}</b> is available (you have v${r.current}).`; $("updateBanner").classList.add("show");
+    $("updateView").onclick=()=>API.open_url(r.url); }
+  else if(manual)toast("You're on the latest version (v"+r.current+")"); }
+
+/* ───── tiny modal helpers ───── */
+function confirm2(title,text){ return new Promise(res=>{ $("cfTitle").textContent=title; $("cfText").textContent=text; $("cfOk").textContent="OK"; $("cfOk").className="btn-danger";
+  $("confirmModal").classList.add("show"); $("cfOk").onclick=()=>{$("confirmModal").classList.remove("show");res(true);}; $("cfCancel").onclick=()=>{$("confirmModal").classList.remove("show");res(false);}; }); }
+function confirm3(title,text,okLabel,altLabel){ return new Promise(res=>{ $("cfTitle").textContent=title; $("cfText").textContent=text;
+  const ok=$("cfOk"); ok.textContent=okLabel; ok.className="btn-primary"; const cancel=$("cfCancel");
+  // reuse: OK=overwrite, add temp alt button
+  let alt=document.getElementById("cfAlt"); if(!alt){alt=document.createElement("button");alt.id="cfAlt";alt.className="btn-ghost";ok.parentNode.insertBefore(alt,ok);} alt.textContent=altLabel; alt.style.display="";
+  $("confirmModal").classList.add("show");
+  ok.onclick=()=>{$("confirmModal").classList.remove("show");alt.style.display="none";res("overwrite");};
+  alt.onclick=()=>{$("confirmModal").classList.remove("show");alt.style.display="none";res("skip");};
+  cancel.onclick=()=>{$("confirmModal").classList.remove("show");alt.style.display="none";res(null);}; }); }
+function prompt2(title,label,val){ return new Promise(res=>{ $("pmTitle").textContent=title; $("pmInput").value=val||""; $("pmInput").placeholder=label||"";
+  $("promptModal").classList.add("show"); setTimeout(()=>$("pmInput").focus(),50);
+  $("pmOk").onclick=()=>{$("promptModal").classList.remove("show");res($("pmInput").value.trim());};
+  $("pmCancel").onclick=()=>{$("promptModal").classList.remove("show");res(null);};
+  $("pmInput").onkeydown=e=>{if(e.key==="Enter")$("pmOk").click();}; }); }
+</script>
+</body>
+</html>

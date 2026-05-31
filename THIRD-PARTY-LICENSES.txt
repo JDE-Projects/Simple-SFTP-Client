@@ -1,0 +1,44 @@
+THIRD-PARTY LICENSES
+====================
+
+The Simple SFTP Client source is MIT licensed (see LICENSE). The packaged
+Windows .exe bundles the third-party components below. Each remains under its
+own license. This file is a notice, not legal advice.
+
+------------------------------------------------------------------
+pywebview                         BSD 3-Clause
+  https://github.com/r0x0r/pywebview
+
+PyQt6 / PyQt6-WebEngine            GPL v3, OR a commercial Riverbank license.
+  https://www.riverbankcomputing.com/software/pyqt/
+  Note: PyQt6 is GPL v3 unless you hold a commercial license. Bundling it in a
+  distributed binary brings that binary under GPL v3 terms (the MIT source
+  license still applies to this project's own code). Review your obligations
+  before distributing the .exe publicly, or use a Qt commercial license.
+
+Qt (The Qt Company)                LGPL v3, OR a commercial Qt license.
+  https://www.qt.io/licensing/
+
+paramiko                           GNU LGPL v2.1
+  https://www.paramiko.org/
+
+cryptography                       Apache License 2.0 OR BSD 3-Clause
+  https://github.com/pyca/cryptography
+
+bcrypt                             Apache License 2.0   (paramiko dependency)
+  https://github.com/pyca/bcrypt
+
+PyNaCl                             Apache License 2.0   (paramiko dependency)
+  https://github.com/pyca/pynacl
+
+keyring                            MIT License
+  https://github.com/jaraco/keyring
+
+Sora (font)                        SIL Open Font License 1.1
+  https://fonts.google.com/specimen/Sora
+
+JetBrains Mono (font)              SIL Open Font License 1.1
+  https://www.jetbrains.com/lp/mono/
+
+------------------------------------------------------------------
+Full license texts are available at the URLs above.

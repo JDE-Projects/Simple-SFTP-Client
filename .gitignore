@@ -1,0 +1,17 @@
+# Saved sessions (host / user / key paths; never passwords) - keep private
+servers.json
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+
+# Personal local launcher (not for distribution)
+Launch_*.bat
+
+# Optional debug logs (written next to the exe when toggled on)
+Debug_Log_*.txt
