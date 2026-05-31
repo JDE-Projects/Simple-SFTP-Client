@@ -25,6 +25,7 @@ import shutil
 import threading
 import traceback
 import webbrowser
+import socket
 import posixpath
 from datetime import datetime
 from urllib.request import Request, urlopen
@@ -123,6 +124,38 @@ def fmt_time(ts):
         return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
     except Exception:
         return ""
+
+
+def friendly_error(e):
+    """Plain-language message for the UI; full detail goes to the debug log."""
+    try:
+        debug.log("error detail", f"{type(e).__name__}: {e}")
+    except Exception:
+        pass
+    if isinstance(e, paramiko.AuthenticationException):
+        return "Authentication failed. Check the username, password, or key."
+    if isinstance(e, paramiko.SSHException):
+        m = str(e)
+        if "negotiat" in m.lower() or "incompatible" in m.lower():
+            return ("Could not negotiate a secure connection. This server may only "
+                    "offer outdated algorithms, which this client refuses for safety.")
+        return m or "SSH connection error."
+    if isinstance(e, socket.gaierror):
+        return "Could not resolve that host name. Check the address."
+    if isinstance(e, (TimeoutError, socket.timeout)):
+        return "Connection timed out. Check the host, port, and network."
+    if isinstance(e, ConnectionRefusedError):
+        return "Connection refused. Check the port and that the server is running."
+    if isinstance(e, PermissionError):
+        return "Permission denied. Choose a location you can write to."
+    if isinstance(e, FileNotFoundError):
+        return f"Not found: {e.filename or 'the requested path'}"
+    if isinstance(e, IsADirectoryError):
+        return "That path is a folder. Include a filename."
+    if isinstance(e, OSError):
+        base = e.strerror or "The operation failed"
+        return f"{base}: {e.filename}" if getattr(e, "filename", None) else base
+    return "Something went wrong. Turn on the debug log for details."
 
 
 class Api:
@@ -260,7 +293,7 @@ class Api:
             return {"ok": False, "error": msg}
         except Exception as e:
             debug.log("CONNECT failed", traceback.format_exc())
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": friendly_error(e)}
 
     def _transport_info(self):
         try:
@@ -278,7 +311,7 @@ class Api:
             c.close()
             return {"ok": True}
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": friendly_error(e)}
 
     def disconnect(self):
         self.stop_watch()
@@ -330,7 +363,7 @@ class Api:
                 parent = "DRIVES"
             return {"ok": True, "cwd": path, "parent": parent, "entries": entries}
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": friendly_error(e)}
 
     def list_remote(self, path):
         if not self.connected:
@@ -344,7 +377,7 @@ class Api:
             parent = posixpath.dirname(path.rstrip("/")) or "/"
             return {"ok": True, "cwd": path, "parent": parent, "entries": entries}
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": friendly_error(e)}
 
     # ───────────── file ops ─────────────
     def make_dir(self, side, path, name):
@@ -355,7 +388,7 @@ class Api:
                 self.sftp.mkdir(posixpath.join(path, name))
             return {"ok": True}
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": friendly_error(e)}
 
     def rename(self, side, path, old, new):
         try:
@@ -365,7 +398,7 @@ class Api:
                 self.sftp.rename(posixpath.join(path, old), posixpath.join(path, new))
             return {"ok": True}
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": friendly_error(e)}
 
     def delete(self, side, path, items):
         errs = []
@@ -392,7 +425,7 @@ class Api:
             os.startfile(os.path.join(path, name))  # noqa (Windows)
             return {"ok": True}
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": friendly_error(e)}
 
     # ───────────── transfers (queue + progress + resume + retry) ─────────────
     def cancel(self):
@@ -575,7 +608,7 @@ class Api:
                     out[n] = "newer_local" if loc[n][1] >= rem[n][1] else "newer_remote"
             return {"ok": True, "result": out}
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": friendly_error(e)}
 
     def sync(self, local_dir, remote_dir, direction, changed_only=True):
         cmp = self.compare(local_dir, remote_dir)
@@ -624,7 +657,7 @@ class Api:
             return {"ok": True, "bytes": total["bytes"], "human": human_size(total["bytes"]),
                     "files": total["files"]}
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": friendly_error(e)}
 
     # ───────────── keygen / install key ─────────────
     def default_key_path(self, key_type):
@@ -717,7 +750,7 @@ class Api:
             self.sftp.chmod(ak, 0o600)
             return {"ok": True}
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": friendly_error(e)}
 
     # ───────────── upload watcher ─────────────
     def start_watch(self, local_dir, remote_dir):
@@ -754,7 +787,7 @@ class Api:
                         self.sftp.put(fp, rp)
                         self._emit("watch", {"file": rel, "ok": True})
                     except Exception as e:
-                        self._emit("watch", {"file": rel, "ok": False, "error": str(e)})
+                        self._emit("watch", {"file": rel, "ok": False, "error": friendly_error(e)})
                 last = cur
 
         self._watch_thread = threading.Thread(target=loop, daemon=True)
@@ -794,7 +827,7 @@ class Api:
             return {"ok": True, "current": APP_VERSION, "latest": tag, "update": newer,
                     "notes": (data.get("body") or "")[:1500], "url": data.get("html_url", "")}
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": friendly_error(e)}
 
     def _is_newer(self, latest, current):
         def parts(v):
@@ -815,7 +848,7 @@ class Api:
             webbrowser.open(url)
             return {"ok": True}
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": friendly_error(e)}
 
 
 # ───────────── splash + main ─────────────
