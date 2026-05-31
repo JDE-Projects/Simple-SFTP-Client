@@ -218,9 +218,11 @@
 <div id="keygenModal" class="modal"><div class="card">
   <h3>Generate key pair</h3>
   <div class="row"><div class="f"><label class="field-label">Type</label><select id="kgType"></select></div>
-    <div class="f" style="flex:2 1 auto"><label class="field-label">Save private key as (full path)</label><input id="kgPath" class="mono" placeholder="C:\Users\you\.ssh\id_ed25519"></div></div>
+    <div class="f" style="flex:2 1 auto"><label class="field-label">Save private key as</label>
+      <div style="display:flex;gap:8px"><input id="kgPath" class="mono" style="flex:1 1 auto" placeholder="C:\Users\you\.ssh\id_ed25519"><button id="kgBrowse" class="btn-ghost btn-sm" style="margin:0;white-space:nowrap">Browse...</button></div>
+      <div class="meta" style="color:var(--text-dim);margin-top:5px">The public key is saved next to it as the same name + <b>.pub</b>.</div></div></div>
   <div class="row"><div class="f"><label class="field-label">Passphrase (optional)</label><input id="kgPass" type="password"></div></div>
-  <div id="kgResult" style="display:none"><label class="field-label">Public key (copy to the server)</label><pre class="pub" id="kgPub"></pre>
+  <div id="kgResult" style="display:none"><div id="kgSaved" class="meta" style="color:var(--green);margin-bottom:6px"></div><label class="field-label">Public key (copy to the server)</label><pre class="pub" id="kgPub"></pre>
     <div style="margin:8px 0"><button id="kgInstall" class="btn-ghost btn-sm" disabled title="Append to ~/.ssh/authorized_keys on the connected server">Install on connected server</button>
     <button id="kgCopy" class="btn-ghost btn-sm">Copy public key</button></div></div>
   <div class="modal-actions"><button id="kgClose" class="btn-ghost">Close</button><button id="kgGo" class="btn-primary">Generate</button></div>
@@ -279,7 +281,8 @@ async function init(){
   $("upBtn").onclick=()=>startTransfer("upload"); $("downBtn").onclick=()=>startTransfer("download");
   $("compareBtn").onclick=onCompare; $("syncUpBtn").onclick=()=>onSync("upload"); $("syncDownBtn").onclick=()=>onSync("download");
   $("watchBtn").onclick=onWatch; $("cancelBtn").onclick=()=>API.cancel();
-  $("keygenBtn").onclick=()=>$("keygenModal").classList.add("show");
+  $("keygenBtn").onclick=openKeygen;
+  $("kgBrowse").onclick=async()=>{ const sug=$("kgType").value.startsWith("Ed25519")?"id_ed25519":"id_rsa"; const p=await API.browse_save_key(sug); if(p)$("kgPath").value=p; };
   $("kgClose").onclick=()=>$("keygenModal").classList.remove("show"); $("kgGo").onclick=onKeygen;
   $("kgCopy").onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText($("kgPub").textContent);toast("Public key copied");};
   $("kgInstall").onclick=onInstallKey;
@@ -445,9 +448,14 @@ async function calcSize(name){ $("statusText").textContent="Calculating size..."
 
 /* ───── keygen ───── */
 let lastPub="";
+async function openKeygen(){ $("keygenModal").classList.add("show"); $("kgResult").style.display="none";
+  if(!$("kgPath").value.trim()){ try{ $("kgPath").value=await API.default_key_path($("kgType").value); }catch(e){} } }
 async function onKeygen(){ const path=$("kgPath").value.trim(); if(!path){toast("Enter a save path",true);return;}
   $("kgGo").disabled=true; const r=await API.generate_key($("kgType").value,path,$("kgPass").value); $("kgGo").disabled=false;
-  if(!r.ok){toast(r.error,true);return;} lastPub=r.public; $("kgPub").textContent=r.public; $("kgResult").style.display="block";
+  if(!r.ok){toast(r.error,true);return;} lastPub=r.public; $("kgPub").textContent=r.public;
+  if(r.created_dir) toast("Created folder: "+r.created_dir);
+  $("kgSaved").textContent="Saved: "+r.private_path+"  +  "+r.public_path;
+  $("kgResult").style.display="block";
   $("kgInstall").disabled=!connected; toast("Key pair created"); }
 async function onInstallKey(){ if(!connected||!lastPub)return; const r=await API.install_pubkey(lastPub);
   toast(r.ok?(r.already?"Key already present on server":"Public key installed on server"):("Failed: "+r.error),!r.ok); }

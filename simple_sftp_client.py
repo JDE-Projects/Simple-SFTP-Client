@@ -627,7 +627,35 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     # ───────────── keygen / install key ─────────────
+    def default_key_path(self, key_type):
+        name = "id_ed25519" if (key_type or "").startswith("Ed25519") else "id_rsa"
+        return os.path.join(os.path.expanduser("~"), ".ssh", name)
+
+    def browse_save_key(self, suggested):
+        if not self._window:
+            return ""
+        res = self._window.create_file_dialog(
+            webview.SAVE_DIALOG, save_filename=suggested or "id_ed25519")
+        if not res:
+            return ""
+        return res if isinstance(res, str) else res[0]
+
     def generate_key(self, key_type, out_path, passphrase):
+        out_path = (out_path or "").strip().strip('"')
+        if not out_path:
+            return {"ok": False, "error": "Enter a save location for the key."}
+        default_name = "id_ed25519" if key_type.startswith("Ed25519") else "id_rsa"
+        # if a folder (or trailing slash) was given, drop the default key name in it
+        if os.path.isdir(out_path) or out_path.endswith(("\\", "/")):
+            out_path = os.path.join(out_path, default_name)
+        created_dir = None
+        parent = os.path.dirname(out_path) or "."
+        if not os.path.isdir(parent):
+            try:
+                os.makedirs(parent, exist_ok=True)
+                created_dir = parent
+            except OSError:
+                return {"ok": False, "error": f"Couldn't create the folder {parent} \u2014 choose a location you can write to."}
         try:
             if key_type.startswith("Ed25519"):
                 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -649,15 +677,20 @@ class Api:
                 f.write(priv)
             try:
                 os.chmod(out_path, 0o600)
-            except Exception:
+            except OSError:
                 pass
             pubtext = pub.decode().strip() + " simple-sftp-client"
             with open(out_path + ".pub", "w", encoding="utf-8") as f:
                 f.write(pubtext + "\n")
             debug.log("KEYGEN", {"type": key_type, "path": out_path})
-            return {"ok": True, "public": pubtext, "private_path": out_path}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": True, "public": pubtext, "private_path": out_path,
+                    "public_path": out_path + ".pub", "created_dir": created_dir}
+        except PermissionError:
+            return {"ok": False, "error": "Couldn't write there (permission denied). Choose a folder you can write to, such as your user's .ssh folder."}
+        except OSError as e:
+            return {"ok": False, "error": f"Couldn't save the key: {e.strerror or 'write failed'}. Try a different location."}
+        except Exception:
+            return {"ok": False, "error": "Key generation failed. Check the type and passphrase and try again."}
 
     def install_pubkey(self, pubtext):
         if not self.connected:
