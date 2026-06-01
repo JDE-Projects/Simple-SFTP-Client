@@ -35,11 +35,11 @@ Unsigned, so SmartScreen may warn the first time: More info > Run anyway.
 
 ## Build from source (optional)
 - Python 3 on PATH.
-- `pip install pywebview PyQt6 PyQt6-WebEngine paramiko keyring`
+- `pip install pywebview PySide6 paramiko keyring`
 - Keep `simple_sftp_client.py`, `simple_sftp_client-UI.html`, the `fonts/`
   folder, the `.ico`, `.png`, and `-splash.png` together.
 - Run from source: `python simple_sftp_client.py`
-- Build the .exe: `Build_Simple_SFTP_Client.bat` -> `dist\Simple SFTP Client.exe`
+- Build the .exe: `Build_Simple_SFTP_Client.bat` -> `dist\Simple SFTP Client\Simple SFTP Client.exe`
 
 ## Using it
 1. Enter host, port, and username, then a password or a private key. Connect.
@@ -74,6 +74,8 @@ direction, and real-world testing were directed by me. The code was written
 and revised with an AI assistant against that direction.
 
 ## License
-Released under the MIT License. Free to use, modify, and distribute; keep the
+Released under the PolyForm Noncommercial License 1.0.0 (see
+[LICENSE](LICENSE)). Personal and any noncommercial use, modification, and
+noncommercial redistribution are permitted; commercial use is not. Keep the
 copyright notice; no warranty. This tool bundles third-party code; see
 [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt).

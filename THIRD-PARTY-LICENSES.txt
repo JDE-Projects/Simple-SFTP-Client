@@ -1,44 +1,23 @@
-THIRD-PARTY LICENSES
-====================
+Simple SFTP Client: Third-Party Licenses
+========================================
 
-The Simple SFTP Client source is MIT licensed (see LICENSE). The packaged
-Windows .exe bundles the third-party components below. Each remains under its
-own license. This file is a notice, not legal advice.
+The Simple SFTP Client source is released under the PolyForm Noncommercial
+License 1.0.0 (see LICENSE). The packaged Windows build bundles the third-party
+components below; each remains under its own license. This file is a notice,
+not legal advice.
 
-------------------------------------------------------------------
-pywebview                         BSD 3-Clause
-  https://github.com/r0x0r/pywebview
+# Always bundled (every app)
+PySide6 / Qt          LGPL-3.0       qt.io/licensing
+pywebview             BSD-3-Clause   github.com/r0x0r/pywebview
+Sora (font)           OFL-1.1        github.com/sora-xor/sora-font
+  Sora Copyright 2019 The Sora Project Authors
+JetBrains Mono        OFL-1.1        github.com/JetBrains/JetBrainsMono
+  JetBrains Mono Copyright 2020 The JetBrains Mono Project Authors
 
-PyQt6 / PyQt6-WebEngine            GPL v3, OR a commercial Riverbank license.
-  https://www.riverbankcomputing.com/software/pyqt/
-  Note: PyQt6 is GPL v3 unless you hold a commercial license. Bundling it in a
-  distributed binary brings that binary under GPL v3 terms (the MIT source
-  license still applies to this project's own code). Review your obligations
-  before distributing the .exe publicly, or use a Qt commercial license.
+# Per-app (this tool's imports)
+Paramiko              LGPL-2.1       paramiko.org   (+ cryptography, bcrypt, PyNaCl)
+cryptography          Apache-2.0 / BSD-3   github.com/pyca/cryptography
+keyring               MIT            github.com/jaraco/keyring
 
-Qt (The Qt Company)                LGPL v3, OR a commercial Qt license.
-  https://www.qt.io/licensing/
-
-paramiko                           GNU LGPL v2.1
-  https://www.paramiko.org/
-
-cryptography                       Apache License 2.0 OR BSD 3-Clause
-  https://github.com/pyca/cryptography
-
-bcrypt                             Apache License 2.0   (paramiko dependency)
-  https://github.com/pyca/bcrypt
-
-PyNaCl                             Apache License 2.0   (paramiko dependency)
-  https://github.com/pyca/pynacl
-
-keyring                            MIT License
-  https://github.com/jaraco/keyring
-
-Sora (font)                        SIL Open Font License 1.1
-  https://fonts.google.com/specimen/Sora
-
-JetBrains Mono (font)              SIL Open Font License 1.1
-  https://www.jetbrains.com/lp/mono/
-
-------------------------------------------------------------------
-Full license texts are available at the URLs above.
+Paramiko's bundled crypto deps (cryptography, bcrypt, PyNaCl) are Apache-2.0.
+Full license texts are available at the source links above.
