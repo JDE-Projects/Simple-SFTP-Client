@@ -147,6 +147,7 @@
     <button id="connBtn" class="btn-primary" style="margin-bottom:0">Connect</button>
     <button id="saveBtn" class="btn-ghost btn-sm" style="margin-bottom:0">Save</button>
     <button id="keygenBtn" class="btn-ghost btn-sm" style="margin-bottom:0">Keygen</button>
+    <button id="hostKeyBtn" class="btn-ghost btn-sm" style="margin-bottom:0">Host key</button>
     <div class="conn-status"><span id="connDot" class="dot"></span><span id="connText">Not connected</span></div>
   </div>
 
@@ -232,7 +233,7 @@
   <div class="modal-actions"><button id="sessClose" class="btn-ghost">Close</button></div></div></div>
 
 <div id="confirmModal" class="modal"><div class="card"><h3 id="cfTitle">Confirm</h3>
-  <p id="cfText" style="font-size:12.5px;line-height:1.5;color:var(--text)"></p>
+  <p id="cfText" style="font-size:12.5px;line-height:1.5;color:var(--text);white-space:pre-line"></p>
   <div class="modal-actions"><button id="cfCancel" class="btn-ghost">Cancel</button><button id="cfOk" class="btn-danger">OK</button></div></div></div>
 
 <div id="promptModal" class="modal"><div class="card"><h3 id="pmTitle">Input</h3>
@@ -282,6 +283,7 @@ async function init(){
   $("compareBtn").onclick=onCompare; $("syncUpBtn").onclick=()=>onSync("upload"); $("syncDownBtn").onclick=()=>onSync("download");
   $("watchBtn").onclick=onWatch; $("cancelBtn").onclick=()=>API.cancel();
   $("keygenBtn").onclick=openKeygen;
+  $("hostKeyBtn").onclick=onViewHostKey;
   $("kgBrowse").onclick=async()=>{ const sug=$("kgType").value.startsWith("Ed25519")?"id_ed25519":"id_rsa"; const p=await API.browse_save_key(sug); if(p)$("kgPath").value=p; };
   $("kgClose").onclick=()=>$("keygenModal").classList.remove("show"); $("kgGo").onclick=onKeygen;
   $("kgCopy").onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText($("kgPub").textContent);toast("Public key copied");};
@@ -320,12 +322,44 @@ async function onConn(){
     ["upBtn","downBtn","compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=true);
     state.remote.entries=[]; renderPane("remote"); $("crumbsRemote").textContent="(not connected)"; $("latency").textContent=""; return; }
   setConn("busy","Connecting..."); $("connBtn").disabled=true;
-  const r=await API.connect(connParams()); $("connBtn").disabled=false;
-  if(!r.ok){ setConn("err","Failed"); toast(r.error||"Connection failed",true); return; }
-  connected=true; setConn("live","Connected"); $("connBtn").textContent="Disconnect"; $("connBtn").className="btn-danger";
-  ["compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=false);
-  $("filterRemote").disabled=false;
-  loadRemote(r.cwd); pollHealth();
+  await doConnect();
+  $("connBtn").disabled=false;
+}
+
+async function doConnect(){
+  const r=await API.connect(connParams());
+  if(r.ok){
+    connected=true; setConn("live","Connected"); $("connBtn").textContent="Disconnect"; $("connBtn").className="btn-danger";
+    ["compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=false);
+    $("filterRemote").disabled=false; loadRemote(r.cwd); pollHealth(); return true;
+  }
+  if(r.host_key_unknown){
+    const okTrust=await confirm2("Unknown host key",
+      `First time connecting to ${r.host}.\n\nKey type: ${r.key_type}\nFingerprint: ${r.fingerprint}\n\nAccept and remember this host?`);
+    if(!okTrust){ setConn("","Not connected"); return false; }
+    const t=await API.trust_host_key(); if(!t.ok){ setConn("err","Failed"); toast(t.error||"Could not save host key",true); return false; }
+    return await doConnect();
+  }
+  if(r.host_key_changed){
+    const okRep=await confirm2("Warning: host key changed",
+      `The host key for ${r.host} has CHANGED since you last trusted it.\n\nThis is expected if the server was rebuilt, but it can also mean the connection is being intercepted.\n\nOld: ${r.old_fingerprint}\nNew (${r.key_type}): ${r.new_fingerprint}\n\nReplace the saved key only if you expected this.`);
+    if(!okRep){ setConn("","Not connected"); return false; }
+    const t=await API.trust_host_key(); if(!t.ok){ setConn("err","Failed"); toast(t.error||"Could not save host key",true); return false; }
+    return await doConnect();
+  }
+  setConn("err","Failed"); toast(r.error||"Connection failed",true); return false;
+}
+
+function infoBox(title,text){ $("cfTitle").textContent=title; $("cfText").textContent=text;
+  $("cfOk").textContent="Close"; $("cfOk").className="btn-primary"; $("cfCancel").style.display="none";
+  $("confirmModal").classList.add("show");
+  $("cfOk").onclick=()=>{ $("confirmModal").classList.remove("show"); $("cfCancel").style.display=""; $("cfOk").textContent="OK"; }; }
+
+async function onViewHostKey(){ const host=$("host").value.trim(); const port=$("port").value.trim()||"22";
+  if(!host){ toast("Enter a host first",true); return; }
+  const r=await API.get_host_key(host, port);
+  if(r.known && r.entries && r.entries.length){ infoBox("Host key \u2014 "+r.host, r.entries.map(x=>x.key_type+"\n"+x.fingerprint).join("\n\n")); }
+  else { infoBox("Host key \u2014 "+r.host, "No host key is pinned yet for "+r.host+".\nIt is recorded the first time you connect and accept it."); }
 }
 async function onTest(){ setConn("busy","Testing..."); const r=await API.test_connection(connParams());
   setConn(connected?"live":"", connected?"Connected":"Not connected"); toast(r.ok?"Connection OK":("Test failed: "+(r.error||"")),!r.ok); }

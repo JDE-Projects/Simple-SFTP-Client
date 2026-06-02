@@ -1,6 +1,9 @@
 # Saved sessions (host / user / key paths; never passwords) - keep private
 servers.json
 
+# Pinned SSH host keys (trust-on-first-use store)
+known_hosts
+
 # PyInstaller build artifacts
 build/
 dist/

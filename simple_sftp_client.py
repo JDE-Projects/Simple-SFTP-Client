@@ -20,6 +20,8 @@ import sys
 import io
 import stat
 import json
+import base64
+import hashlib
 import time
 import shutil
 import threading
@@ -60,6 +62,43 @@ def exe_dir():
 
 
 SESSIONS_FILE = os.path.join(exe_dir(), "servers.json")
+KNOWN_HOSTS_FILE = os.path.join(exe_dir(), "known_hosts")
+
+
+def hostkey_name(host, port):
+    """The name paramiko stores a host key under (bracketed when not port 22)."""
+    port = int(port or 22)
+    return host if port == 22 else "[%s]:%d" % (host, port)
+
+
+def fingerprint_sha256(key):
+    """OpenSSH-style SHA256 fingerprint, e.g. 'SHA256:abc...' (no padding)."""
+    digest = hashlib.sha256(key.asbytes()).digest()
+    return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
+
+
+def load_known_hosts():
+    hk = paramiko.HostKeys()
+    if os.path.exists(KNOWN_HOSTS_FILE):
+        try:
+            hk.load(KNOWN_HOSTS_FILE)
+        except Exception:
+            pass
+    return hk
+
+
+class UnknownHostKey(Exception):
+    """First contact with a host whose key is not yet pinned."""
+    def __init__(self, hostname, key):
+        super().__init__("unknown host key")
+        self.hostname = hostname
+        self.key = key
+
+
+class _TofuPolicy(paramiko.MissingHostKeyPolicy):
+    """Do not auto-add. Surface the offered key so the UI can ask the user."""
+    def missing_host_key(self, client, hostname, key):
+        raise UnknownHostKey(hostname, key)
 
 
 # ───────────── debug log (off by default) ─────────────
@@ -165,6 +204,7 @@ class Api:
         self.client = None
         self.sftp = None
         self._cred_pass = ""
+        self._pending_host_key = None  # (hostname, offered_key) awaiting user trust
         self._lock = threading.Lock()
         self._cancel = threading.Event()
         self._watch_stop = None
@@ -247,7 +287,14 @@ class Api:
     # ───────────── connect ─────────────
     def _open(self, host, port, username, password, key_path, passphrase):
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        if os.path.exists(KNOWN_HOSTS_FILE):
+            try:
+                client.load_host_keys(KNOWN_HOSTS_FILE)
+            except Exception:
+                pass
+        # Trust on first use: unknown hosts raise UnknownHostKey (user is asked),
+        # a changed key raises paramiko.BadHostKeyException (flagged, not trusted).
+        client.set_missing_host_key_policy(_TofuPolicy())
         kwargs = dict(hostname=host, port=int(port or 22), username=username,
                       timeout=15, allow_agent=False, look_for_keys=False,
                       disabled_algorithms=DISABLED_ALGORITHMS)
@@ -283,6 +330,18 @@ class Api:
             except Exception:
                 start = home
             return {"ok": True, "home": home, "cwd": start, "transport": self._transport_info()}
+        except UnknownHostKey as e:
+            self._pending_host_key = (e.hostname, e.key)
+            debug.log(f"Unknown host key for {host} ({e.key.get_name()}).")
+            return {"ok": False, "host_key_unknown": True, "host": host,
+                    "key_type": e.key.get_name(), "fingerprint": fingerprint_sha256(e.key)}
+        except paramiko.BadHostKeyException as e:
+            self._pending_host_key = (e.hostname, e.key)
+            debug.log(f"HOST KEY CHANGED for {host} - refused.")
+            return {"ok": False, "host_key_changed": True, "host": host,
+                    "key_type": e.key.get_name(),
+                    "new_fingerprint": fingerprint_sha256(e.key),
+                    "old_fingerprint": fingerprint_sha256(e.expected_key)}
         except paramiko.AuthenticationException:
             return {"ok": False, "error": "Authentication failed (check credentials or key)."}
         except paramiko.SSHException as e:
@@ -294,6 +353,49 @@ class Api:
         except Exception as e:
             debug.log("CONNECT failed", traceback.format_exc())
             return {"ok": False, "error": friendly_error(e)}
+
+    def trust_host_key(self):
+        """Pin the host key the user just confirmed, then they may reconnect."""
+        pending = self._pending_host_key
+        self._pending_host_key = None
+        if not pending:
+            return {"ok": False, "error": "No host key is waiting to be trusted."}
+        name, key = pending
+        try:
+            hk = load_known_hosts()
+            if hk.lookup(name):          # replace any prior key for this host
+                del hk[name]
+            hk.add(name, key.get_name(), key)
+            hk.save(KNOWN_HOSTS_FILE)
+            debug.log(f"Trusted host key for {name} ({key.get_name()}).")
+            return {"ok": True, "fingerprint": fingerprint_sha256(key)}
+        except Exception as e:
+            return {"ok": False, "error": f"Could not save the host key: {e}"}
+
+    def get_host_key(self, host, port=22):
+        """Return the pinned key(s) for a host so the UI can show them."""
+        host = (host or "").strip()
+        name = hostkey_name(host, port) if host else ""
+        sub = load_known_hosts().lookup(name) if name else None
+        if not sub:
+            return {"known": False, "host": host}
+        entries = [{"key_type": kt, "fingerprint": fingerprint_sha256(k)}
+                   for kt, k in sub.items()]
+        return {"known": True, "host": host, "entries": entries}
+
+    def forget_host_key(self, host, port=22):
+        """Remove a pinned host key (e.g. before deliberately re-trusting)."""
+        host = (host or "").strip()
+        name = hostkey_name(host, port) if host else ""
+        try:
+            hk = load_known_hosts()
+            if name and hk.lookup(name):
+                del hk[name]
+                hk.save(KNOWN_HOSTS_FILE)
+                debug.log(f"Forgot host key for {name}.")
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": f"Could not remove the host key: {e}"}
 
     def _transport_info(self):
         try:
