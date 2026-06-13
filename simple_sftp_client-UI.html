@@ -101,6 +101,16 @@
     border-radius:var(--radius-sm);padding:6px 12px;font-size:12px;}
   #updateBanner.show{display:flex;}
 
+  /* console (activity log) — height is kept in sync with the connection bar */
+  .console{position:relative;padding:0;overflow:hidden;flex:0 0 auto;}
+  .console-body{height:100%;overflow-y:auto;padding:8px 12px 8px 12px;font-family:"JetBrains Mono",monospace;
+    font-size:11px;line-height:1.65;-webkit-user-select:text;user-select:text;}
+  .cline{white-space:pre-wrap;word-break:break-word;color:var(--text-dim);}
+  .cline .ctime{color:var(--text-faint);margin-right:9px;}
+  .cline.ok{color:var(--green);} .cline.error{color:var(--red);} .cline.warn{color:var(--amber);}
+  .console-empty{color:var(--text-faint);font-style:italic;}
+  #consoleClear{position:absolute;top:7px;right:9px;z-index:2;}
+
   /* modals + context menu */
   .modal{position:fixed;inset:0;background:rgba(6,9,14,.78);display:none;align-items:center;justify-content:center;z-index:60;}
   .modal.show{display:flex;}
@@ -119,9 +129,6 @@
   #ctx button{display:block;width:100%;text-align:left;background:transparent;border:none;color:var(--text);padding:7px 11px;border-radius:6px;font-weight:400;font-size:12.5px;}
   #ctx button:hover{background:rgba(77,214,193,.12);} #ctx .sepd{height:1px;background:var(--border);margin:4px 0;}
   #ctx button.danger{color:var(--red);}
-  #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--panel-2);border:1px solid var(--border-2);
-    color:var(--text);padding:10px 16px;border-radius:9px;font-size:12px;opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;
-    box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:90;max-width:70%;} #toast.show{opacity:1;transform:translateX(-50%) translateY(0);} #toast.err{border-color:var(--red);}
   ::-webkit-scrollbar{width:11px;height:11px;} ::-webkit-scrollbar-thumb{background:var(--border-2);border-radius:6px;border:2px solid var(--bg);}
   .grow{flex:1 1 auto;}
 </style>
@@ -154,16 +161,22 @@
   <div id="updateBanner"><span id="updateMsg"></span><button id="updateView" class="btn-primary btn-sm">View release</button>
     <button id="updateDismiss" class="btn-ghost btn-sm">Dismiss</button></div>
 
+  <!-- console / activity log -->
+  <div class="panel console" id="consoleWrap">
+    <button id="consoleClear" class="icon-btn" title="Clear the console">Clear</button>
+    <div class="console-body" id="console"></div>
+  </div>
+
   <!-- panes -->
   <div class="panes">
     <div class="pane panel" id="paneLocal" data-side="local">
       <div class="pane-head">
         <div class="pane-title">Local</div>
         <div class="navrow">
-          <button class="icon-btn" data-act="back">&#8592;</button>
-          <button class="icon-btn" data-act="fwd">&#8594;</button>
-          <button class="icon-btn" data-act="up">&#8593;</button>
-          <button class="icon-btn" data-act="refresh">&#8635;</button>
+          <button class="icon-btn" data-act="back" title="Back (previous folder)">&#8592;</button>
+          <button class="icon-btn" data-act="fwd" title="Forward (next folder)">&#8594;</button>
+          <button class="icon-btn" data-act="up" title="Up to parent folder">&#8593;</button>
+          <button class="icon-btn" data-act="refresh" title="Refresh this folder">&#8635;</button>
           <span class="crumbs" id="crumbsLocal"></span>
         </div>
         <div class="filter"><input id="filterLocal" type="text" placeholder="Filter this folder..."></div>
@@ -184,10 +197,10 @@
       <div class="pane-head">
         <div class="pane-title">Remote <span id="latency" class="meta" style="font-size:11px;color:var(--text-faint)"></span></div>
         <div class="navrow">
-          <button class="icon-btn" data-act="back">&#8592;</button>
-          <button class="icon-btn" data-act="fwd">&#8594;</button>
-          <button class="icon-btn" data-act="up">&#8593;</button>
-          <button class="icon-btn" data-act="refresh">&#8635;</button>
+          <button class="icon-btn" data-act="back" title="Back (previous folder)">&#8592;</button>
+          <button class="icon-btn" data-act="fwd" title="Forward (next folder)">&#8594;</button>
+          <button class="icon-btn" data-act="up" title="Up to parent folder">&#8593;</button>
+          <button class="icon-btn" data-act="refresh" title="Refresh this folder">&#8635;</button>
           <span class="crumbs" id="crumbsRemote">(not connected)</span>
         </div>
         <div class="filter"><input id="filterRemote" type="text" placeholder="Filter this folder..." disabled></div>
@@ -241,7 +254,6 @@
   <div class="modal-actions"><button id="pmCancel" class="btn-ghost">Cancel</button><button id="pmOk" class="btn-primary">OK</button></div></div></div>
 
 <div id="ctx"></div>
-<div id="toast"></div>
 
 <script>
 const $=id=>document.getElementById(id);
@@ -251,7 +263,15 @@ const state={ local:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sor
               remote:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1} };
 let compareMap=null;
 
-function toast(m,e){const t=$("toast");t.textContent=m;t.className=(e?"err ":"")+"show";setTimeout(()=>t.className=t.className.replace("show","").trim(),3400);}
+/* console activity log (replaces the old transient toasts) */
+function clog(m,level){ const box=$("console"); if(!box)return; const empty=box.querySelector(".console-empty"); if(empty)empty.remove();
+  const line=document.createElement("div"); line.className="cline"+(level?" "+level:"");
+  const t=new Date().toTimeString().slice(0,8);
+  line.innerHTML=`<span class="ctime">${t}</span>${esc(m)}`; box.appendChild(line);
+  while(box.children.length>500)box.removeChild(box.firstChild); box.scrollTop=box.scrollHeight; }
+// back-compat shim: existing toast(msg,isErr) calls now write to the console
+function toast(m,e){ clog(m, e?"error":"info"); }
+function clearConsole(){ const box=$("console"); if(box)box.innerHTML='<div class="console-empty">Console cleared.</div>'; }
 function hsize(n){if(n==null)return"";n=+n;const u=["B","KB","MB","GB","TB"];let i=0;while(n>=1024&&i<4){n/=1024;i++;}return (i?n.toFixed(1):n.toFixed(0))+" "+u[i];}
 function fmod(ts){if(!ts)return"";const d=new Date(ts*1000);return d.toISOString().slice(0,16).replace("T"," ");}
 
@@ -261,9 +281,12 @@ window.appEvent=function(ev,p){
     $("qMeta").textContent=`${p.index+1}/${p.total}  ${p.pct}%  ${p.speed||""}${p.eta?"  ETA "+p.eta+"s":""}`; }
   else if(ev==="transfer_done"){ busy=false; $("cancelBtn").disabled=true; $("qFill").style.width="0%";
     $("qName").textContent="Idle"; $("qMeta").textContent=p.cancelled?"Cancelled":`Done${p.errors.length?" ("+p.errors.length+" failed)":""}${p.skipped?", "+p.skipped+" skipped":""}`;
+    clog(p.cancelled?"Transfer cancelled":`Transfer complete: ${p.total} file(s)${p.errors.length?", "+p.errors.length+" failed":""}${p.skipped?", "+p.skipped+" skipped":""}`,
+      p.errors.length?"error":(p.cancelled?"warn":"ok"));
     refresh("local"); refresh("remote"); }
   else if(ev==="size_progress"){ $("statusText").textContent=`Calculating size... ${p.files} files, ${p.bytes}`; }
-  else if(ev==="watch"){ $("statusText").textContent=p.ok?("Watch: uploaded "+p.file):("Watch error: "+p.file); }
+  else if(ev==="watch"){ clog(p.ok?("Watch: uploaded "+p.file):("Watch error: "+p.file+" — "+(p.error||"")), p.ok?"ok":"error"); }
+  else if(ev==="external_drop"){ externalUpload(p.paths); }
 };
 
 async function init(){
@@ -299,9 +322,16 @@ async function init(){
   });
   $("pass").addEventListener("keydown",e=>{if(e.key==="Enter")onConn();});
   document.addEventListener("click",()=>$("ctx").style.display="none");
+  $("consoleClear").onclick=clearConsole;
+  syncConsoleHeight();
+  clog("Ready. Drag files onto the remote pane to upload, or use the buttons.");
   loadLocal(""); // shows drives on Windows / home elsewhere
   setTimeout(()=>doUpdate(false),1500); // quiet startup check
 }
+// keep the console the same height as the connection bar, even as it reflows
+function syncConsoleHeight(){ const bar=document.querySelector(".conn"); const cw=$("consoleWrap"); if(!bar||!cw)return;
+  const apply=()=>{cw.style.height=bar.offsetHeight+"px";}; apply();
+  if(window.ResizeObserver){ new ResizeObserver(apply).observe(bar); } else { window.addEventListener("resize",apply); } }
 function cap(s){return s[0].toUpperCase()+s.slice(1);}
 
 function fillSessions(list){ const s=$("sessions"); s.innerHTML='<option value="">(none)</option>';
@@ -317,7 +347,7 @@ function connParams(){ return { host:$("host").value, port:$("port").value, user
   passphrase:authMode==="key"?$("pass").value:"", start_path:$("startpath").value }; }
 
 async function onConn(){
-  if(connected){ await API.disconnect(); connected=false; setConn("","Disconnected");
+  if(connected){ await API.disconnect(); connected=false; setConn("","Disconnected"); clog("Disconnected");
     $("connBtn").textContent="Connect"; $("connBtn").className="btn-primary";
     ["upBtn","downBtn","compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=true);
     state.remote.entries=[]; renderPane("remote"); $("crumbsRemote").textContent="(not connected)"; $("latency").textContent=""; return; }
@@ -331,7 +361,8 @@ async function doConnect(){
   if(r.ok){
     connected=true; setConn("live","Connected"); $("connBtn").textContent="Disconnect"; $("connBtn").className="btn-danger";
     ["compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=false);
-    $("filterRemote").disabled=false; loadRemote(r.cwd); pollHealth(); return true;
+    $("filterRemote").disabled=false; clog("Connected to "+($("user").value.trim())+"@"+($("host").value.trim()),"ok");
+    loadRemote(r.cwd); pollHealth(); return true;
   }
   if(r.host_key_unknown){
     const okTrust=await confirm2("Unknown host key",
@@ -347,7 +378,8 @@ async function doConnect(){
     const t=await API.trust_host_key(); if(!t.ok){ setConn("err","Failed"); toast(t.error||"Could not save host key",true); return false; }
     return await doConnect();
   }
-  setConn("err","Failed"); toast(r.error||"Connection failed",true); return false;
+  setConn("err","Failed"); clog("Connection failed: "+(r.error||""),"error");
+  infoBox("Connection failed", (r.error||"Connection failed")+(r.tips?"\n\n"+r.tips:"")); return false;
 }
 
 function infoBox(title,text){ $("cfTitle").textContent=title; $("cfText").textContent=text;
@@ -361,8 +393,10 @@ async function onViewHostKey(){ const host=$("host").value.trim(); const port=$(
   if(r.known && r.entries && r.entries.length){ infoBox("Host key \u2014 "+r.host, r.entries.map(x=>x.key_type+"\n"+x.fingerprint).join("\n\n")); }
   else { infoBox("Host key \u2014 "+r.host, "No host key is pinned yet for "+r.host+".\nIt is recorded the first time you connect and accept it."); }
 }
-async function onTest(){ setConn("busy","Testing..."); const r=await API.test_connection(connParams());
-  setConn(connected?"live":"", connected?"Connected":"Not connected"); toast(r.ok?"Connection OK":("Test failed: "+(r.error||"")),!r.ok); }
+async function onTest(){ setConn("busy","Testing..."); clog("Testing connection..."); const r=await API.test_connection(connParams());
+  setConn(connected?"live":"", connected?"Connected":"Not connected");
+  if(r.ok){ clog("Connection test OK","ok"); }
+  else { clog("Test failed: "+(r.error||""),"error"); infoBox("Test failed", (r.error||"")+(r.tips?"\n\n"+r.tips:"")); } }
 function setConn(s,t){ $("connDot").className="dot"+(s?" "+s:""); $("connText").textContent=t; }
 
 async function onSave(){ const name=await prompt2("Save session as","Name"); if(!name)return;
@@ -434,6 +468,22 @@ async function startTransfer(direction,forceIdx){
   busy=true; $("cancelBtn").disabled=false; $("statusText").textContent="";
   const r=await API.transfer(jobs,direction,state.local.cwd,state.remote.cwd,policy);
   if(!r.ok){ busy=false; $("cancelBtn").disabled=true; toast(r.error||"Transfer failed",true); }
+}
+/* files dragged in from outside the app, dropped on the remote pane */
+async function externalUpload(paths){
+  if(!paths||!paths.length)return;
+  if(!connected){ infoBox("Not connected","Connect to a server before dropping files onto the remote pane."); return; }
+  if(busy){ clog("A transfer is already running — drop ignored","warn"); return; }
+  const base=p=>p.replace(/[\\/]+$/,"").split(/[\\/]/).pop();
+  const names=paths.map(base); const destNames=new Set(state.remote.entries.map(e=>e.name));
+  const collide=names.filter(n=>destNames.has(n));
+  if(collide.length){ const choice=await confirm3("Overwrite?", collide.length+" item(s) already exist in the destination. Overwrite them, or skip existing?","Overwrite","Skip existing");
+    if(choice===null)return;
+    if(choice==="skip"){ paths=paths.filter((p,i)=>!destNames.has(names[i])); if(!paths.length){ clog("Nothing to upload (all skipped)"); return; } } }
+  busy=true; $("cancelBtn").disabled=false;
+  clog(`Uploading ${paths.length} dropped item(s) to ${state.remote.cwd}`);
+  const r=await API.upload_paths(paths, state.remote.cwd, "overwrite");
+  if(!r.ok){ busy=false; $("cancelBtn").disabled=true; clog(r.error||"Upload failed","error"); }
 }
 function setupDrop(side){ const pane=$("pane"+cap(side));
   pane.addEventListener("dragover",e=>{e.preventDefault();pane.classList.add("dragover");});

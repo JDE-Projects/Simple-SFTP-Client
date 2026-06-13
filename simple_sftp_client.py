@@ -197,6 +197,53 @@ def friendly_error(e):
     return "Something went wrong. Turn on the debug log for details."
 
 
+def error_tips(e):
+    """Actionable, plain-language guidance shown in the failure popup."""
+    if isinstance(e, (TimeoutError, socket.timeout)):
+        return ("The server didn't respond in time. Common causes:\n"
+                "• The host address or port number is wrong.\n"
+                "• A firewall is blocking the attempt — on the server's network or in its operating system.\n"
+                "• A missing NAT rule or port-forward means your connection never reaches the server.\n\n"
+                "Ask the SFTP server's administrator to confirm that connections from your network are "
+                "allowed on this port.")
+    if isinstance(e, ConnectionRefusedError):
+        return ("The server's machine answered, but nothing is listening on that port.\n"
+                "• Double-check the port number.\n"
+                "• Confirm the SFTP/SSH service is running on the server.")
+    if isinstance(e, socket.gaierror):
+        return ("The host name could not be looked up.\n"
+                "• Check the spelling of the address.\n"
+                "• Try the server's IP address instead of its name.")
+    if isinstance(e, paramiko.AuthenticationException):
+        return ("The server was reached but rejected your credentials.\n"
+                "• Re-check the username and password.\n"
+                "• If using a key, confirm the private key matches a public key installed on the server.")
+    if isinstance(e, paramiko.SSHException):
+        m = str(e).lower()
+        if "negotiat" in m or "incompatible" in m:
+            return ("The server was reached but no secure encryption method could be agreed on.\n"
+                    "This client refuses outdated, insecure algorithms for safety. The server's SSH "
+                    "configuration may need to be updated to offer modern algorithms.")
+        return ("The secure connection could not be established.\n"
+                "Turn on the debug log (bottom-left) and try again to capture the details.")
+    return ("The connection could not be completed.\n"
+            "Check the host, port, username, and credentials. Turn on the debug log (bottom-left) "
+            "for more detail.")
+
+
+def missing_fields(p):
+    """Up-front field check shared by Connect and Test (returns '' when OK)."""
+    host = (p.get("host") or "").strip()
+    user = (p.get("username") or "").strip()
+    key = (p.get("key_path") or "").strip()
+    pw = p.get("password") or ""
+    if not host or not user:
+        return "Enter a host and a username before connecting."
+    if not key and not pw:
+        return "Enter a password, or choose a private key, before connecting."
+    return ""
+
+
 class Api:
     def __init__(self):
         self._window = None
@@ -308,15 +355,14 @@ class Api:
         return client
 
     def connect(self, p):
+        miss = missing_fields(p)
+        if miss:
+            return {"ok": False, "error": miss}
         host = (p.get("host") or "").strip()
         username = (p.get("username") or "").strip()
-        if not host or not username:
-            return {"ok": False, "error": "Host and username are required."}
         password = p.get("password") or ""
         key_path = (p.get("key_path") or "").strip()
         passphrase = p.get("passphrase") or ""
-        if not key_path and not password:
-            return {"ok": False, "error": "Provide a password or a private key."}
         self._cred_pass = password
         debug.log("CONNECT", {"host": host, "user": username, "auth": "key" if key_path else "password"})
         try:
@@ -342,17 +388,9 @@ class Api:
                     "key_type": e.key.get_name(),
                     "new_fingerprint": fingerprint_sha256(e.key),
                     "old_fingerprint": fingerprint_sha256(e.expected_key)}
-        except paramiko.AuthenticationException:
-            return {"ok": False, "error": "Authentication failed (check credentials or key)."}
-        except paramiko.SSHException as e:
-            msg = str(e)
-            if "negotiat" in msg.lower() or "incompatible" in msg.lower():
-                msg = ("Could not negotiate a secure connection. This server may only "
-                       "offer outdated algorithms, which this client refuses for safety.")
-            return {"ok": False, "error": msg}
         except Exception as e:
             debug.log("CONNECT failed", traceback.format_exc())
-            return {"ok": False, "error": friendly_error(e)}
+            return {"ok": False, "error": friendly_error(e), "tips": error_tips(e)}
 
     def trust_host_key(self):
         """Pin the host key the user just confirmed, then they may reconnect."""
@@ -406,6 +444,9 @@ class Api:
             return {}
 
     def test_connection(self, p):
+        miss = missing_fields(p)
+        if miss:
+            return {"ok": False, "error": miss}
         try:
             c = self._open(p.get("host", "").strip(), p.get("port", 22),
                            p.get("username", "").strip(), p.get("password", ""),
@@ -413,7 +454,7 @@ class Api:
             c.close()
             return {"ok": True}
         except Exception as e:
-            return {"ok": False, "error": friendly_error(e)}
+            return {"ok": False, "error": friendly_error(e), "tips": error_tips(e)}
 
     def disconnect(self):
         self.stop_watch()
@@ -553,7 +594,56 @@ class Api:
                     files += self._walk_remote(rp, lp) if j["is_dir"] else [(lp, rp)]
         except Exception as e:
             return {"ok": False, "error": f"Could not enumerate: {e}"}
+        return self._run_transfer(files, direction, on_conflict)
 
+    def upload_paths(self, paths, remote_dir, on_conflict="overwrite"):
+        """Upload absolute local paths (files or folders) dragged in from outside
+        the app, into remote_dir, reusing the standard transfer pipeline."""
+        if not self.connected:
+            return {"ok": False, "error": "Not connected."}
+        self._cancel.clear()
+        files = []
+        try:
+            for raw in paths or []:
+                lp = self._normalize_drop_path(raw)
+                if not lp:
+                    continue
+                name = os.path.basename(lp.rstrip("\\/"))
+                rp = posixpath.join(remote_dir, name)
+                if os.path.isdir(lp):
+                    files += self._walk_local(lp, rp)
+                elif os.path.isfile(lp):
+                    files.append((lp, rp))
+        except Exception as e:
+            return {"ok": False, "error": f"Could not read the dropped items: {e}"}
+        if not files:
+            return {"ok": False, "error": "No files were found in the dropped items."}
+        debug.log("EXTERNAL UPLOAD", {"items": len(files), "remote": remote_dir})
+        return self._run_transfer(files, "upload", on_conflict)
+
+    @staticmethod
+    def _normalize_drop_path(p):
+        """pywebview yields file-URL style paths (e.g. '/C:/Users/..') on Windows."""
+        p = (p or "").strip()
+        if os.name == "nt":
+            if len(p) >= 3 and p[0] == "/" and p[2] == ":":
+                p = p[1:]
+            p = p.replace("/", "\\")
+        return p
+
+    def on_external_drop(self, event):
+        """pywebview Qt drop handler: hand the real file paths back to the UI,
+        which uploads them into the currently open remote folder."""
+        try:
+            files = ((event or {}).get("dataTransfer") or {}).get("files") or []
+            paths = [f.get("pywebviewFullPath") for f in files if f.get("pywebviewFullPath")]
+            debug.log("EXTERNAL DROP", {"paths": paths})
+            if paths:
+                self._emit("external_drop", {"paths": paths})
+        except Exception as e:
+            debug.log("external drop handler failed", str(e))
+
+    def _run_transfer(self, files, direction, on_conflict):
         total = len(files)
         done = 0
         errors = []
@@ -994,10 +1084,21 @@ def main():
     api = Api()
     window = webview.create_window(
         "Simple SFTP Client", url=resource_path("simple_sftp_client-UI.html"),
-        js_api=api, width=1480, height=900, min_size=(1180, 720),
+        js_api=api, width=1480, height=980, min_size=(1180, 800),
         background_color="#0a0e14")
     api.set_window(window)
     window.events.loaded += _on_loaded
+
+    def _wire_external_drop():
+        # Let users drag files in from Windows Explorer onto the remote pane.
+        try:
+            pane = window.dom.get_element("#paneRemote")
+            if pane:
+                pane.events.drop += api.on_external_drop
+                debug.log("External drop wired on remote pane")
+        except Exception as e:
+            debug.log("wire external drop failed", str(e))
+    window.events.loaded += _wire_external_drop
     try:
         webview.start(gui="qt", icon=resource_path("simple_sftp_client.png"))
     except TypeError:
