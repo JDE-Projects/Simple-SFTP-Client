@@ -20,6 +20,7 @@ import sys
 import io
 import stat
 import json
+import logging
 import base64
 import hashlib
 import time
@@ -102,15 +103,29 @@ class _TofuPolicy(paramiko.MissingHostKeyPolicy):
 
 
 # ───────────── debug log (off by default) ─────────────
+class _ParamikoBridge(logging.Handler):
+    """Feed paramiko's protocol-level logging into the debug file when enabled."""
+    def __init__(self, dbg):
+        super().__init__()
+        self._dbg = dbg
+
+    def emit(self, record):
+        try:
+            self._dbg.log(f"{record.name}: {record.getMessage()}")
+        except Exception:
+            pass
+
+
 class DebugLog:
     def __init__(self):
         self._on = False
         self._path = None
         self._lock = threading.Lock()
+        self._bridge = None  # paramiko logging handler, attached only while on
 
     def set_enabled(self, on):
+        on = bool(on)
         with self._lock:
-            on = bool(on)
             if on and not self._path:
                 stamp = datetime.now().strftime("%m%d%Y_%H%M%S")
                 self._path = os.path.join(exe_dir(), f"Debug_Log_{stamp}.txt")
@@ -123,7 +138,22 @@ class DebugLog:
                     self._on = False
                     return False
             self._on = on
-            return True
+        self._set_paramiko(on)
+        return True
+
+    def _set_paramiko(self, on):
+        """Capture paramiko's verbose transport/SFTP logging while debug is on."""
+        plog = logging.getLogger("paramiko")
+        try:
+            if on and not self._bridge:
+                self._bridge = _ParamikoBridge(self)
+                plog.addHandler(self._bridge)
+                plog.setLevel(logging.DEBUG)
+            elif not on and self._bridge:
+                plog.removeHandler(self._bridge)
+                self._bridge = None
+        except Exception:
+            pass
 
     def is_enabled(self):
         return self._on
@@ -272,6 +302,21 @@ class Api:
         debug.log("Debug enabled" if on and ok else "Debug disabled")
         return {"ok": ok, "enabled": debug.is_enabled()}
 
+    def export_console(self, text):
+        """Save the on-screen console to a text file next to the exe."""
+        try:
+            stamp = datetime.now().strftime("%m%d%Y_%H%M%S")
+            path = os.path.join(exe_dir(), f"Console_Log_{stamp}.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("=== Simple SFTP Client console export ===\n")
+                f.write(f"Exported: {datetime.now().isoformat()}\n" + "=" * 60 + "\n\n")
+                f.write(text or "")
+                if text and not text.endswith("\n"):
+                    f.write("\n")
+            return {"ok": True, "path": path}
+        except Exception as e:
+            return {"ok": False, "error": friendly_error(e)}
+
     def _emit(self, event, payload):
         if self._window:
             try:
@@ -279,6 +324,11 @@ class Api:
                     f"window.appEvent && window.appEvent({json.dumps(event)},{json.dumps(payload)})")
             except Exception:
                 pass
+
+    def _vlog(self, msg, level="info"):
+        """Verbose, FileZilla-style operation line: to the console and debug log."""
+        self._emit("console", {"msg": msg, "level": level})
+        debug.log(msg)
 
     # ───────────── sessions (servers.json, never passwords) ─────────────
     def _load_sessions(self):
@@ -369,7 +419,12 @@ class Api:
             self.client = self._open(host, p.get("port", 22), username, password, key_path, passphrase)
             self.sftp = self.client.open_sftp()
             self.connected = True
+            ti = self._transport_info()
+            if ti:
+                self._vlog(f"Negotiated: cipher {ti.get('cipher','?')} · "
+                           f"kex {ti.get('kex','?')} · mac {ti.get('mac','?')}")
             home = self.sftp.normalize(".")
+            self._vlog(f"SFTP session opened — home {home}", "ok")
             start = (p.get("start_path") or "").strip() or home
             try:
                 self.sftp.stat(start)
@@ -444,17 +499,35 @@ class Api:
             return {}
 
     def test_connection(self, p):
-        miss = missing_fields(p)
-        if miss:
-            return {"ok": False, "error": miss}
+        """Reachability check only: open a TCP socket and read the SSH banner.
+        Confirms host/port reachable and that an SSH server answers — no host
+        key check and no authentication (that is Connect's job)."""
+        host = (p.get("host") or "").strip()
+        if not host:
+            return {"ok": False, "error": "Enter a host to test."}
         try:
-            c = self._open(p.get("host", "").strip(), p.get("port", 22),
-                           p.get("username", "").strip(), p.get("password", ""),
-                           (p.get("key_path") or "").strip(), p.get("passphrase", ""))
-            c.close()
-            return {"ok": True}
+            port = int(p.get("port") or 22)
+        except (TypeError, ValueError):
+            port = 22
+        debug.log("TEST", {"host": host, "port": port})
+        try:
+            with socket.create_connection((host, port), timeout=10) as sock:
+                sock.settimeout(4)
+                try:
+                    banner = sock.recv(256)
+                except (socket.timeout, OSError):
+                    banner = b""
         except Exception as e:
             return {"ok": False, "error": friendly_error(e), "tips": error_tips(e)}
+        if banner.startswith(b"SSH-"):
+            ident = banner.decode("ascii", "replace").splitlines()[0].strip()
+            self._vlog(f"Test: {host}:{port} reachable — {ident}", "ok")
+            return {"ok": True, "msg": f"{host}:{port} reachable — {ident}"}
+        return {"ok": False, "warn": True,
+                "error": f"Something is listening on {host}:{port}, but it didn't identify as an "
+                         "SSH/SFTP server.",
+                "tips": ("Confirm this is the SFTP/SSH port (often 22). A different service may be "
+                         "answering on it.")}
 
     def disconnect(self):
         self.stop_watch()
@@ -518,6 +591,7 @@ class Api:
                 entries.append({"name": a.filename, "is_dir": stat.S_ISDIR(a.st_mode),
                                 "size": a.st_size, "mtime": int(a.st_mtime or 0)})
             parent = posixpath.dirname(path.rstrip("/")) or "/"
+            self._vlog(f"ls {path} → {len(entries)} item(s)")
             return {"ok": True, "cwd": path, "parent": parent, "entries": entries}
         except Exception as e:
             return {"ok": False, "error": friendly_error(e)}
@@ -528,7 +602,9 @@ class Api:
             if side == "local":
                 os.makedirs(os.path.join(path, name), exist_ok=False)
             else:
-                self.sftp.mkdir(posixpath.join(path, name))
+                target = posixpath.join(path, name)
+                self.sftp.mkdir(target)
+                self._vlog(f"mkdir {target}")
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": friendly_error(e)}
@@ -539,6 +615,7 @@ class Api:
                 os.rename(os.path.join(path, old), os.path.join(path, new))
             else:
                 self.sftp.rename(posixpath.join(path, old), posixpath.join(path, new))
+                self._vlog(f"rename {posixpath.join(path, old)} → {new}")
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": friendly_error(e)}
@@ -553,6 +630,8 @@ class Api:
                 else:
                     full = posixpath.join(path, it["name"])
                     self._rremove(full) if it["is_dir"] else self.sftp.remove(full)
+                    if not it["is_dir"]:
+                        self._vlog(f"remove {full}")
             except Exception as e:
                 errs.append(f"{it['name']}: {e}")
         return {"ok": True, "errors": errs}
@@ -562,6 +641,7 @@ class Api:
             child = posixpath.join(path, a.filename)
             self._rremove(child) if stat.S_ISDIR(a.st_mode) else self.sftp.remove(child)
         self.sftp.rmdir(path)
+        self._vlog(f"rmdir {path}")
 
     def open_local(self, path, name):
         try:
@@ -652,7 +732,9 @@ class Api:
             if self._cancel.is_set():
                 break
             name = os.path.basename(lp)
+            arrow = "↑" if direction == "upload" else "↓"
             ok = False
+            res = None
             for attempt in range(3):
                 try:
                     res = self._one(direction, lp, rp, name, done, total, on_conflict)
@@ -663,8 +745,14 @@ class Api:
                 except Exception as e:
                     debug.log(f"transfer retry {attempt+1}", f"{name}: {e}")
                     time.sleep(0.6)
-            if not ok:
+            if ok:
+                if res == "skip":
+                    self._vlog(f"skip {name} (already up to date)")
+                else:
+                    self._vlog(f"{arrow} {(rp if direction == 'upload' else name)}", "ok")
+            else:
                 errors.append(name)
+                self._vlog(f"failed {name}", "error")
             done += 1
         self._emit("transfer_done", {"total": total, "errors": errors, "skipped": skipped,
                                      "cancelled": self._cancel.is_set()})

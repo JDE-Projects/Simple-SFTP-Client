@@ -61,8 +61,10 @@
   /* panes */
   .panes{flex:1 1 auto;display:flex;gap:10px;min-height:0;}
   .pane{flex:1 1 0;display:flex;flex-direction:column;min-width:0;overflow:hidden;}
-  .center{flex:0 0 92px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;}
-  .center button{width:78px;}
+  .center{flex:0 0 108px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;}
+  .center button{width:96px;}
+  /* center the Upload/Download labels explicitly so the word can't drift right */
+  .center .btn-primary{display:flex;align-items:center;justify-content:center;white-space:nowrap;padding-left:6px;padding-right:6px;}
   .pane-head{padding:9px 11px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:7px;}
   .pane-title{font-weight:600;font-size:12.5px;display:flex;align-items:center;gap:7px;}
   .navrow{display:flex;align-items:center;gap:5px;}
@@ -109,7 +111,8 @@
   .cline .ctime{color:var(--text-faint);margin-right:9px;}
   .cline.ok{color:var(--green);} .cline.error{color:var(--red);} .cline.warn{color:var(--amber);}
   .console-empty{color:var(--text-faint);font-style:italic;}
-  #consoleClear{position:absolute;top:7px;right:9px;z-index:2;}
+  .console-tools{position:absolute;top:6px;right:20px;z-index:2;display:flex;flex-direction:column;gap:5px;}
+  .console-tools .icon-btn{width:100%;}
 
   /* modals + context menu */
   .modal{position:fixed;inset:0;background:rgba(6,9,14,.78);display:none;align-items:center;justify-content:center;z-index:60;}
@@ -163,7 +166,10 @@
 
   <!-- console / activity log -->
   <div class="panel console" id="consoleWrap">
-    <button id="consoleClear" class="icon-btn" title="Clear the console">Clear</button>
+    <div class="console-tools">
+      <button id="consoleClear" class="icon-btn" title="Clear the console">Clear</button>
+      <button id="consoleExport" class="icon-btn" title="Save the console to a text file next to the app">Export</button>
+    </div>
     <div class="console-body" id="console"></div>
   </div>
 
@@ -272,6 +278,12 @@ function clog(m,level){ const box=$("console"); if(!box)return; const empty=box.
 // back-compat shim: existing toast(msg,isErr) calls now write to the console
 function toast(m,e){ clog(m, e?"error":"info"); }
 function clearConsole(){ const box=$("console"); if(box)box.innerHTML='<div class="console-empty">Console cleared.</div>'; }
+async function exportConsole(){ const box=$("console"); if(!box)return;
+  const lines=[...box.querySelectorAll(".cline")].map(l=>{ const t=l.querySelector(".ctime"); const time=t?t.textContent:"";
+    return (time?time+"  ":"")+l.textContent.slice(time.length); });
+  if(!lines.length){ clog("Nothing to export yet","warn"); return; }
+  const r=await API.export_console(lines.join("\n"));
+  if(r.ok) clog("Console saved to "+r.path,"ok"); else clog("Export failed: "+(r.error||""),"error"); }
 function hsize(n){if(n==null)return"";n=+n;const u=["B","KB","MB","GB","TB"];let i=0;while(n>=1024&&i<4){n/=1024;i++;}return (i?n.toFixed(1):n.toFixed(0))+" "+u[i];}
 function fmod(ts){if(!ts)return"";const d=new Date(ts*1000);return d.toISOString().slice(0,16).replace("T"," ");}
 
@@ -286,6 +298,7 @@ window.appEvent=function(ev,p){
     refresh("local"); refresh("remote"); }
   else if(ev==="size_progress"){ $("statusText").textContent=`Calculating size... ${p.files} files, ${p.bytes}`; }
   else if(ev==="watch"){ clog(p.ok?("Watch: uploaded "+p.file):("Watch error: "+p.file+" — "+(p.error||"")), p.ok?"ok":"error"); }
+  else if(ev==="console"){ clog(p.msg, p.level); }
   else if(ev==="external_drop"){ externalUpload(p.paths); }
 };
 
@@ -323,6 +336,7 @@ async function init(){
   $("pass").addEventListener("keydown",e=>{if(e.key==="Enter")onConn();});
   document.addEventListener("click",()=>$("ctx").style.display="none");
   $("consoleClear").onclick=clearConsole;
+  $("consoleExport").onclick=exportConsole;
   syncConsoleHeight();
   clog("Ready. Drag files onto the remote pane to upload, or use the buttons.");
   loadLocal(""); // shows drives on Windows / home elsewhere
@@ -331,7 +345,10 @@ async function init(){
 // keep the console the same height as the connection bar, even as it reflows
 function syncConsoleHeight(){ const bar=document.querySelector(".conn"); const cw=$("consoleWrap"); if(!bar||!cw)return;
   const apply=()=>{cw.style.height=bar.offsetHeight+"px";}; apply();
-  if(window.ResizeObserver){ new ResizeObserver(apply).observe(bar); } else { window.addEventListener("resize",apply); } }
+  if(window.ResizeObserver){ new ResizeObserver(apply).observe(bar); } else { window.addEventListener("resize",apply); }
+  // custom fonts load after first paint and reflow the bar — re-sync once they're ready
+  if(document.fonts&&document.fonts.ready){ document.fonts.ready.then(apply); }
+  window.addEventListener("load",apply); }
 function cap(s){return s[0].toUpperCase()+s.slice(1);}
 
 function fillSessions(list){ const s=$("sessions"); s.innerHTML='<option value="">(none)</option>';
@@ -352,6 +369,7 @@ async function onConn(){
     ["upBtn","downBtn","compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=true);
     state.remote.entries=[]; renderPane("remote"); $("crumbsRemote").textContent="(not connected)"; $("latency").textContent=""; return; }
   setConn("busy","Connecting..."); $("connBtn").disabled=true;
+  clog("Connecting to "+($("user").value.trim())+"@"+($("host").value.trim())+"...");
   await doConnect();
   $("connBtn").disabled=false;
 }
@@ -393,10 +411,12 @@ async function onViewHostKey(){ const host=$("host").value.trim(); const port=$(
   if(r.known && r.entries && r.entries.length){ infoBox("Host key \u2014 "+r.host, r.entries.map(x=>x.key_type+"\n"+x.fingerprint).join("\n\n")); }
   else { infoBox("Host key \u2014 "+r.host, "No host key is pinned yet for "+r.host+".\nIt is recorded the first time you connect and accept it."); }
 }
-async function onTest(){ setConn("busy","Testing..."); clog("Testing connection..."); const r=await API.test_connection(connParams());
+async function onTest(){ const host=$("host").value.trim(); if(!host){ infoBox("Test","Enter a host to test."); return; }
+  setConn("busy","Testing..."); clog("Testing "+host+":"+($("port").value.trim()||"22")+"...");
+  const r=await API.test_connection(connParams());
   setConn(connected?"live":"", connected?"Connected":"Not connected");
-  if(r.ok){ clog("Connection test OK","ok"); }
-  else { clog("Test failed: "+(r.error||""),"error"); infoBox("Test failed", (r.error||"")+(r.tips?"\n\n"+r.tips:"")); } }
+  if(r.ok){ clog(r.msg||"Server reachable","ok"); }
+  else { clog("Test: "+(r.error||""), r.warn?"warn":"error"); infoBox(r.warn?"Test result":"Test failed", (r.error||"")+(r.tips?"\n\n"+r.tips:"")); } }
 function setConn(s,t){ $("connDot").className="dot"+(s?" "+s:""); $("connText").textContent=t; }
 
 async function onSave(){ const name=await prompt2("Save session as","Name"); if(!name)return;
@@ -520,12 +540,18 @@ function showCtx(ev,side,e){ const m=$("ctx"); m.innerHTML="";
   add("Delete",()=>deleteSel(side),true);
   m.style.display="block"; m.style.left=Math.min(ev.clientX,window.innerWidth-190)+"px"; m.style.top=Math.min(ev.clientY,window.innerHeight-220)+"px"; }
 async function renameItem(side,e){ const nn=await prompt2("Rename","New name",e.name); if(!nn||nn===e.name)return;
-  const r=await API.rename(side,state[side].cwd,e.name,nn); if(!r.ok){toast(r.error,true);return;} refresh(side); }
+  const r=await API.rename(side,state[side].cwd,e.name,nn); if(!r.ok){clog("Rename failed: "+(r.error||""),"error");return;}
+  clog(`Renamed ${e.name} → ${nn} (${side})`,"ok"); refresh(side); }
 async function newFolder(side){ const nn=await prompt2("New folder","Folder name"); if(!nn)return;
-  const r=await API.make_dir(side,state[side].cwd,nn); if(!r.ok){toast(r.error,true);return;} refresh(side); }
+  const r=await API.make_dir(side,state[side].cwd,nn); if(!r.ok){clog("New folder failed: "+(r.error||""),"error");return;}
+  clog(`Created folder ${nn} (${side})`,"ok"); refresh(side); }
 async function deleteSel(side){ const items=selItems(side); if(!items.length)return;
   if(!await confirm2("Delete",`Delete ${items.length} item(s) from ${side}? This cannot be undone.`))return;
-  const r=await API.delete(side,state[side].cwd,items); if(r.errors&&r.errors.length)toast(r.errors.length+" could not be deleted",true); refresh(side); }
+  const r=await API.delete(side,state[side].cwd,items);
+  const failed=(r.errors&&r.errors.length)||0, okCount=items.length-failed;
+  if(failed) clog(`Deleted ${okCount}/${items.length} from ${side} — ${failed} could not be deleted`,"error");
+  else clog(`Deleted ${items.length} item(s) from ${side}`,"ok");
+  refresh(side); }
 async function calcSize(name){ $("statusText").textContent="Calculating size..."; $("cancelBtn").disabled=false;
   const r=await API.calc_remote_size(state.remote.cwd,name); $("cancelBtn").disabled=true;
   if(r.ok)$("statusText").textContent=`${name}: ${r.human} across ${r.files} file(s)`; else toast(r.error,true); }
