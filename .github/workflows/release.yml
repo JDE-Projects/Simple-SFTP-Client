@@ -1,0 +1,16 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+jobs:
+  release:
+    uses: JDE-Projects/Build-Tools/.github/workflows/release.yml@69d4592847db552d34c49f36b8be2eb9e1af091d # Build-Tools main
+    permissions:
+      id-token: write
+      attestations: write
+      contents: write
+    with:
+      app_name: SimpleSFTPClient
+      dist_subfolder: "Simple SFTP Client"
+      python_version: "3.14"
+      build_command: "Build_Simple_SFTP_Client.bat"

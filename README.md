@@ -29,13 +29,31 @@ Built by [JDE-Projects](https://github.com/JDE-Projects).
 - Window: pywebview on the Qt backend, UI in `simple_sftp_client-UI.html`.
 
 ## Download and run
-Grab the latest `Simple SFTP Client.exe` from the Releases page and
-double-click it. No Python or setup required. Windows only.
+Grab the latest release zip from the [Releases](../../releases) page, extract
+it, and run `Simple SFTP Client.exe` from inside the extracted folder. Keep the
+folder together; the exe needs the files next to it. No Python or setup
+required. Windows only.
 Unsigned, so SmartScreen may warn the first time: More info > Run anyway.
+
+## Verify this download (optional)
+This release was built on GitHub from this public source - not on a personal
+machine - and is signed with a build-provenance attestation. To confirm a
+download is genuine, install the [GitHub CLI](https://cli.github.com) and run:
+
+```
+gh attestation verify SimpleSFTPClient-vX.Y.Z.zip \
+  --repo JDE-Projects/Simple-SFTP-Client \
+  --signer-repo JDE-Projects/Build-Tools
+```
+
+A `Verification succeeded!` line means the file was built by the published
+pipeline from this repo. You can also check the file against the published
+`.sha256`.
 
 ## Build from source (optional)
 - Python 3 on PATH.
-- `pip install pywebview PySide6 paramiko keyring`
+- `pip install -r requirements.txt` (pinned versions: PySide6, pywebview,
+  paramiko, cryptography, keyring, and PyInstaller)
 - Keep `simple_sftp_client.py`, `simple_sftp_client-UI.html`, the `fonts/`
   folder, the `.ico`, `.png`, and `-splash.png` together.
 - Run from source: `python simple_sftp_client.py`
