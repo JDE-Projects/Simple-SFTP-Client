@@ -6,6 +6,8 @@ local folder for auto-upload. Secure connections only.
 
 Built by [JDE-Projects](https://github.com/JDE-Projects).
 
+If you enjoyed this project and would like to buy me a coffee, check out my [Ko-fi](https://ko-fi.com/jdeprojects).
+
 ## Highlights
 - Dual-pane browser with breadcrumb paths, back/forward, recent locations, and
   an instant per-pane filter.
