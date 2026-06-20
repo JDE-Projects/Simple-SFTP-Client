@@ -338,7 +338,7 @@ async function init(){
   $("consoleClear").onclick=clearConsole;
   $("consoleExport").onclick=exportConsole;
   syncConsoleHeight();
-  clog("Ready. Drag files onto the remote pane to upload, or use the buttons.");
+  clog("Ready to connect. Enter a host and click Connect to begin.");
   loadLocal(""); // shows drives on Windows / home elsewhere
   setTimeout(()=>doUpdate(false),1500); // quiet startup check
 }
