@@ -1,0 +1,3 @@
+Launch Simple SFTP Client from the Start menu.
+Enter a host, username, and password or key to connect over SFTP.
+Browse, upload, and download files; secrets are kept in memory only.
