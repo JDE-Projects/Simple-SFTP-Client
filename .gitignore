@@ -18,3 +18,9 @@ Launch_*.bat
 
 # Optional debug logs (written next to the exe when toggled on)
 Debug_Log_*.txt
+
+# Theme preference (per-machine: the light/dark choice)
+*.pref
+
+# Personal roadmap notes (ideas, not for distribution)
+roadmap.md
