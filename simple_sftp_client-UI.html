@@ -15,7 +15,13 @@
   :root{
     --bg:#0a0e14;--bg-2:#0e131c;--panel:#121823;--panel-2:#161d2a;--border:#20293a;--border-2:#2b3650;
     --text:#dfe7f2;--text-dim:#8a98b0;--text-faint:#5a6678;--accent:#4dd6c1;--accent-2:#2bb6a3;--glow:rgba(77,214,193,.35);
-    --amber:#f0b860;--red:#ff6b7a;--green:#5ce39b;--blue:#6db3ff;--radius:14px;--radius-sm:9px;
+    --amber:#f0b860;--red:#ff6b7a;--green:#5ce39b;--blue:#6db3ff;--radius:14px;--radius-sm:9px;--btn-text:#042b27;
+  }
+  /* JDE Light Teal (opt-in via body.light) */
+  body.light{
+    --bg:#eef3f4;--bg-2:#e4ebed;--panel:#ffffff;--panel-2:#f5f9fa;--border:#d3dee1;--border-2:#bcccd0;
+    --text:#16212c;--text-dim:#4f606d;--text-faint:#8593a0;--accent:#178577;--accent-2:#0f6b5f;--glow:rgba(23,133,119,.20);
+    --amber:#e0900a;--red:#cf3b50;--green:#1c9560;--blue:#2b6fd0;--btn-text:#ffffff;
   }
   *{box-sizing:border-box;}
   html,body{height:100%;margin:0;}
@@ -23,8 +29,23 @@
     background:radial-gradient(900px 500px at 12% -10%,rgba(77,214,193,.10),transparent 60%),
       radial-gradient(800px 500px at 100% 0%,rgba(109,179,255,.07),transparent 55%),var(--bg);
     -webkit-user-select:none;user-select:none;overflow:hidden;}
+  body.light{
+    background:radial-gradient(900px 500px at 12% -10%,rgba(23,133,119,.08),transparent 60%),
+      radial-gradient(800px 500px at 100% 0%,rgba(43,111,208,.06),transparent 55%),var(--bg);}
   .mono{font-family:"JetBrains Mono",monospace;}
   .app{display:flex;flex-direction:column;height:100vh;padding:12px 14px 8px;gap:10px;}
+  /* header */
+  header{display:flex;align-items:flex-end;justify-content:space-between;flex:0 0 auto;}
+  .title h1{font-size:20px;font-weight:700;margin:0;letter-spacing:-0.01em;white-space:nowrap;}
+  .title .by{display:block;margin-top:3px;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-dim);}
+  .title .ghl{display:inline-block;margin-top:2px;font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--accent);text-decoration:none;}
+  .title .ghl:hover{text-decoration:underline;}
+  .head-right{display:flex;align-items:center;gap:12px;}
+  .theme-btn{background:transparent;border:1px solid var(--border-2);border-radius:var(--radius-sm);
+    width:44px;height:44px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text-dim);transition:.15s;flex:0 0 auto;}
+  .theme-btn:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-1px);}
+  .theme-btn svg{width:24px;height:24px;}
+  .icon-moon{display:none;} body.light .icon-sun{display:none;} body.light .icon-moon{display:block;}
   .panel{background:linear-gradient(180deg,var(--panel),var(--bg-2));border:1px solid var(--border);border-radius:var(--radius);}
   .field-label{display:block;font-size:10.5px;color:var(--text-dim);margin-bottom:4px;}
   input,select{font-family:inherit;font-size:12.5px;color:var(--text);background:var(--panel-2);border:1px solid var(--border-2);
@@ -37,7 +58,7 @@
     background-position:calc(100% - 14px) center,calc(100% - 9px) center;background-size:5px 5px,5px 5px;background-repeat:no-repeat;}
   button{font-family:inherit;font-size:12.5px;font-weight:600;cursor:pointer;border-radius:var(--radius-sm);
     padding:7px 13px;border:1px solid transparent;transition:transform .15s,border-color .15s,box-shadow .15s,background .15s;}
-  .btn-primary{color:#042b27;background:linear-gradient(180deg,var(--accent),var(--accent-2));box-shadow:0 2px 12px var(--glow);}
+  .btn-primary{color:var(--btn-text);background:linear-gradient(180deg,var(--accent),var(--accent-2));box-shadow:0 2px 12px var(--glow);}
   .btn-primary:hover:not(:disabled){transform:translateY(-1px);}
   .btn-danger{color:#2b0d10;background:linear-gradient(180deg,#ff8a96,var(--red));}
   .btn-danger:hover:not(:disabled){transform:translateY(-1px);}
@@ -53,7 +74,7 @@
   .conn .f.secret input{width:150px;} .conn .f.start input{width:130px;}
   .seg{display:inline-flex;background:var(--panel-2);border:1px solid var(--border-2);border-radius:var(--radius-sm);padding:3px;gap:2px;}
   .seg button{padding:5px 10px;font-weight:500;background:transparent;border:none;color:var(--text-dim);border-radius:6px;}
-  .seg button.on{background:linear-gradient(180deg,var(--accent),var(--accent-2));color:#042b27;}
+  .seg button.on{background:linear-gradient(180deg,var(--accent),var(--accent-2));color:var(--btn-text);}
   .conn-status{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--text-dim);padding-bottom:8px;margin-left:auto;}
   .dot{width:9px;height:9px;border-radius:50%;background:var(--text-faint);}
   .dot.live{background:var(--green);} .dot.warn{background:var(--amber);} .dot.err{background:var(--red);} .dot.busy{background:var(--amber);}
@@ -77,7 +98,7 @@
   table{border-collapse:collapse;width:100%;font-size:12px;}
   thead th{position:sticky;top:0;z-index:1;text-align:left;font-weight:600;font-size:10.5px;color:var(--text-dim);
     background:var(--bg-2);padding:7px 10px;border-bottom:1px solid var(--border);cursor:pointer;white-space:nowrap;}
-  tbody td{padding:6px 10px;border-bottom:1px solid rgba(32,41,58,.45);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  tbody td{padding:6px 10px;border-bottom:1px solid var(--border);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   tbody td.name{max-width:340px;} td.size,td.mod{font-family:"JetBrains Mono",monospace;color:var(--text-dim);font-size:11px;}
   tbody tr{cursor:pointer;} tbody tr:hover{background:rgba(77,214,193,.06);}
   tbody tr.sel{background:rgba(77,214,193,.16)!important;box-shadow:inset 3px 0 0 var(--accent);}
@@ -98,7 +119,7 @@
   .toggle{display:inline-flex;align-items:center;gap:7px;cursor:pointer;}
   .switch{width:32px;height:17px;border-radius:9px;background:var(--panel-2);border:1px solid var(--border-2);position:relative;}
   .switch::after{content:"";position:absolute;top:1px;left:1px;width:13px;height:13px;border-radius:50%;background:var(--text-faint);transition:left .15s,background .15s;}
-  .toggle.on .switch{background:var(--accent-2);border-color:var(--accent);} .toggle.on .switch::after{left:16px;background:#042b27;}
+  .toggle.on .switch{background:var(--accent-2);border-color:var(--accent);} .toggle.on .switch::after{left:16px;background:var(--btn-text);}
   #updateBanner{display:none;align-items:center;gap:10px;background:rgba(77,214,193,.12);border:1px solid var(--accent-2);
     border-radius:var(--radius-sm);padding:6px 12px;font-size:12px;}
   #updateBanner.show{display:flex;}
@@ -138,6 +159,26 @@
 </head>
 <body>
 <div class="app">
+
+  <!-- header -->
+  <header>
+    <div class="title">
+      <h1>Simple SFTP Client</h1>
+      <div class="by">by JDE-Projects</div>
+      <a class="ghl" id="bylink" href="https://github.com/JDE-Projects" onclick="API&&API.open_url('https://github.com/JDE-Projects');return false;">github.com/JDE-Projects</a>
+    </div>
+    <div class="head-right">
+      <button class="theme-btn" id="theme-btn" onclick="toggleTheme()" title="Toggle theme">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <circle cx="12" cy="12" r="4"/>
+          <path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/>
+        </svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
+        </svg>
+      </button>
+    </div>
+  </header>
 
   <!-- connection -->
   <div class="panel conn">
@@ -193,10 +234,10 @@
     <div class="center">
       <button id="upBtn" class="btn-primary" disabled title="Upload selected">Upload &#8594;</button>
       <button id="downBtn" class="btn-primary" disabled title="Download selected">&#8592; Download</button>
-      <button id="compareBtn" class="btn-ghost btn-sm" disabled>Compare</button>
-      <button id="syncUpBtn" class="btn-ghost btn-sm" disabled>Sync &#8594;</button>
-      <button id="syncDownBtn" class="btn-ghost btn-sm" disabled>&#8592; Sync</button>
-      <button id="watchBtn" class="btn-ghost btn-sm" disabled>Watch</button>
+      <button id="compareBtn" class="btn-ghost btn-sm" disabled title="Compare the local and remote folders for differences">Compare</button>
+      <button id="syncUpBtn" class="btn-ghost btn-sm" disabled title="Upload new and changed files from local to remote">Sync &#8594;</button>
+      <button id="syncDownBtn" class="btn-ghost btn-sm" disabled title="Download new and changed files from remote to local">&#8592; Sync</button>
+      <button id="watchBtn" class="btn-ghost btn-sm" disabled title="Auto-upload local changes to the remote folder while on">Watch</button>
     </div>
 
     <div class="pane panel" id="paneRemote" data-side="remote">
@@ -287,6 +328,12 @@ async function exportConsole(){ const box=$("console"); if(!box)return;
 function hsize(n){if(n==null)return"";n=+n;const u=["B","KB","MB","GB","TB"];let i=0;while(n>=1024&&i<4){n/=1024;i++;}return (i?n.toFixed(1):n.toFixed(0))+" "+u[i];}
 function fmod(ts){if(!ts)return"";const d=new Date(ts*1000);return d.toISOString().slice(0,16).replace("T"," ");}
 
+/* theme */
+let currentTheme="dark";
+function applyTheme(theme){ currentTheme=theme; document.body.classList.toggle("light",theme==="light"); }
+async function toggleTheme(){ const next=currentTheme==="light"?"dark":"light"; applyTheme(next);
+  if(window.pywebview&&window.pywebview.api&&window.pywebview.api.save_theme) await window.pywebview.api.save_theme(next); }
+
 window.addEventListener("pywebviewready",init);
 window.appEvent=function(ev,p){
   if(ev==="progress"){ $("qName").textContent=p.name; $("qFill").style.width=p.pct+"%";
@@ -304,6 +351,7 @@ window.appEvent=function(ev,p){
 
 async function init(){
   API=window.pywebview.api;
+  try{ if(API.get_theme) applyTheme((await API.get_theme())||"dark"); }catch(e){}
   const meta=await API.get_meta();
   $("verText").textContent="v"+meta.version;
   const kg=$("kgType"); meta.key_types.forEach(t=>{const o=document.createElement("option");o.value=t;o.textContent=t;kg.appendChild(o);});

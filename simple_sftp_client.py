@@ -297,6 +297,30 @@ class Api:
             "sessions": self._load_sessions(),
         }
 
+    def _pref_path(self):
+        return os.path.join(exe_dir(), "simple_sftp_client.pref")
+
+    def _load_theme(self):
+        try:
+            with open(self._pref_path(), "r", encoding="utf-8") as f:
+                theme = json.load(f).get("theme")
+            return theme if theme in ("dark", "light") else "dark"
+        except Exception:
+            return "dark"
+
+    def get_theme(self):
+        return self._load_theme()
+
+    def save_theme(self, theme):
+        if theme not in ("dark", "light"):
+            return {"ok": False}
+        try:
+            with open(self._pref_path(), "w", encoding="utf-8") as f:
+                json.dump({"theme": theme}, f)
+            return {"ok": True}
+        except Exception:
+            return {"ok": False}
+
     def set_debug(self, on):
         ok = debug.set_enabled(on)
         debug.log("Debug enabled" if on and ok else "Debug disabled")
