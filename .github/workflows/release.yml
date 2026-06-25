@@ -4,7 +4,7 @@ on:
     tags: ['v*']
 jobs:
   release:
-    uses: JDE-Projects/Build-Tools/.github/workflows/release.yml@e12bd20ecdf575c7bdf241c5bc6e6a1c95ffdf61 # Build-Tools: installer support
+    uses: JDE-Projects/Build-Tools/.github/workflows/release.yml@f2713dd841d216ba0f5969a55ad1166104323e55 # Build-Tools: installer support
     permissions:
       id-token: write
       attestations: write
