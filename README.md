@@ -8,6 +8,14 @@ Built by [JDE-Projects](https://github.com/JDE-Projects).
 
 If you enjoyed this project and would like to buy me a coffee, check out my [Ko-fi](https://ko-fi.com/jdeprojects).
 
+## Preview
+
+<p align="center">
+  <img src="screenshots/sftp-client-light-dark.png" width="900"
+       alt="Simple SFTP Client in dark and light themes">
+  <br><em>Dark and light themes</em>
+</p>
+
 ## Highlights
 - Dual-pane browser with breadcrumb paths, back/forward, recent locations, and
   an instant per-pane filter.
