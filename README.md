@@ -50,9 +50,27 @@ Two ways to get it from the [Releases](../../releases) page - pick one:
 Windows only, no Python or setup required. Unsigned, so SmartScreen may warn the
 first time: More info > Run anyway.
 
+## Updating
+
+Simple SFTP Client doesn't update itself. The bottom bar has a **Check for
+updates** button that tells you when a newer release is out; when it does,
+get the new version from the [Releases](../../releases) page the same way you
+first installed it.
+
+- **Installer:** download the new `SimpleSFTPClient-vX.Y.Z-setup.exe` and run
+  it. It installs over your current copy and keeps your saved sessions and
+  theme choice.
+- **Portable .zip:** download and extract the new `SimpleSFTPClient-vX.Y.Z.zip`.
+  To keep your saved sessions, copy `servers.json`, `known_hosts`, and
+  `simple_sftp_client.pref` from the old folder into the new one.
+
+Passwords remembered via "Remember password" live in the Windows Credential
+Manager, not the app folder, so they survive an update on the same machine;
+there's nothing else to carry over.
+
 ## Verify this download (optional)
-This release was built on GitHub from this public source - not on a personal
-machine - and is signed with a build-provenance attestation. To confirm a
+This release was built on GitHub from this public source, not on a personal
+machine, and is signed with a build-provenance attestation. To confirm your
 download is genuine, install the [GitHub CLI](https://cli.github.com) and run:
 
 ```
@@ -96,15 +114,11 @@ pipeline from this repo. You can also check the file against the published
 - The optional debug log is off by default; when on it writes
   `Debug_Log_MMDDYYYY_HHMMSS.txt` next to the app with credentials redacted.
 
-## Updates
-Use Check for Updates to compare your version against the latest GitHub
-Release. If a newer version exists, the app shows what's new and links to the
-Releases page to download it. The check is silent if you're offline.
-
 ## A note on how this was built
 This project was built with AI assistance. The design decisions, feature
 direction, and real-world testing were directed by me. The code was written
-and revised with an AI assistant against that direction.
+and revised with an AI assistant against that direction. Treat it like any
+community tool: review and test it before relying on it.
 
 ## License
 Released under the PolyForm Noncommercial License 1.0.0 (see
