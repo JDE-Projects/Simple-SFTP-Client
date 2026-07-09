@@ -104,7 +104,10 @@ pipeline from this repo. You can also check the file against the published
 
 ## Security and privacy
 - Passwords and key passphrases live in memory only and are wiped on
-  disconnect. `servers.json` never stores passwords.
+  disconnect.
+- `servers.json` holds your saved sessions, never passwords. Treat it as
+  sensitive: it maps your internal hosts and accounts, so don't share it
+  publicly (in a bug report, forum post, or public repo).
 - "Remember password" is opt-in per session and stores the password in the
   Windows Credential Manager (via `keyring`), not in any file.
 - Only modern, secure key-exchange, ciphers, and MACs are offered; known-weak
