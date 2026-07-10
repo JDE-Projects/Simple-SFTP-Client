@@ -971,8 +971,12 @@ class Api:
     def browse_save_key(self, suggested):
         if not self._window:
             return ""
+        try:
+            dlg = webview.FileDialog.SAVE
+        except AttributeError:  # older pywebview
+            dlg = webview.SAVE_DIALOG
         res = self._window.create_file_dialog(
-            webview.SAVE_DIALOG, save_filename=suggested or "id_ed25519")
+            dlg, save_filename=suggested or "id_ed25519")
         if not res:
             return ""
         return res if isinstance(res, str) else res[0]
