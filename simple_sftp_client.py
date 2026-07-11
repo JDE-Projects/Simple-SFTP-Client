@@ -19,6 +19,7 @@ import os
 import sys
 import io
 import stat
+import ctypes
 import json
 import logging
 import base64
@@ -36,7 +37,7 @@ from urllib.request import Request, urlopen
 import webview
 import paramiko
 
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3.0"
 GITHUB_REPO = "JDE-Projects/Simple-SFTP-Client"   # owner/repo for update checks
 
 # Weak / deprecated / CVE-prone algorithms we refuse (secure-or-fail).
@@ -1188,7 +1189,38 @@ def _on_loaded():
     threading.Timer(max(0.0, 5.0 - (time.time() - _start)), _close_splash).start()
 
 
+_mutex_handle = None   # module-level: must live for the process lifetime
+
+def _acquire_single_instance(mutex_name: str) -> bool:
+    # Name convention: "JDE_Simple{Thing}Tool_SingleInstance"
+    # Session-local (no "Global\" prefix): each Windows session (e.g. RDP,
+    # fast user switching) gets its own instance instead of colliding across users.
+    global _mutex_handle
+    try:
+        # use_last_error=True: ctypes.windll's GetLastError() can be clobbered
+        # by ctypes-internal calls, so read the error via ctypes.get_last_error() instead.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _mutex_handle = kernel32.CreateMutexW(None, False, mutex_name)
+        return ctypes.get_last_error() != 183   # ERROR_ALREADY_EXISTS
+    except Exception:
+        return True   # fail open: never block launch over a mutex error
+
+def _prompt_second_instance(app_title: str) -> bool:
+    # Native message box only: runs before pywebview/Qt exists, so no Qt dialog is available yet.
+    try:
+        text = f"{app_title} is already running.\n\nOpen a second instance?"
+        MB_YESNO_ICONQUESTION = 0x00000024
+        result = ctypes.windll.user32.MessageBoxW(None, text, app_title, MB_YESNO_ICONQUESTION)
+        return result == 6   # IDYES
+    except Exception:
+        return True   # fail open: if the box can't be shown, launch proceeds
+
+
 def main():
+    if not _acquire_single_instance("JDE_SimpleSFTPClient_SingleInstance"):
+        if not _prompt_second_instance("Simple SFTP Client"):
+            sys.exit(0)
+
     if HAS_SPLASH:
         threading.Timer(30.0, _close_splash).start()
     if sys.platform == "win32":
