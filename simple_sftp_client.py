@@ -811,7 +811,6 @@ class Api:
         return "ok"
 
     def _put_resume(self, lp, rp, offset, cb):
-        mode = "ab" if offset else "wb"
         with open(lp, "rb") as src:
             src.seek(offset)
             with self.sftp.open(rp, "a" if offset else "w") as dst:
