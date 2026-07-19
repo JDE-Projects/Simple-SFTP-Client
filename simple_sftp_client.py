@@ -38,7 +38,7 @@ from urllib.request import Request, urlopen
 import webview
 import paramiko
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 GITHUB_REPO = "JDE-Projects/Simple-SFTP-Client"   # owner/repo for update checks
 
 # Weak / deprecated / CVE-prone algorithms we refuse (secure-or-fail).
