@@ -35,16 +35,20 @@
   .mono{font-family:"JetBrains Mono",monospace;}
   .app{display:flex;flex-direction:column;height:100vh;padding:12px 14px 8px;gap:10px;}
   /* header */
-  header{display:flex;align-items:flex-end;justify-content:space-between;flex:0 0 auto;}
-  .title h1{font-size:20px;font-weight:700;margin:0;letter-spacing:-0.01em;white-space:nowrap;}
-  .title .by{display:block;margin-top:3px;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-dim);}
-  .title .ghl{display:inline-block;margin-top:2px;font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--accent);text-decoration:none;}
-  .title .ghl:hover{text-decoration:underline;}
-  .head-right{display:flex;align-items:center;gap:12px;}
+  .app-header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex:0 0 auto;}
+  .app-header .brand{display:flex;align-items:center;gap:13px;}
+  .app-header .app-glyph{width:40px;height:40px;border-radius:11px;flex:0 0 auto;display:block;box-shadow:0 0 24px var(--glow);}
+  .app-header .title{font-size:18px;font-weight:700;letter-spacing:.2px;color:var(--text);line-height:1.25;}
+  .app-header .byline{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--text-dim);margin-top:3px;}
+  .app-header .byline a{color:var(--accent);text-decoration:none;cursor:pointer;}
+  .app-header .byline a:hover{text-decoration:underline;}
+  .app-header .head-right{display:flex;align-items:center;gap:12px;}
+  .app-header .meta{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-faint);text-align:right;}
+  .app-header .meta:empty{display:none;}
   .theme-btn{background:transparent;border:1px solid var(--border-2);border-radius:var(--radius-sm);
-    width:44px;height:44px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text-dim);transition:.15s;flex:0 0 auto;}
+    width:36px;height:36px;padding:0;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text-dim);transition:.15s;flex:0 0 auto;}
   .theme-btn:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-1px);}
-  .theme-btn svg{width:24px;height:24px;}
+  .theme-btn svg{width:18px;height:18px;}
   .icon-moon{display:none;} body.light .icon-sun{display:none;} body.light .icon-moon{display:block;}
   .panel{background:linear-gradient(180deg,var(--panel),var(--bg-2));border:1px solid var(--border);border-radius:var(--radius);}
   .field-label{display:block;font-size:10.5px;color:var(--text-dim);margin-bottom:4px;}
@@ -161,11 +165,13 @@
 <div class="app">
 
   <!-- header -->
-  <header>
-    <div class="title">
-      <h1>Simple SFTP Client</h1>
-      <div class="by">by JDE-Projects</div>
-      <a class="ghl" id="bylink" href="https://github.com/JDE-Projects" onclick="API&&API.open_url('https://github.com/JDE-Projects');return false;">github.com/JDE-Projects</a>
+  <header class="app-header">
+    <div class="brand">
+      <img class="app-glyph" src="simple_sftp_client.png" alt="">
+      <div>
+        <div class="title">Simple SFTP Client</div>
+        <div class="byline">by <a id="bylink" onclick="API&&API.open_url('https://github.com/JDE-Projects');return false;">JDE-Projects</a></div>
+      </div>
     </div>
     <div class="head-right">
       <button class="theme-btn" id="theme-btn" onclick="toggleTheme()" title="Toggle theme">
