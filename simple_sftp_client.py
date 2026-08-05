@@ -1482,7 +1482,7 @@ def main():
     api = Api()
     window = webview.create_window(
         "Simple SFTP Client", url=resource_path("simple_sftp_client-UI.html"),
-        js_api=api, width=1480, height=980, min_size=(1180, 800),
+        js_api=api, width=1480, height=980, min_size=(1000, 700),
         background_color="#0a0e14")
     api.set_window(window)
     window.events.loaded += _on_loaded
