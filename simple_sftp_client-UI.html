@@ -124,9 +124,9 @@
   .switch{width:32px;height:17px;border-radius:9px;background:var(--panel-2);border:1px solid var(--border-2);position:relative;}
   .switch::after{content:"";position:absolute;top:1px;left:1px;width:13px;height:13px;border-radius:50%;background:var(--text-faint);transition:left .15s,background .15s;}
   .toggle.on .switch{background:var(--accent-2);border-color:var(--accent);} .toggle.on .switch::after{left:16px;background:var(--btn-text);}
-  #updateBanner{display:none;align-items:center;gap:10px;background:rgba(77,214,193,.12);border:1px solid var(--accent-2);
-    border-radius:var(--radius-sm);padding:6px 12px;font-size:12px;}
-  #updateBanner.show{display:flex;}
+  #updateNotice{font-size:11px;color:var(--text-dim);transition:opacity .5s ease;text-align:center;}
+  #updateNotice a{color:var(--accent-2);text-decoration:none;font-weight:500;}
+  #updateNotice a:hover{text-decoration:underline;}
 
   /* console (activity log) — height is kept in sync with the connection bar */
   .console{position:relative;padding:0;overflow:hidden;flex:0 0 auto;}
@@ -208,9 +208,6 @@
     <div class="conn-status"><span id="connDot" class="dot"></span><span id="connText">Not connected</span></div>
   </div>
 
-  <div id="updateBanner"><span id="updateMsg"></span><button id="updateView" class="btn-primary btn-sm">View release</button>
-    <button id="updateDismiss" class="btn-ghost btn-sm">Dismiss</button></div>
-
   <!-- console / activity log -->
   <div class="panel console" id="consoleWrap">
     <div class="console-tools">
@@ -275,7 +272,7 @@
       <span id="statusText"></span>
       <div id="debugToggle" class="toggle"><span class="switch"></span><span>Debug log</span></div>
     </div>
-    <span class="grow"></span>
+    <span id="updateNotice" class="grow"></span>
     <span id="verText" class="meta" style="color:var(--text-faint)"></span>
     <button id="updateCheck" class="btn-ghost btn-sm" style="margin-left:12px">Check for updates</button>
   </div>
@@ -380,7 +377,7 @@ async function init(){
   $("kgInstall").onclick=onInstallKey;
   $("sessClose").onclick=()=>$("sessModal").classList.remove("show");
   $("debugToggle").onclick=async()=>{const on=!$("debugToggle").classList.contains("on");const r=await API.set_debug(on);$("debugToggle").classList.toggle("on",r.enabled);toast(r.enabled?"Debug log on":"Debug log off");};
-  $("updateCheck").onclick=()=>doUpdate(true); $("updateDismiss").onclick=()=>$("updateBanner").classList.remove("show");
+  $("updateCheck").onclick=()=>doUpdate(true);
   ["local","remote"].forEach(side=>{
     $("filter"+cap(side)).addEventListener("input",e=>{state[side].filter=e.target.value.toLowerCase();renderPane(side);});
     document.querySelectorAll(`#pane${cap(side)} .icon-btn`).forEach(b=>b.onclick=()=>nav(side,b.dataset.act));
@@ -476,7 +473,9 @@ function setConn(s,t){ $("connDot").className="dot"+(s?" "+s:""); $("connText").
 async function onSave(){ const name=await prompt2("Save session as","Name"); if(!name)return;
   const p=connParams(); const r=await API.save_session({name, host:p.host, port:p.port, username:p.username,
     auth:authMode, key_path:p.key_path, start_path:p.start_path, remember:rememberPw});
-  fillSessions(r.sessions); $("sessions").value=name; toast("Saved"); }
+  fillSessions(r.sessions); $("sessions").value=name;
+  if(r.pw_error){ infoBox("Password not saved", r.pw_error); }
+  else toast("Saved"); }
 
 let pollTimer=null;
 function pollHealth(){ clearTimeout(pollTimer); if(!connected)return;
@@ -630,15 +629,33 @@ function openSessions(){ const list=$("sessions")._list||[]; const box=$("sessLi
   list.forEach(x=>{ const d=document.createElement("div"); d.className="sess-item";
     d.innerHTML=`<div class="nm">${esc(x.name)}<div class="meta">${esc(x.username)}@${esc(x.host)}:${x.port||22} \u00b7 ${x.auth}${x.remember?" \u00b7 pw saved":""}</div></div>`;
     const del=document.createElement("button"); del.className="btn-ghost btn-sm"; del.textContent="Delete";
-    del.onclick=async()=>{ const r=await API.delete_session(x.name); fillSessions(r.sessions); openSessions(); }; d.appendChild(del); box.appendChild(d); });
+    del.onclick=async()=>{
+      if(x.remember){
+        const ok=await confirm2("Delete session","Deleting this session will also remove its saved password from Windows Credential Manager.\n\nContinue?");
+        if(!ok)return;
+      }
+      const r=await API.delete_session(x.name); fillSessions(r.sessions); openSessions(); }; d.appendChild(del); box.appendChild(d); });
   $("sessModal").classList.add("show"); }
 
 /* ───── update check ───── */
+function fadeNotice(){ const notice=$("updateNotice");
+  setTimeout(()=>{ notice.style.opacity="0";
+    setTimeout(()=>{ notice.textContent=""; notice.style.opacity="1"; },500); },5000); }
+
 async function doUpdate(manual){ const r=await API.check_update();
-  if(!r.ok){ if(manual)toast("Update check failed (offline?)",true); return; }
-  if(r.update){ $("updateMsg").innerHTML=`<b>v${r.latest}</b> is available (you have v${r.current}).`; $("updateBanner").classList.add("show");
-    $("updateView").onclick=()=>API.open_url(r.url); }
-  else if(manual)toast("You're on the latest version (v"+r.current+")"); }
+  const notice=$("updateNotice");
+  if(r.update){
+    notice.innerHTML='Update available: <a href="#" id="updateLink">v'+esc(r.version)+'</a>';
+    $("updateLink").onclick=(e)=>{ e.preventDefault(); API.open_url("https://github.com/JDE-Projects/Simple-SFTP-Client/blob/main/README.md#updating"); };
+  } else if(r.offline){
+    notice.textContent="Couldn't reach GitHub to check for updates.";
+    fadeNotice();
+    if(manual) infoBox("Couldn't check for updates", r.reason||"The app couldn't run the update check.");
+  } else {
+    notice.textContent="You're on the latest version (v"+esc(r.current)+")";
+    fadeNotice();
+  }
+}
 
 /* ───── tiny modal helpers ───── */
 function confirm2(title,text){ return new Promise(res=>{ $("cfTitle").textContent=title; $("cfText").textContent=text; $("cfOk").textContent="OK"; $("cfOk").className="btn-danger";

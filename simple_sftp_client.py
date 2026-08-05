@@ -21,10 +21,12 @@ import io
 import stat
 import ctypes
 from ctypes import wintypes
+import errno
 import json
 import logging
 import base64
 import hashlib
+import ssl
 import time
 import shutil
 import threading
@@ -32,13 +34,14 @@ import traceback
 import webbrowser
 import socket
 import posixpath
+import urllib.error
 from datetime import datetime
 from urllib.request import Request, urlopen
 
 import webview
 import paramiko
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 GITHUB_REPO = "JDE-Projects/Simple-SFTP-Client"   # owner/repo for update checks
 
 # Weak / deprecated / CVE-prone algorithms we refuse (secure-or-fail).
@@ -109,12 +112,58 @@ def save_prefs(prefs: dict) -> bool:
 
 def _win32():
     u = ctypes.windll.user32
-    u.FindWindowW.restype = wintypes.HWND
-    u.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
     u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
     u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                                ctypes.c_int, ctypes.c_int, wintypes.UINT]
     return u
+
+
+def _own_window_handle(title):
+    """HWND of our own top-level window with this title.
+
+    FindWindowW matches by title across the whole desktop, so with a second
+    instance open it can return the other copy's window. Enumerate instead and
+    keep only a window owned by this process.
+    """
+    try:
+        u = ctypes.windll.user32
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        u.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+        u.EnumWindows.restype = wintypes.BOOL
+        u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        u.GetWindowThreadProcessId.restype = wintypes.DWORD
+        u.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        u.GetWindowTextLengthW.restype = ctypes.c_int
+        u.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        u.GetWindowTextW.restype = ctypes.c_int
+        u.IsWindowVisible.argtypes = [wintypes.HWND]
+        u.IsWindowVisible.restype = wintypes.BOOL
+
+        own_pid = os.getpid()
+        found = {"hwnd": None}
+
+        def _callback(hwnd, lparam):
+            if not u.IsWindowVisible(hwnd):
+                return True
+            pid = wintypes.DWORD()
+            u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value != own_pid:
+                return True
+            length = u.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            u.GetWindowTextW(hwnd, buf, length + 1)
+            if buf.value != title:
+                return True
+            found["hwnd"] = hwnd
+            return False   # stop enumerating, we found it
+
+        proc = WNDENUMPROC(_callback)   # kept alive for the duration of the call below
+        u.EnumWindows(proc, 0)
+        return found["hwnd"]
+    except Exception:
+        return None
 
 
 def _save_geometry(win) -> None:
@@ -122,7 +171,7 @@ def _save_geometry(win) -> None:
     Wrapped end to end so a failure here can never block the window from closing."""
     try:
         u = _win32()
-        hwnd = u.FindWindowW(None, win.title)
+        hwnd = _own_window_handle(win.title)
         if not hwnd:
             return
         r = wintypes.RECT()
@@ -161,7 +210,7 @@ def _restore_geometry(win) -> None:
         if not user32.MonitorFromPoint(point, 0):   # MONITOR_DEFAULTTONULL
             return
         u = _win32()
-        hwnd = u.FindWindowW(None, win.title)
+        hwnd = _own_window_handle(win.title)
         if not hwnd:
             return
         SWP_NOZORDER, SWP_NOACTIVATE = 0x0004, 0x0010
@@ -378,6 +427,76 @@ def missing_fields(p):
     return ""
 
 
+def _update_error_reason(exc: BaseException) -> str:
+    """Turn a check_update exception into a short, plain-language reason to
+    show in the UI. Pure and network-free: takes the already-raised exception,
+    never touches the network itself.
+
+    Each branch is specific to a failure that can actually cause it, and
+    names a next step where there is a sensible one. Subclasses are checked
+    before their parents: SSLCertVerificationError and SSLEOFError/
+    SSLZeroReturnError before the generic ssl.SSLError, and the specific
+    ConnectionError subclasses and socket.gaierror before the generic OSError
+    branch (socket.timeout is an alias of TimeoutError, and both are OSError
+    subclasses)."""
+    # HTTPError is a URLError subclass but carries its own .code, so classify
+    # it before unwrapping anything.
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 403:
+            return (
+                "GitHub is rate-limiting update checks from this network. "
+                "Try again later."
+            )
+        if exc.code == 404:
+            return "No published release was found."
+        if 500 <= exc.code < 600:
+            return f"GitHub is having trouble on its end (HTTP {exc.code})."
+        return f"GitHub returned an error (HTTP {exc.code})."
+
+    if isinstance(exc, json.JSONDecodeError):
+        return (
+            "GitHub returned something unexpected. This often means a proxy "
+            "or a guest wifi sign-in page answered instead."
+        )
+
+    # A plain URLError wraps the underlying cause (ssl.SSLError, socket.timeout,
+    # a DNS/socket OSError, ...) in its .reason; unwrap it to classify the
+    # actual cause, but remember it came from a URLError for the fallback below.
+    is_url_error = isinstance(exc, urllib.error.URLError)
+    cause = exc.reason if is_url_error and exc.reason is not None else exc
+
+    if isinstance(cause, ssl.SSLCertVerificationError):
+        return (
+            "GitHub's certificate could not be verified. This usually means "
+            "antivirus or a network filter is inspecting HTTPS traffic."
+        )
+    if isinstance(cause, (ssl.SSLEOFError, ssl.SSLZeroReturnError)):
+        return "The secure connection was cut off during the handshake with GitHub."
+    if isinstance(cause, ssl.SSLError):
+        return "The secure connection to GitHub failed."
+    if isinstance(cause, socket.gaierror):
+        return (
+            "The address for api.github.com could not be looked up. Check "
+            "DNS or the internet connection."
+        )
+    if isinstance(cause, (socket.timeout, TimeoutError)):
+        return "GitHub didn't respond in time."
+    if isinstance(cause, (ConnectionRefusedError, ConnectionResetError)):
+        return (
+            "The connection was refused or reset. A firewall or proxy may "
+            "be blocking it."
+        )
+    if isinstance(cause, OSError) and getattr(cause, "errno", None) == errno.ENETUNREACH:
+        return "No network connection."
+    if is_url_error:
+        return "Couldn't reach GitHub. Check the internet connection."
+
+    text = f"{type(exc).__name__}: {exc}"
+    if len(text) > 120:
+        text = text[:117] + "..."
+    return text
+
+
 class Api:
     def __init__(self):
         self._window = None
@@ -470,22 +589,42 @@ class Api:
         sessions = self._load_sessions()
         s = {k: s.get(k, "") for k in ("name", "host", "port", "username",
                                        "auth", "key_path", "start_path", "remember")}
-        sessions = [x for x in sessions if x.get("name") != s["name"]]
-        sessions.append(s)
-        sessions.sort(key=lambda x: x.get("name", "").lower())
-        # optional remembered password -> OS keychain
+        # optional remembered password -> OS keychain. The session may only
+        # claim a saved password when one was actually written, so a failed
+        # write, or "remember" ticked with no password to save (key auth, or
+        # saving before connecting), both leave remember off.
+        pw_saved = False
+        pw_error = None
         if s.get("remember") and self._cred_pass:
             try:
                 import keyring
                 keyring.set_password("SimpleSFTPClient", f"{s['host']}|{s['username']}", self._cred_pass)
+                pw_saved = True
             except Exception as e:
                 debug.log("keyring set failed", str(e))
+                pw_error = f"Could not save the password to Windows Credential Manager: {e}"
+        if s.get("remember") and not pw_saved:
+            s["remember"] = False
+        sessions = [x for x in sessions if x.get("name") != s["name"]]
+        sessions.append(s)
+        sessions.sort(key=lambda x: x.get("name", "").lower())
         self._save_sessions(sessions)
-        return {"ok": True, "sessions": sessions}
+        result = {"ok": True, "sessions": sessions, "pw_saved": pw_saved}
+        if pw_error:
+            result["pw_error"] = pw_error
+        return result
 
     def delete_session(self, name):
-        sessions = [x for x in self._load_sessions() if x.get("name") != name]
+        sessions = self._load_sessions()
+        target = next((x for x in sessions if x.get("name") == name), None)
+        sessions = [x for x in sessions if x.get("name") != name]
         self._save_sessions(sessions)
+        if target and target.get("remember"):
+            try:
+                import keyring
+                keyring.delete_password("SimpleSFTPClient", f"{target.get('host')}|{target.get('username')}")
+            except Exception as e:
+                debug.log("keyring delete failed", str(e))
         return {"ok": True, "sessions": sessions}
 
     def _remembered_password(self, host, username):
@@ -1216,18 +1355,25 @@ class Api:
 
     # ───────────── update check ─────────────
     def check_update(self):
+        """Compare the latest published release to APP_VERSION. Quiet in the UI on
+        failure (see _update_error_reason), but always logged when debug is on."""
+        result = {"current": APP_VERSION, "version": None, "update": False, "offline": False}
         try:
             url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
             req = Request(url, headers={"User-Agent": "Simple-SFTP-Client",
                                         "Accept": "application/vnd.github+json"})
-            with urlopen(req, timeout=8) as r:
+            with urlopen(req, timeout=10) as r:
                 data = json.loads(r.read().decode())
-            tag = (data.get("tag_name") or "").lstrip("v")
-            newer = self._is_newer(tag, APP_VERSION)
-            return {"ok": True, "current": APP_VERSION, "latest": tag, "update": newer,
-                    "notes": (data.get("body") or "")[:1500], "url": data.get("html_url", "")}
+            latest = (data.get("tag_name") or "").lstrip("v")
+            result["version"] = latest
+            if latest and self._is_newer(latest, APP_VERSION):
+                result["update"] = True
+            debug.log(f"check_update: found v{latest}, current v{APP_VERSION}")
         except Exception as e:
-            return {"ok": False, "error": friendly_error(e)}
+            result["offline"] = True
+            result["reason"] = _update_error_reason(e)
+            debug.log(f"check_update failed: {type(e).__name__}: {e}")
+        return result
 
     def _is_newer(self, latest, current):
         def parts(v):
@@ -1296,6 +1442,8 @@ def _acquire_single_instance(mutex_name: str) -> bool:
     except Exception:
         return True   # fail open: never block launch over a mutex error
 
+IS_SECOND_INSTANCE = False   # set True in main() when the user chooses to run a second copy
+
 def _prompt_second_instance(app_title: str) -> bool:
     # Native message box only: runs before pywebview/Qt exists, so no Qt dialog is available yet.
     try:
@@ -1308,9 +1456,23 @@ def _prompt_second_instance(app_title: str) -> bool:
 
 
 def main():
+    # Use the Windows certificate store for TLS instead of the bundled CA list,
+    # so antivirus/network filters that inject their own root cert (common on
+    # managed laptops) don't break the GitHub update check. Runs before the
+    # Api object exists, so there's no logger yet to record a fallback; if
+    # truststore is missing or fails, urllib silently keeps using its default
+    # bundled CA list instead.
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+    except Exception:
+        pass
+
+    global IS_SECOND_INSTANCE
     if not _acquire_single_instance("JDE_SimpleSFTPClient_SingleInstance"):
         if not _prompt_second_instance("Simple SFTP Client"):
             sys.exit(0)
+        IS_SECOND_INSTANCE = True
 
     if HAS_SPLASH:
         threading.Timer(30.0, _close_splash).start()
@@ -1323,7 +1485,7 @@ def main():
     api = Api()
     window = webview.create_window(
         "Simple SFTP Client", url=resource_path("simple_sftp_client-UI.html"),
-        js_api=api, width=1480, height=980, min_size=(1180, 800),
+        js_api=api, width=1480, height=980, min_size=(1000, 700),
         background_color="#0a0e14")
     api.set_window(window)
     window.events.loaded += _on_loaded
@@ -1339,12 +1501,17 @@ def main():
             debug.log("wire external drop failed", str(e))
     window.events.loaded += _wire_external_drop
 
-    window.events.shown += lambda: _restore_geometry(window)
+    # Geometry save/restore locates the window by enumerating this process's
+    # own windows, so the lookup itself can't cross instances. Even so, a
+    # second instance should not adopt or overwrite the first instance's
+    # saved position. Only the first instance restores or saves geometry.
+    if not IS_SECOND_INSTANCE:
+        window.events.shown += lambda: _restore_geometry(window)
 
-    def _on_closing():
-        _save_geometry(window)
-        return True
-    window.events.closing += _on_closing
+        def _on_closing():
+            _save_geometry(window)
+            return True
+        window.events.closing += _on_closing
 
     try:
         webview.start(gui="qt", icon=resource_path("simple_sftp_client.png"))

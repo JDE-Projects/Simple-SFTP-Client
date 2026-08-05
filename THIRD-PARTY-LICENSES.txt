@@ -18,6 +18,8 @@ JetBrains Mono        OFL-1.1        github.com/JetBrains/JetBrainsMono
 Paramiko              LGPL-2.1       paramiko.org   (+ cryptography, bcrypt, PyNaCl)
 cryptography          Apache-2.0 / BSD-3   github.com/pyca/cryptography
 keyring               MIT            github.com/jaraco/keyring
+truststore            MIT            github.com/sethmlarson/truststore
+  Copyright 2022 Seth Michael Larson
 
 Paramiko's bundled crypto deps (cryptography, bcrypt, PyNaCl) are Apache-2.0.
 Full license texts are available at the source links above.
