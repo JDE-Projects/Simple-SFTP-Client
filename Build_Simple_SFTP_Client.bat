@@ -60,6 +60,7 @@ python -m PyInstaller --noconfirm --onedir --windowed --name "Simple SFTP Client
     --collect-all qtpy ^
     --collect-all keyring ^
     --collect-all webview ^
+    --hidden-import truststore ^
     simple_sftp_client.py
 if errorlevel 1 (
     echo ERROR: Build failed. Read the last lines above for the cause.

@@ -16,3 +16,8 @@ PyNaCl==1.6.2
 
 # Optional "remember password" via the OS keychain (Windows Credential Manager).
 keyring==25.7.0
+
+# Routes TLS verification through the Windows certificate store for the
+# GitHub update check, so antivirus/network HTTPS inspection doesn't break it.
+# Fleet pin from Build-Tools baseline requirements.txt.
+truststore==0.10.4
