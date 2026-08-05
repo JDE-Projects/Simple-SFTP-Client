@@ -476,7 +476,9 @@ function setConn(s,t){ $("connDot").className="dot"+(s?" "+s:""); $("connText").
 async function onSave(){ const name=await prompt2("Save session as","Name"); if(!name)return;
   const p=connParams(); const r=await API.save_session({name, host:p.host, port:p.port, username:p.username,
     auth:authMode, key_path:p.key_path, start_path:p.start_path, remember:rememberPw});
-  fillSessions(r.sessions); $("sessions").value=name; toast("Saved"); }
+  fillSessions(r.sessions); $("sessions").value=name;
+  if(r.pw_error){ infoBox("Password not saved", r.pw_error); }
+  else toast("Saved"); }
 
 let pollTimer=null;
 function pollHealth(){ clearTimeout(pollTimer); if(!connected)return;
@@ -630,7 +632,12 @@ function openSessions(){ const list=$("sessions")._list||[]; const box=$("sessLi
   list.forEach(x=>{ const d=document.createElement("div"); d.className="sess-item";
     d.innerHTML=`<div class="nm">${esc(x.name)}<div class="meta">${esc(x.username)}@${esc(x.host)}:${x.port||22} \u00b7 ${x.auth}${x.remember?" \u00b7 pw saved":""}</div></div>`;
     const del=document.createElement("button"); del.className="btn-ghost btn-sm"; del.textContent="Delete";
-    del.onclick=async()=>{ const r=await API.delete_session(x.name); fillSessions(r.sessions); openSessions(); }; d.appendChild(del); box.appendChild(d); });
+    del.onclick=async()=>{
+      if(x.remember){
+        const ok=await confirm2("Delete session","Deleting this session will also remove its saved password from Windows Credential Manager.\n\nContinue?");
+        if(!ok)return;
+      }
+      const r=await API.delete_session(x.name); fillSessions(r.sessions); openSessions(); }; d.appendChild(del); box.appendChild(d); });
   $("sessModal").classList.add("show"); }
 
 /* ───── update check ───── */

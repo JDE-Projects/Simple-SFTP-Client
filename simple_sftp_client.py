@@ -516,22 +516,39 @@ class Api:
         sessions = self._load_sessions()
         s = {k: s.get(k, "") for k in ("name", "host", "port", "username",
                                        "auth", "key_path", "start_path", "remember")}
-        sessions = [x for x in sessions if x.get("name") != s["name"]]
-        sessions.append(s)
-        sessions.sort(key=lambda x: x.get("name", "").lower())
-        # optional remembered password -> OS keychain
+        # optional remembered password -> OS keychain. A failed write must not
+        # leave the session claiming a saved password it doesn't have.
+        pw_saved = False
+        pw_error = None
         if s.get("remember") and self._cred_pass:
             try:
                 import keyring
                 keyring.set_password("SimpleSFTPClient", f"{s['host']}|{s['username']}", self._cred_pass)
+                pw_saved = True
             except Exception as e:
                 debug.log("keyring set failed", str(e))
+                pw_error = f"Could not save the password to Windows Credential Manager: {e}"
+                s["remember"] = False
+        sessions = [x for x in sessions if x.get("name") != s["name"]]
+        sessions.append(s)
+        sessions.sort(key=lambda x: x.get("name", "").lower())
         self._save_sessions(sessions)
-        return {"ok": True, "sessions": sessions}
+        result = {"ok": True, "sessions": sessions, "pw_saved": pw_saved}
+        if pw_error:
+            result["pw_error"] = pw_error
+        return result
 
     def delete_session(self, name):
-        sessions = [x for x in self._load_sessions() if x.get("name") != name]
+        sessions = self._load_sessions()
+        target = next((x for x in sessions if x.get("name") == name), None)
+        sessions = [x for x in sessions if x.get("name") != name]
         self._save_sessions(sessions)
+        if target and target.get("remember"):
+            try:
+                import keyring
+                keyring.delete_password("SimpleSFTPClient", f"{target.get('host')}|{target.get('username')}")
+            except Exception as e:
+                debug.log("keyring delete failed", str(e))
         return {"ok": True, "sessions": sessions}
 
     def _remembered_password(self, host, username):
