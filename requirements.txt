@@ -10,7 +10,7 @@ pyinstaller==6.21.0
 # SFTP transport + key handling. cryptography is used directly (Ed25519 keygen)
 # as well as by paramiko; bcrypt and PyNaCl are paramiko's crypto deps.
 paramiko==5.0.0
-cryptography==49.0.0
+cryptography==50.0.0
 bcrypt==5.0.0
 PyNaCl==1.6.2
 
