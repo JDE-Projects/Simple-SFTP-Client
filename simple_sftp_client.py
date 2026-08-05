@@ -589,8 +589,10 @@ class Api:
         sessions = self._load_sessions()
         s = {k: s.get(k, "") for k in ("name", "host", "port", "username",
                                        "auth", "key_path", "start_path", "remember")}
-        # optional remembered password -> OS keychain. A failed write must not
-        # leave the session claiming a saved password it doesn't have.
+        # optional remembered password -> OS keychain. The session may only
+        # claim a saved password when one was actually written, so a failed
+        # write, or "remember" ticked with no password to save (key auth, or
+        # saving before connecting), both leave remember off.
         pw_saved = False
         pw_error = None
         if s.get("remember") and self._cred_pass:
@@ -601,7 +603,8 @@ class Api:
             except Exception as e:
                 debug.log("keyring set failed", str(e))
                 pw_error = f"Could not save the password to Windows Credential Manager: {e}"
-                s["remember"] = False
+        if s.get("remember") and not pw_saved:
+            s["remember"] = False
         sessions = [x for x in sessions if x.get("name") != s["name"]]
         sessions.append(s)
         sessions.sort(key=lambda x: x.get("name", "").lower())

@@ -74,6 +74,25 @@ def test_save_session_keyring_success_keeps_remember_and_reports_saved(api, monk
     assert calls == [("SimpleSFTPClient", "example.com|alice", "hunter2")]
 
 
+def test_save_session_remember_with_no_password_does_not_claim_saved(api, monkeypatch):
+    # "Remember pw" ticked but no password captured (key auth, or saving
+    # before connecting): nothing is written and the session must not claim it.
+    calls = []
+    monkeypatch.setattr(keyring, "set_password",
+                        lambda *a: calls.append(a))
+
+    api._cred_pass = ""
+    result = api.save_session(base_session())
+
+    assert result["ok"] is True
+    assert result["pw_saved"] is False
+    assert "pw_error" not in result
+    assert calls == []
+
+    saved = result["sessions"][0]
+    assert saved["remember"] is False
+
+
 def test_delete_session_removes_keyring_credential_when_remembered(api, monkeypatch):
     # Seed servers.json directly with a session that has a saved password.
     with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
