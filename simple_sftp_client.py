@@ -41,6 +41,8 @@ from urllib.request import Request, urlopen
 import webview
 import paramiko
 
+from transfer_queue import TransferQueue
+
 APP_VERSION = "1.4.2"
 GITHUB_REPO = "JDE-Projects/Simple-SFTP-Client"   # owner/repo for update checks
 
@@ -509,6 +511,19 @@ class Api:
         self._cancel = threading.Event()
         self._watch_stop = None
         self._watch_thread = None
+        # transfer queue (Phase 2): one background worker drains it, concurrency 1
+        self.queue = TransferQueue()
+        self._worker = None
+        self._worker_lock = threading.Lock()
+        self._active_item = None
+        # set while sync/watch/external-drop run, so the queue worker knows to wait
+        self._legacy_active = threading.Event()
+        # Phase 2 poll model: the worker never touches evaluate_js. It writes
+        # plain state here, the window pulls it on a timer via poll_queue().
+        self._progress_state = None
+        self._console_buffer = []
+        self._console_lock = threading.Lock()
+        self._poll_mode = False
 
     def set_window(self, w):
         self._window = w
@@ -564,6 +579,13 @@ class Api:
     def _vlog(self, msg, level="info"):
         """Verbose, FileZilla-style operation line: to the console and debug log."""
         self._emit("console", {"msg": msg, "level": level})
+        debug.log(msg)
+
+    def _worker_log(self, msg, level="info"):
+        """Console line from the worker thread: never calls evaluate_js, just
+        buffers for the next poll_queue() and writes the debug log."""
+        with self._console_lock:
+            self._console_buffer.append({"msg": msg, "level": level})
         debug.log(msg)
 
     # ───────────── sessions (servers.json, never passwords) ─────────────
@@ -908,8 +930,147 @@ class Api:
 
     # ───────────── transfers (queue + progress + resume + retry) ─────────────
     def cancel(self):
+        """Cancel-all, wired to the footer Cancel button: cancels every waiting
+        queue item and flags the active one so the worker's byte loop stops and
+        finalizes it as cancelled."""
+        self.queue.cancel_all()
         self._cancel.set()
         return {"ok": True}
+
+    def poll_queue(self):
+        """Pulled by the window on a timer (~200ms) while a queue is active.
+        This is the only channel from the worker thread to the UI: it never
+        calls evaluate_js, so it cannot deadlock the window."""
+        with self._console_lock:
+            lines = self._console_buffer
+            self._console_buffer = []
+        return {
+            "items": self.queue.snapshot(),
+            "pending": self.queue.pending(),
+            "active_id": self._active_item.id if self._active_item else None,
+            "progress": self._progress_state,
+            "console": lines,
+        }
+
+    def cancel_item(self, item_id):
+        """Cancel a single queued item. Waiting items go straight to cancelled.
+        The active item is flagged and its byte loop interrupted."""
+        if self._active_item is not None and self._active_item.id == item_id:
+            self.queue.cancel(item_id)
+            self._cancel.set()
+        else:
+            self.queue.cancel(item_id)
+        return {"ok": True}
+
+    def enqueue(self, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"):
+        """New entry point for pane transfers: expands jobs (same enumeration
+        as transfer()) into per-file queue items and returns immediately. The
+        single background worker (_worker_loop) drains the queue one file at a
+        time over the existing self.sftp session; no new sessions, no
+        parallelism (that is Phase 3)."""
+        if not self.connected:
+            return {"ok": False, "error": "Not connected."}
+        if self._legacy_active.is_set():
+            return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}
+        files = []   # (local_path, remote_path)
+        try:
+            for j in jobs:
+                if direction == "upload":
+                    lp = os.path.join(local_dir, j["name"])
+                    rp = posixpath.join(remote_dir, j["name"])
+                    files += self._walk_local(lp, rp) if j["is_dir"] else [(lp, rp)]
+                else:
+                    rp = posixpath.join(remote_dir, j["name"])
+                    lp = os.path.join(local_dir, j["name"])
+                    files += self._walk_remote(rp, lp) if j["is_dir"] else [(lp, rp)]
+        except Exception as e:
+            return {"ok": False, "error": f"Could not enumerate: {e}"}
+        for lp, rp in files:
+            name = os.path.basename(lp)
+            try:
+                size = os.path.getsize(lp) if direction == "upload" and os.path.exists(lp) else 0
+            except OSError:
+                size = 0
+            self.queue.append(direction, lp, rp, name, size=size, on_conflict=on_conflict)
+        self._ensure_worker()
+        return {"ok": True, "queued": len(files)}
+
+    def _ensure_worker(self):
+        """Start the single background worker thread if it is not already running."""
+        with self._worker_lock:
+            if self._worker is None or not self._worker.is_alive():
+                self._worker = threading.Thread(target=self._worker_loop, daemon=True)
+                self._worker.start()
+
+    def _worker_loop(self):
+        """Drains the queue one item at a time. Reuses the existing self.sftp
+        session, same as the old blocking transfer path; never opens a second
+        session (Phase 3 territory). done_count/total are only for the
+        progress display, an approximation is fine there.
+
+        Runs entirely off the pywebview bridge thread, so it must never call
+        evaluate_js (that is what deadlocked the window). While this loop
+        runs, _poll_mode is True: _progress() only updates in-memory state
+        instead of emitting, and _worker_log() buffers console lines for the
+        window to pull via poll_queue()."""
+        self._poll_mode = True
+        try:
+            done_count = 0
+            while True:
+                item = self.queue.claim()
+                if item is None:
+                    break
+                self._active_item = item
+                self._cancel.clear()
+                total = done_count + self.queue.pending()
+                if item.cancel_requested:
+                    # cancel() on a waiting item goes straight to CANCELLED, so this
+                    # should not happen in practice, but guard anyway.
+                    self.queue.mark_cancelled(item.id)
+                    self._worker_log(f"cancelled {item.name}", "warn")
+                    done_count += 1
+                    self._active_item = None
+                    continue
+                arrow = "↑" if item.direction == "upload" else "↓"
+                ok = False
+                res = None
+                last_err = ""
+                for attempt in range(3):
+                    if self._cancel.is_set() or item.cancel_requested:
+                        break
+                    try:
+                        res = self._one(item.direction, item.local_path, item.remote_path,
+                                         item.name, done_count, total, item.on_conflict)
+                        ok = True
+                        break
+                    except Exception as e:
+                        last_err = str(e)
+                        debug.log(f"transfer retry {attempt+1}", f"{item.name}: {e}")
+                        if self._cancel.is_set() or item.cancel_requested:
+                            break
+                        time.sleep(0.6)
+                if self._cancel.is_set() or item.cancel_requested:
+                    self.queue.mark_cancelled(item.id)
+                    self._worker_log(f"cancelled {item.name}", "warn")
+                elif res == "skip":
+                    self.queue.mark_skipped(item.id)
+                    self._worker_log(f"skip {item.name} (already up to date)")
+                elif ok:
+                    self.queue.mark_completed(item.id)
+                    self._worker_log(f"{arrow} {(item.remote_path if item.direction == 'upload' else item.name)}", "ok")
+                else:
+                    self.queue.mark_failed(item.id, last_err or "transfer failed")
+                    self._worker_log(f"failed {item.name}", "error")
+                done_count += 1
+                self._active_item = None
+            self._active_item = None
+            self._progress_state = None
+            counts = self.queue.counts()
+            self._worker_log(f"Queue drained: {counts.get('completed', 0)} completed, "
+                              f"{counts.get('failed', 0)} failed, {counts.get('cancelled', 0)} cancelled, "
+                              f"{counts.get('skipped', 0)} skipped")
+        finally:
+            self._poll_mode = False
 
     def transfer(self, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"):
         """jobs: list of {name, is_dir}. Expands dirs, transfers files with
@@ -934,9 +1095,13 @@ class Api:
 
     def upload_paths(self, paths, remote_dir, on_conflict="overwrite"):
         """Upload absolute local paths (files or folders) dragged in from outside
-        the app, into remote_dir, reusing the standard transfer pipeline."""
+        the app, into remote_dir, reusing the standard transfer pipeline. Kept
+        out of the queue this phase (roadmap Phase 2); mutually exclusive with
+        it instead, since both would otherwise drive the same self.sftp session."""
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
+        if self.queue.pending() > 0:
+            return {"ok": False, "error": "A transfer queue is active. Wait for it to finish."}
         self._cancel.clear()
         files = []
         try:
@@ -955,7 +1120,11 @@ class Api:
         if not files:
             return {"ok": False, "error": "No files were found in the dropped items."}
         debug.log("EXTERNAL UPLOAD", {"items": len(files), "remote": remote_dir})
-        return self._run_transfer(files, "upload", on_conflict)
+        self._legacy_active.set()
+        try:
+            return self._run_transfer(files, "upload", on_conflict)
+        finally:
+            self._legacy_active.clear()
 
     @staticmethod
     def _normalize_drop_path(p):
@@ -1076,10 +1245,15 @@ class Api:
     def _progress(self, name, idx, total, sent, size, elapsed):
         speed = (sent / elapsed) if elapsed > 0 else 0
         eta = ((size - sent) / speed) if speed > 0 and size > 0 else 0
-        self._emit("progress", {"name": name, "index": idx, "total": total,
-                                "pct": int(sent * 100 / size) if size else 100,
-                                "speed": human_size(speed) + "/s" if speed else "",
-                                "eta": int(eta)})
+        payload = {"name": name, "index": idx, "total": total,
+                   "pct": int(sent * 100 / size) if size else 100,
+                   "speed": human_size(speed) + "/s" if speed else "",
+                   "eta": int(eta)}
+        self._progress_state = payload
+        # Worker thread (queue path): never emit, the window polls instead.
+        # Legacy bridge-thread path (_run_transfer): emit as before.
+        if not self._poll_mode:
+            self._emit("progress", payload)
 
     def _rsize(self, rp):
         try:
@@ -1146,6 +1320,11 @@ class Api:
             return {"ok": False, "error": friendly_error(e)}
 
     def sync(self, local_dir, remote_dir, direction, changed_only=True):
+        """Kept out of the queue this phase (roadmap Phase 2); mutually
+        exclusive with it instead, since both would otherwise drive the same
+        self.sftp session."""
+        if self.queue.pending() > 0:
+            return {"ok": False, "error": "A transfer queue is active. Wait for it to finish."}
         cmp = self.compare(local_dir, remote_dir)
         if not cmp.get("ok"):
             return cmp
@@ -1160,7 +1339,11 @@ class Api:
                     jobs.append({"name": name, "is_dir": False})
         if not jobs:
             return {"ok": True, "total": 0, "errors": [], "skipped": 0, "cancelled": False}
-        return self.transfer(jobs, direction, local_dir, remote_dir)
+        self._legacy_active.set()
+        try:
+            return self.transfer(jobs, direction, local_dir, remote_dir)
+        finally:
+            self._legacy_active.clear()
 
     def calc_remote_size(self, remote_dir, name):
         if not self.connected:
@@ -1293,9 +1476,15 @@ class Api:
 
     # ───────────── upload watcher ─────────────
     def start_watch(self, local_dir, remote_dir):
+        """Kept out of the queue this phase (roadmap Phase 2). _legacy_active is
+        set only while a watch-triggered upload is actually running (not for the
+        whole watch session), so a pane transfer can still be queued while
+        watch is merely idling between its 2-second polls."""
         self.stop_watch()
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
+        if self.queue.pending() > 0:
+            return {"ok": False, "error": "A transfer queue is active. Wait for it to finish."}
         self._watch_stop = threading.Event()
 
         def snapshot():
@@ -1317,9 +1506,15 @@ class Api:
                     break
                 cur = snapshot()
                 changed = [fp for fp, m in cur.items() if last.get(fp) != m]
+                # the queue worker owns self.sftp while it runs; never upload in
+                # parallel over the same session. Hold these changes for a later
+                # idle poll by leaving `last` unadvanced.
+                if changed and self.queue.pending() > 0:
+                    continue
                 for fp in changed:
                     rel = os.path.relpath(fp, local_dir).replace("\\", "/")
                     rp = posixpath.join(remote_dir, rel)
+                    self._legacy_active.set()
                     try:
                         rdir = posixpath.dirname(rp)
                         self._ensure_remote_dir(rdir)
@@ -1327,6 +1522,8 @@ class Api:
                         self._emit("watch", {"file": rel, "ok": True})
                     except Exception as e:
                         self._emit("watch", {"file": rel, "ok": False, "error": friendly_error(e)})
+                    finally:
+                        self._legacy_active.clear()
                 last = cur
 
         self._watch_thread = threading.Thread(target=loop, daemon=True)

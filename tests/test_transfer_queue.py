@@ -126,6 +126,48 @@ def test_invalid_transitions_return_false_and_do_not_change_state(q):
     assert snap["error"] == ""
 
 
+def test_mark_cancelled_moves_active_item_to_cancelled(q):
+    item_id = q.append("upload", "/l", "/r", "file")
+    item = q.claim()
+    assert item.id == item_id
+
+    assert q.mark_cancelled(item_id) is True
+
+    snap = q.snapshot()
+    assert snap[0]["state"] == CANCELLED
+    assert q.counts()[CANCELLED] == 1
+    assert q.counts()[ACTIVE] == 0
+
+
+def test_mark_cancelled_false_on_waiting_terminal_or_unknown(q):
+    # unknown id
+    assert q.mark_cancelled(999) is False
+
+    # waiting item: not ACTIVE yet
+    waiting_id = q.append("upload", "/l", "/r", "file")
+    assert q.mark_cancelled(waiting_id) is False
+    assert q.snapshot()[0]["state"] == WAITING
+
+    # terminal item: already completed
+    done_id = q.append("upload", "/l2", "/r2", "file2")
+    first = q.claim()
+    q.mark_completed(first.id)
+    second = q.claim()
+    q.mark_completed(second.id)
+    assert q.mark_cancelled(done_id) is False
+    snap = {s["id"]: s["state"] for s in q.snapshot()}
+    assert snap[done_id] == COMPLETED
+
+
+def test_append_with_on_conflict_stores_it_on_claimed_item(q):
+    item_id = q.append("upload", "/l", "/r", "file", on_conflict="skip")
+
+    item = q.claim()
+
+    assert item.id == item_id
+    assert item.on_conflict == "skip"
+
+
 def test_claim_is_thread_safe_no_duplicates_no_drops(q):
     n = 50
     ids = [q.append("upload", f"/l{i}", f"/r{i}", f"file{i}") for i in range(n)]

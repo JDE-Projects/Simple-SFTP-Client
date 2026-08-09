@@ -112,11 +112,33 @@
   tr.c-local_only td.name,tr.c-remote_only td.name{color:var(--blue);}
   .pane.dragover{outline:2px dashed var(--accent);outline-offset:-4px;}
 
-  /* queue */
-  .queue{padding:9px 12px;display:flex;align-items:center;gap:14px;}
-  .qbar{flex:1 1 auto;height:7px;background:var(--panel-2);border:1px solid var(--border);border-radius:5px;overflow:hidden;}
+  /* queue: the footer bar stays one row tall; the detail list only exists
+     while open, and rises above the bar instead of shrinking the panes */
+  .queue{position:relative;padding:9px 12px;display:flex;align-items:center;gap:12px;height:41px;}
+  .qcurrent{display:flex;align-items:center;gap:10px;flex:0 0 auto;min-width:230px;}
+  .qbar{width:110px;flex:0 0 auto;height:7px;background:var(--panel-2);border:1px solid var(--border);border-radius:5px;overflow:hidden;}
   .qbar > div{height:100%;width:0;background:linear-gradient(90deg,var(--accent-2),var(--accent));transition:width .15s;}
   .qmeta{font-size:11px;color:var(--text-dim);white-space:nowrap;font-family:"JetBrains Mono",monospace;}
+  .qsummary{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    font-size:11px;color:var(--text-dim);font-family:"JetBrains Mono",monospace;}
+  .qtoggle{font-family:"JetBrains Mono",monospace;}
+  /* expandable detail list: hidden and out of flow by default, opens upward */
+  .qdetail{display:none;position:absolute;left:0;right:0;bottom:100%;margin-bottom:6px;max-height:210px;
+    overflow-y:auto;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius-sm);
+    box-shadow:0 8px 24px rgba(0,0,0,.25);z-index:5;}
+  .qdetail.open{display:block;}
+  .qrow{display:flex;align-items:center;gap:8px;padding:5px 10px;border-bottom:1px solid var(--border);font-size:11.5px;}
+  .qrow:last-child{border-bottom:none;}
+  .qrow .qarrow{flex:0 0 auto;color:var(--text-faint);width:12px;text-align:center;}
+  .qrow .qrow-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .qrow .qrow-pct{flex:0 0 auto;font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--blue);}
+  .qrow .qrow-err{flex:0 0 auto;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10.5px;color:var(--red);}
+  .qrow .qx{cursor:pointer;color:var(--text-faint);opacity:.75;font-weight:700;flex:0 0 auto;}
+  .qrow .qx:hover{opacity:1;color:var(--red);}
+  .qrow.st-active .qrow-name{color:var(--blue);}
+  .qrow.st-completed .qrow-name{color:var(--green);}
+  .qrow.st-failed .qrow-name{color:var(--red);}
+  .qrow.st-cancelled .qrow-name,.qrow.st-skipped .qrow-name{color:var(--text-faint);}
 
   .statusbar{display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--text-dim);padding:0 4px;}
   .left{display:flex;align-items:center;gap:14px;}
@@ -261,9 +283,14 @@
 
   <!-- queue -->
   <div class="panel queue">
-    <span class="qmeta" id="qName">Idle</span>
-    <div class="qbar"><div id="qFill"></div></div>
-    <span class="qmeta" id="qMeta"></span>
+    <div class="qdetail" id="qDetail"></div>
+    <div class="qcurrent">
+      <span class="qmeta" id="qName">Idle</span>
+      <div class="qbar"><div id="qFill"></div></div>
+      <span class="qmeta" id="qMeta"></span>
+    </div>
+    <span class="qsummary" id="qSummary"></span>
+    <button id="qToggle" class="icon-btn qtoggle" title="Show queued files">&gt;</button>
     <button id="cancelBtn" class="btn-ghost btn-sm" disabled>Cancel</button>
   </div>
 
@@ -307,7 +334,9 @@
 
 <script>
 const $=id=>document.getElementById(id);
-let API=null, connected=false, busy=false;
+let API=null, connected=false, busy=false, queuePending=0;
+function queueActive(){ return queuePending>0; }
+function updateCancelBtn(){ $("cancelBtn").disabled=!(queuePending>0||busy); }
 let authMode="password", rememberPw=false;
 const state={ local:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1},
               remote:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1} };
@@ -352,6 +381,83 @@ window.appEvent=function(ev,p){
   else if(ev==="external_drop"){ externalUpload(p.paths); }
 };
 
+/* ───── Phase 2 queue: worker never pushes, the window pulls on a timer ───── */
+let qPollTimer=null, qPolling=false, qDetailOpen=false;
+
+function renderQueueRows(items){
+  const box=$("qDetail"); if(!box)return; box.innerHTML="";
+  const frag=document.createDocumentFragment();
+  (items||[]).forEach(it=>{
+    const row=document.createElement("div");
+    row.className="qrow st-"+it.state;
+    const arrow=document.createElement("span"); arrow.className="qarrow";
+    arrow.textContent=it.direction==="upload"?"↑":"↓";
+    row.appendChild(arrow);
+    const nm=document.createElement("span"); nm.className="qrow-name"; nm.textContent=it.name; nm.title=it.name;
+    row.appendChild(nm);
+    if(it.state==="active"){
+      const pct=document.createElement("span"); pct.className="qrow-pct";
+      pct.textContent=(lastProgress&&lastProgress.name===it.name)?lastProgress.pct+"%":"";
+      row.appendChild(pct);
+    } else if(it.state==="failed"&&it.error){
+      const err=document.createElement("span"); err.className="qrow-err"; err.textContent=it.error; err.title=it.error;
+      row.appendChild(err);
+    } else if(it.state==="waiting"){
+      const x=document.createElement("span"); x.className="qx"; x.textContent="×"; x.title="Cancel";
+      x.onclick=(ev)=>{ ev.stopPropagation(); API.cancel_item(it.id); };
+      row.appendChild(x);
+    }
+    frag.appendChild(row);
+  });
+  box.appendChild(frag);
+}
+function renderQueueSummary(items){
+  const c=n=>(items||[]).filter(i=>i.state===n).length;
+  const parts=[];
+  const completed=c("completed"), failed=c("failed"), waiting=c("waiting"), cancelled=c("cancelled"), skipped=c("skipped");
+  if(completed)parts.push(`${completed} done`);
+  if(failed)parts.push(`${failed} failed`);
+  if(waiting)parts.push(`${waiting} waiting`);
+  if(cancelled)parts.push(`${cancelled} cancelled`);
+  if(skipped)parts.push(`${skipped} skipped`);
+  $("qSummary").textContent=parts.join(" · ");
+}
+let lastProgress=null;
+function startQueuePoll(){
+  if(qPollTimer)return;
+  qPollTimer=setInterval(queueTick,200);
+}
+function stopQueuePoll(){
+  if(qPollTimer){ clearInterval(qPollTimer); qPollTimer=null; }
+}
+async function queueTick(){
+  if(qPolling)return; qPolling=true;
+  try{
+    const p=await API.poll_queue();
+    (p.console||[]).forEach(line=>clog(line.msg,line.level));
+    lastProgress=p.progress;
+    if(p.progress){
+      $("qName").textContent=p.progress.name; $("qFill").style.width=p.progress.pct+"%";
+      $("qMeta").textContent=`${p.progress.index+1}/${p.progress.total}  ${p.progress.pct}%  ${p.progress.speed||""}${p.progress.eta?"  ETA "+p.progress.eta+"s":""}`;
+    } else {
+      $("qFill").style.width="0%"; $("qName").textContent="Idle"; $("qMeta").textContent="";
+    }
+    renderQueueSummary(p.items);
+    if(qDetailOpen)renderQueueRows(p.items);
+    queuePending=p.pending||0;
+    updateCancelBtn();
+    if(p.pending===0){
+      stopQueuePoll();
+      $("qName").textContent="Idle";
+      const c=n=>(p.items||[]).filter(i=>i.state===n).length;
+      const completed=c("completed"), failed=c("failed"), cancelled=c("cancelled"), skipped=c("skipped");
+      $("qMeta").textContent=`Done: ${completed} completed`+(failed?`, ${failed} failed`:"")+
+        (cancelled?`, ${cancelled} cancelled`:"")+(skipped?`, ${skipped} skipped`:"");
+      refresh("local"); refresh("remote");
+    }
+  } finally { qPolling=false; }
+}
+
 async function init(){
   API=window.pywebview.api;
   try{ if(API.get_theme) applyTheme((await API.get_theme())||"dark"); }catch(e){}
@@ -367,6 +473,8 @@ async function init(){
   $("connBtn").onclick=onConn; $("testBtn").onclick=onTest; $("saveBtn").onclick=onSave; $("manageBtn").onclick=openSessions;
   $("sessions").onchange=onPickSession;
   $("upBtn").onclick=()=>startTransfer("upload"); $("downBtn").onclick=()=>startTransfer("download");
+  $("qToggle").onclick=()=>{ qDetailOpen=!qDetailOpen; $("qDetail").classList.toggle("open",qDetailOpen);
+    $("qToggle").textContent=qDetailOpen?"v":">"; if(qDetailOpen)API.poll_queue().then(p=>renderQueueRows(p.items)); };
   $("compareBtn").onclick=onCompare; $("syncUpBtn").onclick=()=>onSync("upload"); $("syncDownBtn").onclick=()=>onSync("download");
   $("watchBtn").onclick=onWatch; $("cancelBtn").onclick=()=>API.cancel();
   $("keygenBtn").onclick=openKeygen;
@@ -526,7 +634,7 @@ function selItems(side){ const s=state[side]; return [...s.sel].map(i=>s.entries
 
 /* ───── transfers ───── */
 async function startTransfer(direction,forceIdx){
-  if(!connected||busy)return;
+  if(!connected)return;
   let jobs;
   if(forceIdx){ const side=direction==="download"?"remote":"local"; jobs=forceIdx.map(i=>({name:state[side].entries[i].name,is_dir:state[side].entries[i].is_dir})); }
   else jobs=selItems(direction==="upload"?"local":"remote");
@@ -538,25 +646,28 @@ async function startTransfer(direction,forceIdx){
   let policy="overwrite";
   if(collide.length){ const choice=await confirm3("Overwrite?", collide.length+" item(s) already exist in the destination. Overwrite them, or skip existing?","Overwrite","Skip existing");
     if(choice===null)return; if(choice==="skip"){ jobs=jobs.filter(j=>!destNames.has(j.name)); if(!jobs.length){toast("Nothing to transfer (all skipped)");return;} } }
-  busy=true; $("cancelBtn").disabled=false; $("statusText").textContent="";
-  const r=await API.transfer(jobs,direction,state.local.cwd,state.remote.cwd,policy);
-  if(!r.ok){ busy=false; $("cancelBtn").disabled=true; toast(r.error||"Transfer failed",true); }
+  $("statusText").textContent="";
+  const r=await API.enqueue(jobs,direction,state.local.cwd,state.remote.cwd,policy);
+  if(!r.ok){ toast(r.error||"Could not queue the transfer",true); return; }
+  startQueuePoll();
 }
 /* files dragged in from outside the app, dropped on the remote pane */
 async function externalUpload(paths){
   if(!paths||!paths.length)return;
   if(!connected){ infoBox("Not connected","Connect to a server before dropping files onto the remote pane."); return; }
   if(busy){ clog("A transfer is already running — drop ignored","warn"); return; }
+  if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
   const base=p=>p.replace(/[\\/]+$/,"").split(/[\\/]/).pop();
   const names=paths.map(base); const destNames=new Set(state.remote.entries.map(e=>e.name));
   const collide=names.filter(n=>destNames.has(n));
   if(collide.length){ const choice=await confirm3("Overwrite?", collide.length+" item(s) already exist in the destination. Overwrite them, or skip existing?","Overwrite","Skip existing");
     if(choice===null)return;
     if(choice==="skip"){ paths=paths.filter((p,i)=>!destNames.has(names[i])); if(!paths.length){ clog("Nothing to upload (all skipped)"); return; } } }
-  busy=true; $("cancelBtn").disabled=false;
+  busy=true; updateCancelBtn();
   clog(`Uploading ${paths.length} dropped item(s) to ${state.remote.cwd}`);
   const r=await API.upload_paths(paths, state.remote.cwd, "overwrite");
-  if(!r.ok){ busy=false; $("cancelBtn").disabled=true; clog(r.error||"Upload failed","error"); }
+  busy=false; updateCancelBtn();
+  if(!r.ok){ clog(r.error||"Upload failed","error"); }
 }
 function setupDrop(side){ const pane=$("pane"+cap(side));
   pane.addEventListener("dragover",e=>{e.preventDefault();pane.classList.add("dragover");});
@@ -571,14 +682,17 @@ async function onCompare(){ if(!connected)return; const r=await API.compare(stat
   const c={};["same","newer_local","newer_remote","local_only","remote_only"].forEach(k=>c[k]=0); for(const n in res)c[res[n]]++;
   $("statusText").textContent=`Compared: ${c.newer_local} newer here, ${c.newer_remote} newer remote, ${c.local_only} local-only, ${c.remote_only} remote-only`; }
 async function onSync(direction){ if(!connected||busy)return;
+  if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
   const msg=direction==="upload"?"Upload new/changed files from local to remote?":"Download new/changed files from remote to local?";
-  if(!await confirm2("Sync folder",msg))return; busy=true; $("cancelBtn").disabled=false;
+  if(!await confirm2("Sync folder",msg))return; busy=true; updateCancelBtn();
   const r=await API.sync(state.local.cwd,state.remote.cwd,direction,true);
-  if(!r.ok){busy=false;$("cancelBtn").disabled=true;toast(r.error||"Sync failed",true);return;}
-  if(r.total===0){busy=false;$("cancelBtn").disabled=true;toast("Already in sync, nothing to transfer");} }
+  busy=false; updateCancelBtn();
+  if(!r.ok){toast(r.error||"Sync failed",true);return;}
+  if(r.total===0){toast("Already in sync, nothing to transfer");} }
 let watching=false;
 async function onWatch(){ if(!connected)return;
   if(watching){ await API.stop_watch(); watching=false; $("watchBtn").classList.remove("btn-primary"); $("watchBtn").classList.add("btn-ghost"); $("watchBtn").textContent="Watch"; $("statusText").textContent="Watch stopped"; return; }
+  if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
   if(!await confirm2("Watch local folder","Auto-upload changes from this local folder to the current remote folder while on?"))return;
   const r=await API.start_watch(state.local.cwd,state.remote.cwd); if(!r.ok){toast(r.error,true);return;}
   watching=true; $("watchBtn").classList.add("btn-primary"); $("watchBtn").classList.remove("btn-ghost"); $("watchBtn").textContent="Watching"; $("statusText").textContent="Watching "+state.local.cwd; }

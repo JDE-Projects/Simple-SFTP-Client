@@ -32,6 +32,7 @@ class TransferItem:
     state: str = WAITING
     error: str = ""
     cancel_requested: bool = False
+    on_conflict: str = "overwrite"
 
 
 class TransferQueue:
@@ -42,7 +43,7 @@ class TransferQueue:
         self._items = []  # FIFO order, append order preserved
         self._next_id = 1
 
-    def append(self, direction, local_path, remote_path, name, size=0):
+    def append(self, direction, local_path, remote_path, name, size=0, on_conflict="overwrite"):
         with self._lock:
             item = TransferItem(
                 id=self._next_id,
@@ -51,6 +52,7 @@ class TransferQueue:
                 remote_path=remote_path,
                 name=name,
                 size=size,
+                on_conflict=on_conflict,
             )
             self._next_id += 1
             self._items.append(item)
@@ -84,6 +86,12 @@ class TransferQueue:
 
     def mark_skipped(self, item_id):
         return self._finish(item_id, SKIPPED)
+
+    def mark_cancelled(self, item_id):
+        """Move an ACTIVE item to CANCELLED (terminal). False if not ACTIVE or unknown.
+        This is how the worker finalizes an active transfer that was cancelled
+        mid-flight; cancel() alone only flags an active item, it does not move it."""
+        return self._finish(item_id, CANCELLED)
 
     def cancel(self, item_id):
         """WAITING items cancel immediately. ACTIVE items are flagged for the
