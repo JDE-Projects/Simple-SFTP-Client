@@ -1629,35 +1629,7 @@ class Api:
             return {"ok": False, "error": friendly_error(e)}
 
 
-# ───────────── splash + main ─────────────
-try:
-    import pyi_splash  # type: ignore
-    HAS_SPLASH = True
-except Exception:
-    HAS_SPLASH = False
-
-_splash_lock = threading.Lock()
-_splash_done = False
-_start = time.time()
-
-
-def _close_splash():
-    global _splash_done
-    with _splash_lock:
-        if _splash_done:
-            return
-        _splash_done = True
-    if HAS_SPLASH:
-        try:
-            pyi_splash.close()
-        except Exception:
-            pass
-
-
-def _on_loaded():
-    threading.Timer(max(0.0, 5.0 - (time.time() - _start)), _close_splash).start()
-
-
+# ───────────── main ─────────────
 _mutex_handle = None   # module-level: must live for the process lifetime
 
 def _acquire_single_instance(mutex_name: str) -> bool:
@@ -1706,8 +1678,6 @@ def main():
             sys.exit(0)
         IS_SECOND_INSTANCE = True
 
-    if HAS_SPLASH:
-        threading.Timer(30.0, _close_splash).start()
     if sys.platform == "win32":
         try:
             import ctypes
@@ -1720,7 +1690,6 @@ def main():
         js_api=api, width=1480, height=980, min_size=(1000, 700),
         background_color="#0a0e14")
     api.set_window(window)
-    window.events.loaded += _on_loaded
 
     def _wire_external_drop():
         # Let users drag files in from Windows Explorer onto the remote pane.
