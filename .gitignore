@@ -9,6 +9,9 @@ build/
 dist/
 *.spec
 
+# Local test SFTP server runtime (host key, served data, sample files)
+tools/.sftp_test/
+
 # Python
 __pycache__/
 .pytest_cache/
