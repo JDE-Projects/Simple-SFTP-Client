@@ -120,6 +120,74 @@ def test_enqueue_locked_out_while_legacy_transfer_active(sftp_env):
     assert api.queue.pending() == 0
 
 
+def test_second_batch_runs_after_the_queue_drained(sftp_env, wait_for_drain, state_of):
+    # the worker retires itself when the queue empties; a batch enqueued after
+    # that must start a fresh worker and complete, not sit waiting forever
+    api, server_root, local_dir = sftp_env
+
+    first = [f"a{i}.bin" for i in range(3)]
+    for name in first:
+        (local_dir / name).write_bytes(os.urandom(2048))
+    api.enqueue([{"name": n, "is_dir": False} for n in first], "upload",
+                str(local_dir), "/", "overwrite")
+    wait_for_drain(api)
+
+    # let the worker fully retire (poll mode off, thread gone) before round two
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if api._worker is None or not api._worker.is_alive():
+            break
+        time.sleep(0.02)
+    assert api._poll_mode is False
+
+    second = [f"b{i}.bin" for i in range(3)]
+    for name in second:
+        (local_dir / name).write_bytes(os.urandom(2048))
+    result = api.enqueue([{"name": n, "is_dir": False} for n in second], "upload",
+                          str(local_dir), "/", "overwrite")
+    assert result["ok"] is True
+    wait_for_drain(api)
+
+    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    for name in first + second:
+        assert states[name] == COMPLETED
+        assert (server_root / name).exists()
+
+
+def test_item_enqueued_as_the_queue_empties_is_not_stranded(sftp_env, wait_for_drain):
+    # Reproduces the stop/start race: a file lands in the queue in the exact
+    # instant the worker sees it empty. The worker must notice and drain it
+    # instead of retiring and stranding it. Injecting through a wrapped claim()
+    # makes that instant deterministic.
+    api, server_root, local_dir = sftp_env
+    (local_dir / "first.bin").write_bytes(os.urandom(1024))
+    (local_dir / "late.bin").write_bytes(os.urandom(1024))
+
+    real_claim = api.queue.claim
+    injected = {"done": False}
+
+    def claim_with_injection():
+        item = real_claim()
+        if item is None and not injected["done"]:
+            injected["done"] = True
+            # a file appears right as the worker finds the queue empty, the way
+            # enqueue() appends just before it would (re)start the worker
+            api.queue.append("upload", str(local_dir / "late.bin"), "/late.bin", "late.bin")
+        return item
+
+    api.queue.claim = claim_with_injection
+
+    api.enqueue([{"name": "first.bin", "is_dir": False}], "upload",
+                str(local_dir), "/", "overwrite")
+    # pending only reaches 0 if the late arrival was picked up and transferred
+    wait_for_drain(api)
+
+    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    assert states["first.bin"] == COMPLETED
+    assert states["late.bin"] == COMPLETED
+    assert (server_root / "late.bin").read_bytes() == (local_dir / "late.bin").read_bytes()
+
+
 def test_upload_paths_locked_out_while_queue_pending(sftp_env, wait_for_drain):
     api, server_root, local_dir = sftp_env
     # a few MB, so the item is reliably still pending when upload_paths is

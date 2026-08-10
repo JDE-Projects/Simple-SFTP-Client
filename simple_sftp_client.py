@@ -1009,9 +1009,13 @@ class Api:
         return {"ok": True, "queued": len(files)}
 
     def _ensure_worker(self):
-        """Start the single background worker thread if it is not already running."""
+        """Start the single background worker thread if it is not already running.
+        Poll mode is turned on here, under the same lock the worker retires
+        itself with, so starting and stopping a worker can never overlap and
+        leave poll mode in the wrong state."""
         with self._worker_lock:
             if self._worker is None or not self._worker.is_alive():
+                self._poll_mode = True
                 self._worker = threading.Thread(target=self._worker_loop, daemon=True)
                 self._worker.start()
 
@@ -1026,13 +1030,25 @@ class Api:
         runs, _poll_mode is True: _progress() only updates in-memory state
         instead of emitting, and _worker_log() buffers console lines for the
         window to pull via poll_queue()."""
-        self._poll_mode = True
         try:
             done_count = 0
             while True:
                 item = self.queue.claim()
                 if item is None:
-                    break
+                    # Decide whether to stop under the same lock _ensure_worker
+                    # starts a worker with, and re-check the queue while holding
+                    # it. Without this, a file enqueued in the instant the queue
+                    # empties sees this still-alive worker, so _ensure_worker
+                    # skips starting one, yet this worker has already left the
+                    # loop, and the file would wait forever.
+                    with self._worker_lock:
+                        if self.queue.pending() == 0:
+                            self._active_item = None
+                            self._progress_state = None
+                            self._worker = None
+                            self._poll_mode = False
+                            break
+                    continue
                 self._active_item = item
                 self._cancel.clear()
                 total = done_count + self.queue.pending()
@@ -1076,14 +1092,19 @@ class Api:
                     self._worker_log(f"failed {item.name}", "error")
                 done_count += 1
                 self._active_item = None
-            self._active_item = None
-            self._progress_state = None
             counts = self.queue.counts()
             self._worker_log(f"Queue drained: {counts.get('completed', 0)} completed, "
                               f"{counts.get('failed', 0)} failed, {counts.get('cancelled', 0)} cancelled, "
                               f"{counts.get('skipped', 0)} skipped")
         finally:
-            self._poll_mode = False
+            # Safety net for an exit by exception rather than the clean
+            # empty-queue path above: retire this worker only if it is still the
+            # current one, so a worker that has since started is left untouched
+            # (poll mode stays on for it).
+            with self._worker_lock:
+                if self._worker is threading.current_thread():
+                    self._worker = None
+                    self._poll_mode = False
 
     def transfer(self, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"):
         """jobs: list of {name, is_dir}. Expands dirs, transfers files with
