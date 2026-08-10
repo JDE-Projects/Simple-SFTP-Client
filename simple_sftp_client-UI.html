@@ -752,7 +752,7 @@ async function onCompare(){ if(!connected)return; const r=await API.compare(stat
   if(!r.ok){toast(r.error,true);return;} const res=r.result; compareMap={local:{},remote:{}};
   for(const n in res){ compareMap.local[n]=res[n]; compareMap.remote[n]=res[n]; } renderPane("local"); renderPane("remote");
   const c={};["same","newer_local","newer_remote","local_only","remote_only"].forEach(k=>c[k]=0); for(const n in res)c[res[n]]++;
-  $("statusText").textContent=`Compared: ${c.newer_local} newer here, ${c.newer_remote} newer remote, ${c.local_only} local-only, ${c.remote_only} remote-only`; }
+  $("statusText").innerHTML=`Compared: <b style="color:var(--green)">${c.newer_local} newer here</b>, <b style="color:var(--amber)">${c.newer_remote} newer remote</b>, ${c.local_only} local-only, ${c.remote_only} remote-only`; }
 async function onSync(direction){ if(!connected||busy)return;
   if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
   const msg=direction==="upload"?"Upload new/changed files from local to remote?":"Download new/changed files from remote to local?";
