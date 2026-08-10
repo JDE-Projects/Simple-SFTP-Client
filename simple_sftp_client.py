@@ -710,12 +710,19 @@ class Api:
                 start = home
             return {"ok": True, "home": home, "cwd": start, "transport": self._transport_info()}
         except UnknownHostKey as e:
-            self._pending_host_key = (e.hostname, e.key)
+            # Pin under the port-aware name paramiko actually checks against
+            # (bracketed for non-standard ports), not e.hostname, whose format
+            # differs between the unknown-key and changed-key paths.
+            self._pending_host_key = (hostkey_name(host, p.get("port", 22)), e.key)
             debug.log(f"Unknown host key for {host} ({e.key.get_name()}).")
             return {"ok": False, "host_key_unknown": True, "host": host,
                     "key_type": e.key.get_name(), "fingerprint": fingerprint_sha256(e.key)}
         except paramiko.BadHostKeyException as e:
-            self._pending_host_key = (e.hostname, e.key)
+            # Same port-aware name as above. The changed-key path hands back a
+            # bare host in e.hostname, so pinning by that would store the new
+            # key under a name the library never rechecks, and the warning would
+            # loop forever on non-standard ports.
+            self._pending_host_key = (hostkey_name(host, p.get("port", 22)), e.key)
             debug.log(f"HOST KEY CHANGED for {host} - refused.")
             return {"ok": False, "host_key_changed": True, "host": host,
                     "key_type": e.key.get_name(),
