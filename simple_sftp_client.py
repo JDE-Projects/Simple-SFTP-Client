@@ -1056,6 +1056,14 @@ class Api:
                     self._poll_mode = False
                     with self._progress_lock:
                         self._progress_by_id = {}
+                    # Last worker out and none could open a session: don't leave
+                    # queued items sitting as WAITING with nothing to drain them.
+                    # Mark them failed so the failure is visible in the queue.
+                    stranded = self.queue.fail_waiting(f"transfer session unavailable: {e}")
+                    if stranded:
+                        self._worker_log(
+                            f"{stranded} queued item(s) marked failed: no transfer session",
+                            "error")
             return
         try:
             done_count = 0

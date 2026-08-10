@@ -117,6 +117,21 @@ class TransferQueue:
                 elif item.state == ACTIVE:
                     item.cancel_requested = True
 
+    def fail_waiting(self, error):
+        """Move every still-WAITING item to FAILED with the given reason, and
+        return how many were failed. Used when the worker pool cannot open any
+        transfer session: without this, queued items would sit as WAITING
+        forever with no worker left to drain them, showing as pending with no
+        visible failure. ACTIVE and terminal items are left untouched."""
+        with self._lock:
+            failed = 0
+            for item in self._items:
+                if item.state == WAITING:
+                    item.state = FAILED
+                    item.error = error
+                    failed += 1
+            return failed
+
     def snapshot(self):
         """Plain dicts (id, direction, name, state, error) in FIFO order, copies only."""
         with self._lock:

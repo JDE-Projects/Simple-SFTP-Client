@@ -9,7 +9,7 @@ import os
 import threading
 import time
 
-from transfer_queue import CANCELLED, COMPLETED, WAITING
+from transfer_queue import CANCELLED, COMPLETED, FAILED, WAITING
 
 
 def test_two_files_both_complete_with_matching_bytes(sftp_env, wait_for_drain, state_of):
@@ -199,6 +199,32 @@ def test_fully_sent_transfer_completes_even_if_cancel_arrives_right_at_the_end(s
 
     assert res == "ok"  # not "cancelled": every byte was already sent
     assert (server_root / "onelast.bin").read_bytes() == data
+
+
+def test_queued_items_fail_visibly_when_no_worker_can_open_a_session(sftp_env, wait_for_drain):
+    # If every worker fails to open its own SFTP session, the queued files must
+    # not sit as WAITING forever with nothing to drain them: they get marked
+    # FAILED so the failure is visible, not silent.
+    api, server_root, local_dir = sftp_env
+    for name in ["a.bin", "b.bin", "c.bin"]:
+        (local_dir / name).write_bytes(os.urandom(1024))
+
+    # Make every worker's open_sftp() raise; the browsing session (api.sftp) is
+    # already open and untouched by this.
+    def boom():
+        raise OSError("channel open refused")
+
+    api.client.open_sftp = boom
+
+    result = api.enqueue([{"name": n, "is_dir": False} for n in ["a.bin", "b.bin", "c.bin"]],
+                          "upload", str(local_dir), "/", "overwrite")
+    assert result["ok"] is True
+
+    wait_for_drain(api)  # pending() hits 0 only because they went to FAILED
+
+    snap = api.queue.snapshot()
+    assert all(e["state"] == FAILED for e in snap)
+    assert all(e["error"] for e in snap)  # a visible reason on each
 
 
 def test_snapshot_and_pending_agree_with_themselves(sftp_env, wait_for_drain):
