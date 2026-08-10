@@ -521,7 +521,9 @@ async function init(){
     inp.addEventListener("keydown",e=>{ if(e.key==="Enter"){ const v=inp.value.trim(); endEditPath(side); (side==="local"?loadLocal:loadRemote)(v); }
       else if(e.key==="Escape"){ endEditPath(side); } });
     inp.addEventListener("blur",()=>endEditPath(side));
-    $("body"+cap(side)).addEventListener("keydown",e=>typeToJump(side,e));
+    $("body"+cap(side)).addEventListener("keydown",e=>{
+      if(e.key==="Delete"){ if(state[side].sel.size){ e.preventDefault(); deleteSel(side); } return; }
+      typeToJump(side,e); });
   });
   $("browseLocalBtn").onclick=async()=>{ const p=await API.browse_folder(); if(p)loadLocal(p); };
   $("pass").addEventListener("keydown",e=>{if(e.key==="Enter")onConn();});
