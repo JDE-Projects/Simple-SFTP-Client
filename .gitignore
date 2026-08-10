@@ -24,9 +24,6 @@ Debug_Log_*.txt
 # Theme preference (per-machine: the light/dark choice)
 *.pref
 
-# Personal roadmap notes (ideas, not for distribution)
-roadmap.md
-
 # Local planning notes (kept private, not shared)
 roadmap.md
 status.md
