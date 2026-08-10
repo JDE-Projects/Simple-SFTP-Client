@@ -153,7 +153,7 @@ def test_cancel_all_stops_both_active_items(sftp_env, wait_for_drain, state_of):
 
     wait_for_drain(api)
 
-    for name, item_id in ids.items():
+    for _name, item_id in ids.items():
         assert state_of(api, item_id)["state"] == CANCELLED
 
 

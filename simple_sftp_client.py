@@ -1107,7 +1107,7 @@ class Api:
                     try:
                         res = self._one(item.direction, item.local_path, item.remote_path,
                                          item.name, done_count, total, item.on_conflict,
-                                         sftp, cancel_check=lambda: item.cancel_requested,
+                                         sftp, cancel_check=lambda it=item: it.cancel_requested,
                                          progress_key=item.id)
                         ok = True
                         break  # success (including "skip"/"cancelled"): stop retrying
@@ -1275,7 +1275,8 @@ class Api:
         transfer's progress under (a queue item id, or the file name for the
         legacy path, which does not read it back by key)."""
         if cancel_check is None:
-            cancel_check = lambda: self._cancel.is_set()
+            def cancel_check():
+                return self._cancel.is_set()
         if progress_key is None:
             progress_key = name
         # size-aware: skip identical, resume partial, else fresh
