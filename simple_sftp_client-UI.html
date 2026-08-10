@@ -134,6 +134,8 @@
   .qrow .qrow-err{flex:0 0 auto;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10.5px;color:var(--red);}
   .qrow .qx{cursor:pointer;color:var(--text-faint);opacity:.75;font-weight:700;flex:0 0 auto;}
   .qrow .qx:hover{opacity:1;color:var(--red);}
+  .qrow .qretry{cursor:pointer;color:var(--text-faint);opacity:.75;font-weight:700;flex:0 0 auto;}
+  .qrow .qretry:hover{opacity:1;color:var(--accent);}
   .qrow.st-active .qrow-name{color:var(--blue);}
   .qrow.st-completed .qrow-name{color:var(--green);}
   .qrow.st-failed .qrow-name{color:var(--red);}
@@ -421,9 +423,18 @@ function renderQueueRows(items){
       const pr=lastProgressById[String(it.id)];
       pct.textContent=pr?pr.pct+"%":"";
       row.appendChild(pct);
-    } else if(it.state==="failed"&&it.error){
-      const err=document.createElement("span"); err.className="qrow-err"; err.textContent=it.error; err.title=it.error;
-      row.appendChild(err);
+    } else if(it.state==="failed"){
+      if(it.error){
+        const err=document.createElement("span"); err.className="qrow-err"; err.textContent=it.error; err.title=it.error;
+        row.appendChild(err);
+      }
+      const rt=document.createElement("span"); rt.className="qretry"; rt.textContent="↻"; rt.title="Retry";
+      rt.onclick=(ev)=>{ ev.stopPropagation(); API.retry_item(it.id).then(r=>{ if(r&&r.ok) startQueuePoll(); }); };
+      row.appendChild(rt);
+    } else if(it.state==="cancelled"){
+      const rt=document.createElement("span"); rt.className="qretry"; rt.textContent="↻"; rt.title="Retry";
+      rt.onclick=(ev)=>{ ev.stopPropagation(); API.retry_item(it.id).then(r=>{ if(r&&r.ok) startQueuePoll(); }); };
+      row.appendChild(rt);
     } else if(it.state==="waiting"){
       const x=document.createElement("span"); x.className="qx"; x.textContent="×"; x.title="Cancel";
       x.onclick=(ev)=>{ ev.stopPropagation(); API.cancel_item(it.id); };
@@ -738,19 +749,16 @@ async function startTransfer(direction,forceIdx){
 async function externalUpload(paths){
   if(!paths||!paths.length)return;
   if(!connected){ infoBox("Not connected","Connect to a server before dropping files onto the remote pane."); return; }
-  if(busy){ clog("A transfer is already running — drop ignored","warn"); return; }
-  if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
   const base=p=>p.replace(/[\\/]+$/,"").split(/[\\/]/).pop();
   const names=paths.map(base); const destNames=new Set(state.remote.entries.map(e=>e.name));
   const collide=names.filter(n=>destNames.has(n));
   if(collide.length){ const choice=await confirm3("Overwrite?", collide.length+" item(s) already exist in the destination. Overwrite them, or skip existing?","Overwrite","Skip existing");
     if(choice===null)return;
     if(choice==="skip"){ paths=paths.filter((p,i)=>!destNames.has(names[i])); if(!paths.length){ clog("Nothing to upload (all skipped)"); return; } } }
-  busy=true; updateCancelBtn();
   clog(`Uploading ${paths.length} dropped item(s) to ${state.remote.cwd}`);
   const r=await API.upload_paths(paths, state.remote.cwd, "overwrite");
-  busy=false; updateCancelBtn();
-  if(!r.ok){ clog(r.error||"Upload failed","error"); }
+  if(!r.ok){ clog(r.error||"Upload failed","error"); return; }
+  startQueuePoll();
 }
 function setupDrop(side){ const pane=$("pane"+cap(side));
   pane.addEventListener("dragover",e=>{e.preventDefault();pane.classList.add("dragover");});

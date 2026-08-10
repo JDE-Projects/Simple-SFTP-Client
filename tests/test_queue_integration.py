@@ -9,7 +9,7 @@ installed or left running.
 import os
 import time
 
-from transfer_queue import COMPLETED, CANCELLED, WAITING
+from transfer_queue import COMPLETED, CANCELLED, WAITING, FAILED
 
 
 def test_upload_byte_integrity(sftp_env, wait_for_drain, state_of):
@@ -193,10 +193,10 @@ def test_item_enqueued_as_the_queue_empties_is_not_stranded(sftp_env, wait_for_d
     assert (server_root / "late.bin").read_bytes() == (local_dir / "late.bin").read_bytes()
 
 
-def test_upload_paths_locked_out_while_queue_pending(sftp_env, wait_for_drain):
-    api, server_root, local_dir = sftp_env
+def test_upload_paths_joins_the_queue_alongside_pending_items(sftp_env, wait_for_drain):
     # a few MB, so the item is reliably still pending when upload_paths is
     # called a moment later, instead of racing the worker to drain first
+    api, server_root, local_dir = sftp_env
     queued_file = local_dir / "queued.bin"
     queued_file.write_bytes(os.urandom(4 * 1024 * 1024))
 
@@ -209,7 +209,75 @@ def test_upload_paths_locked_out_while_queue_pending(sftp_env, wait_for_drain):
 
     result = api.upload_paths([str(dropped_file)], "/", "overwrite")
 
-    assert result["ok"] is False
-    assert "queue" in result["error"].lower()
+    assert result["ok"] is True
+    assert result["queued"] == 1
 
     wait_for_drain(api)
+
+    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    assert states["queued.bin"] == COMPLETED
+    assert states["dropped.bin"] == COMPLETED
+    assert (server_root / "dropped.bin").read_bytes() == dropped_file.read_bytes()
+
+
+def test_upload_paths_locked_out_while_legacy_active(sftp_env):
+    api, server_root, local_dir = sftp_env
+    dropped_file = local_dir / "dropped.bin"
+    dropped_file.write_bytes(os.urandom(16))
+
+    api._legacy_active.set()
+    try:
+        result = api.upload_paths([str(dropped_file)], "/", "overwrite")
+    finally:
+        api._legacy_active.clear()
+
+    assert result["ok"] is False
+    assert "sync" in result["error"] or "watch" in result["error"]
+    assert api.queue.pending() == 0
+
+
+def test_retry_item_runs_to_completion(sftp_env, wait_for_drain, state_of):
+    api, server_root, local_dir = sftp_env
+
+    # the remote path does not exist yet, so the download fails
+    result = api.enqueue([{"name": "later.bin", "is_dir": False}], "download",
+                          str(local_dir), "/", "overwrite")
+    assert result["ok"] is True
+    item_id = api.queue.snapshot()[0]["id"]
+
+    wait_for_drain(api)
+    assert state_of(api, item_id)["state"] == FAILED
+
+    # now the file shows up on the server; retry should pick it up and finish
+    data = os.urandom(4096)
+    (server_root / "later.bin").write_bytes(data)
+
+    retry_result = api.retry_item(item_id)
+    assert retry_result == {"ok": True}
+
+    wait_for_drain(api)
+
+    assert state_of(api, item_id)["state"] == COMPLETED
+    assert (local_dir / "later.bin").read_bytes() == data
+
+
+def test_dropped_paths_land_on_the_queue(sftp_env, wait_for_drain):
+    api, server_root, local_dir = sftp_env
+    file1 = local_dir / "one.bin"
+    file1.write_bytes(os.urandom(1024))
+    file2 = local_dir / "two.bin"
+    file2.write_bytes(os.urandom(2048))
+    subfolder = local_dir / "sub"
+    subfolder.mkdir()
+    (subfolder / "three.bin").write_bytes(os.urandom(512))
+
+    result = api.upload_paths([str(file1), str(file2), str(subfolder)], "/", "overwrite")
+
+    assert result["ok"] is True
+    assert result["queued"] == 3
+
+    wait_for_drain(api)
+
+    assert (server_root / "one.bin").read_bytes() == file1.read_bytes()
+    assert (server_root / "two.bin").read_bytes() == file2.read_bytes()
+    assert (server_root / "sub" / "three.bin").read_bytes() == (subfolder / "three.bin").read_bytes()

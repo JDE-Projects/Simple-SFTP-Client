@@ -983,6 +983,16 @@ class Api:
         items, pending = self.queue.snapshot_and_pending()
         return {"items": items, "pending": pending}
 
+    def retry_item(self, item_id):
+        """One-click retry: put a failed or cancelled queue item back in line and
+        wake the worker pool. Wired to the ↻ control on failed/cancelled rows."""
+        if not self.connected:
+            return {"ok": False, "error": "Not connected."}
+        if not self.queue.requeue(item_id):
+            return {"ok": False, "error": "That item can't be retried."}
+        self._ensure_worker()
+        return {"ok": True}
+
     def enqueue(self, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"):
         """New entry point for pane transfers: expands jobs (same enumeration
         as transfer()) into per-file queue items and returns immediately. Folder
@@ -1007,6 +1017,12 @@ class Api:
                     files += self._walk_remote(rp, lp) if j["is_dir"] else [(lp, rp)]
         except Exception as e:
             return {"ok": False, "error": f"Could not enumerate: {e}"}
+        return {"ok": True, "queued": self._enqueue_files(files, direction, on_conflict)}
+
+    def _enqueue_files(self, files, direction, on_conflict):
+        """Append (local_path, remote_path) pairs to the queue as per-file items
+        and wake the worker pool. Returns the count enqueued. Shared by pane
+        transfers (enqueue) and external drops (upload_paths)."""
         for lp, rp in files:
             name = os.path.basename(lp)
             try:
@@ -1015,7 +1031,7 @@ class Api:
                 size = 0
             self.queue.append(direction, lp, rp, name, size=size, on_conflict=on_conflict)
         self._ensure_worker()
-        return {"ok": True, "queued": len(files)}
+        return len(files)
 
     def _ensure_worker(self):
         """Top the worker pool up to WORKER_COUNT live threads whenever there
@@ -1185,14 +1201,13 @@ class Api:
 
     def upload_paths(self, paths, remote_dir, on_conflict="overwrite"):
         """Upload absolute local paths (files or folders) dragged in from outside
-        the app, into remote_dir, reusing the standard transfer pipeline. Kept
-        out of the queue this phase (roadmap Phase 2); mutually exclusive with
-        it instead, since both would otherwise drive the same self.sftp session."""
+        the app, into remote_dir. Enumerated up front over the shared self.sftp
+        session, then enqueued as ordinary queue items and drained by the
+        worker pool, the same as a pane transfer (enqueue)."""
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
-        if self.queue.pending() > 0:
-            return {"ok": False, "error": "A transfer queue is active. Wait for it to finish."}
-        self._cancel.clear()
+        if self._legacy_active.is_set():
+            return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}
         files = []
         try:
             for raw in paths or []:
@@ -1210,11 +1225,7 @@ class Api:
         if not files:
             return {"ok": False, "error": "No files were found in the dropped items."}
         debug.log("EXTERNAL UPLOAD", {"items": len(files), "remote": remote_dir})
-        self._legacy_active.set()
-        try:
-            return self._run_transfer(files, "upload", on_conflict)
-        finally:
-            self._legacy_active.clear()
+        return {"ok": True, "queued": self._enqueue_files(files, "upload", on_conflict)}
 
     @staticmethod
     def _normalize_drop_path(p):

@@ -109,6 +109,19 @@ class TransferQueue:
                 return True
             return False
 
+    def requeue(self, item_id):
+        """How a failed or user-cancelled item gets put back in line for the
+        worker pool: reset it to WAITING with a clean error and cancel flag.
+        False (no change) for any other state or an unknown id."""
+        with self._lock:
+            item = self._find(item_id)
+            if item is None or item.state not in (FAILED, CANCELLED):
+                return False
+            item.state = WAITING
+            item.error = ""
+            item.cancel_requested = False
+            return True
+
     def cancel_all(self):
         with self._lock:
             for item in self._items:

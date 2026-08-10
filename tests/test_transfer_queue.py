@@ -232,6 +232,52 @@ def test_fail_waiting_returns_zero_when_nothing_waiting(q):
     assert q.snapshot()[0]["state"] == ACTIVE
 
 
+def test_requeue_failed_item_resets_to_waiting_and_clears_error(q):
+    item_id = q.append("upload", "/l", "/r", "file")
+    q.claim()
+    q.mark_failed(item_id, "connection reset")
+
+    assert q.requeue(item_id) is True
+
+    snap = q.snapshot()[0]
+    assert snap["state"] == WAITING
+    assert snap["error"] == ""
+
+
+def test_requeue_cancelled_item_resets_to_waiting(q):
+    item_id = q.append("upload", "/l", "/r", "file")
+    q.cancel(item_id)  # waiting item cancels straight to CANCELLED
+
+    assert q.requeue(item_id) is True
+
+    snap = q.snapshot()[0]
+    assert snap["state"] == WAITING
+    assert snap["error"] == ""
+
+
+def test_requeue_does_nothing_for_waiting_active_completed_or_unknown(q):
+    active_id = q.append("upload", "/l2", "/r2", "file2")
+    item = q.claim()
+    assert item.id == active_id
+    assert q.requeue(active_id) is False
+    states = {s["id"]: s["state"] for s in q.snapshot()}
+    assert states[active_id] == ACTIVE
+
+    completed_id = q.append("upload", "/l3", "/r3", "file3")
+    completed_item = q.claim()
+    assert completed_item.id == completed_id
+    q.mark_completed(completed_id)
+    assert q.requeue(completed_id) is False
+    states = {s["id"]: s["state"] for s in q.snapshot()}
+    assert states[completed_id] == COMPLETED
+
+    waiting_id = q.append("upload", "/l1", "/r1", "file1")
+    assert q.requeue(waiting_id) is False
+    assert {s["id"]: s["state"] for s in q.snapshot()}[waiting_id] == WAITING
+
+    assert q.requeue(999) is False
+
+
 def test_claim_is_thread_safe_no_duplicates_no_drops(q):
     n = 50
     ids = [q.append("upload", f"/l{i}", f"/r{i}", f"file{i}") for i in range(n)]
