@@ -94,11 +94,13 @@
   .pane-title{font-weight:600;font-size:12.5px;display:flex;align-items:center;gap:7px;}
   .navrow{display:flex;align-items:center;gap:5px;}
   .navrow .crumbs{flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:"JetBrains Mono",monospace;
-    font-size:11px;color:var(--text-dim);background:var(--panel-2);border:1px solid var(--border);border-radius:7px;padding:5px 9px;}
+    font-size:11px;color:var(--text-dim);background:var(--panel-2);border:1px solid var(--border);border-radius:7px;padding:5px 9px;cursor:text;}
+  input.crumbs{color:var(--text);}
+  input.crumbs:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(77,214,193,.12);}
   .icon-btn{padding:5px 8px;font-size:12px;background:var(--panel-2);border:1px solid var(--border-2);color:var(--text-dim);border-radius:7px;}
   .icon-btn:hover:not(:disabled){color:var(--text);border-color:var(--accent);}
   .filter input{width:100%;padding:5px 9px;font-size:11.5px;}
-  .pane-body{flex:1 1 auto;overflow:auto;}
+  .pane-body{flex:1 1 auto;overflow:auto;outline:none;}
   table{border-collapse:collapse;width:100%;font-size:12px;}
   thead th{position:sticky;top:0;z-index:1;text-align:left;font-weight:600;font-size:10.5px;color:var(--text-dim);
     background:var(--bg-2);padding:7px 10px;border-bottom:1px solid var(--border);cursor:pointer;white-space:nowrap;}
@@ -246,11 +248,13 @@
           <button class="icon-btn" data-act="fwd" title="Forward (next folder)">&#8594;</button>
           <button class="icon-btn" data-act="up" title="Up to parent folder">&#8593;</button>
           <button class="icon-btn" data-act="refresh" title="Refresh this folder">&#8635;</button>
+          <button class="icon-btn" id="browseLocalBtn" title="Browse for a folder">&#128193;</button>
           <span class="crumbs" id="crumbsLocal"></span>
+          <input class="crumbs mono" id="editLocal" type="text" spellcheck="false" style="display:none">
         </div>
         <div class="filter"><input id="filterLocal" type="text" placeholder="Filter this folder..."></div>
       </div>
-      <div class="pane-body"><table><thead><tr><th data-k="name">Name</th><th data-k="size">Size</th><th data-k="mtime">Modified</th></tr></thead><tbody id="tbodyLocal"></tbody></table></div>
+      <div class="pane-body" id="bodyLocal" tabindex="0"><table><thead><tr><th data-k="name">Name</th><th data-k="size">Size</th><th data-k="mtime">Modified</th></tr></thead><tbody id="tbodyLocal"></tbody></table></div>
     </div>
 
     <div class="center">
@@ -271,10 +275,11 @@
           <button class="icon-btn" data-act="up" title="Up to parent folder">&#8593;</button>
           <button class="icon-btn" data-act="refresh" title="Refresh this folder">&#8635;</button>
           <span class="crumbs" id="crumbsRemote">(not connected)</span>
+          <input class="crumbs mono" id="editRemote" type="text" spellcheck="false" style="display:none">
         </div>
         <div class="filter"><input id="filterRemote" type="text" placeholder="Filter this folder..." disabled></div>
       </div>
-      <div class="pane-body"><table><thead><tr><th data-k="name">Name</th><th data-k="size">Size</th><th data-k="mtime">Modified</th></tr></thead><tbody id="tbodyRemote"></tbody></table></div>
+      <div class="pane-body" id="bodyRemote" tabindex="0"><table><thead><tr><th data-k="name">Name</th><th data-k="size">Size</th><th data-k="mtime">Modified</th></tr></thead><tbody id="tbodyRemote"></tbody></table></div>
     </div>
   </div>
 
@@ -339,9 +344,10 @@ let API=null, connected=false, busy=false, queuePending=0;
 function queueActive(){ return queuePending>0; }
 function updateCancelBtn(){ $("cancelBtn").disabled=!(queuePending>0||busy); }
 let authMode="password", rememberPw=false;
-const state={ local:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1},
-              remote:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1} };
+const state={ local:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],anchor:null},
+              remote:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],anchor:null} };
 let compareMap=null;
+const jumpBuf={local:"",remote:""}, jumpTimer={local:null,remote:null};
 
 /* console activity log (replaces the old transient toasts) */
 function clog(m,level){ const box=$("console"); if(!box)return; const empty=box.querySelector(".console-empty"); if(empty)empty.remove();
@@ -502,7 +508,14 @@ async function init(){
     document.querySelectorAll(`#pane${cap(side)} .icon-btn`).forEach(b=>b.onclick=()=>nav(side,b.dataset.act));
     document.querySelectorAll(`#pane${cap(side)} thead th`).forEach(th=>th.onclick=()=>{const k=th.dataset.k;const s=state[side];if(s.sort===k)s.dir=-s.dir;else{s.sort=k;s.dir=1;}renderPane(side);});
     setupDrop(side);
+    $("crumbs"+cap(side)).onclick=()=>startEditPath(side);
+    const inp=$("edit"+cap(side));
+    inp.addEventListener("keydown",e=>{ if(e.key==="Enter"){ const v=inp.value.trim(); endEditPath(side); (side==="local"?loadLocal:loadRemote)(v); }
+      else if(e.key==="Escape"){ endEditPath(side); } });
+    inp.addEventListener("blur",()=>endEditPath(side));
+    $("body"+cap(side)).addEventListener("keydown",e=>typeToJump(side,e));
   });
+  $("browseLocalBtn").onclick=async()=>{ const p=await API.browse_folder(); if(p)loadLocal(p); };
   $("pass").addEventListener("keydown",e=>{if(e.key==="Enter")onConn();});
   document.addEventListener("click",()=>$("ctx").style.display="none");
   $("consoleClear").onclick=clearConsole;
@@ -603,19 +616,24 @@ function pollHealth(){ clearTimeout(pollTimer); if(!connected)return;
 
 /* ───── listing/nav ───── */
 async function loadLocal(path){ const r=await API.list_local(path); if(!r.ok){toast(r.error,true);return;}
-  pushHist("local",r.cwd); state.local.cwd=r.cwd; state.local.entries=r.entries; state.local.sel=new Set(); compareMap=null; renderPane("local"); setCrumbs("local",r.cwd); }
+  pushHist("local",r.cwd); state.local.cwd=r.cwd; state.local.entries=r.entries; state.local.sel=new Set(); state.local.anchor=null; compareMap=null; renderPane("local"); setCrumbs("local",r.cwd); }
 async function loadRemote(path){ if(!connected)return; const r=await API.list_remote(path); if(!r.ok){toast(r.error,true);return;}
-  pushHist("remote",r.cwd); state.remote.cwd=r.cwd; state.remote.entries=r.entries; state.remote.sel=new Set(); compareMap=null; renderPane("remote"); setCrumbs("remote",r.cwd); }
+  pushHist("remote",r.cwd); state.remote.cwd=r.cwd; state.remote.entries=r.entries; state.remote.sel=new Set(); state.remote.anchor=null; compareMap=null; renderPane("remote"); setCrumbs("remote",r.cwd); }
 function refresh(side){ side==="local"?reloadLocal():loadRemote(state.remote.cwd); }
 function reloadLocal(){ API.list_local(state.local.cwd).then(r=>{if(r.ok){state.local.entries=r.entries;renderPane("local");}}); }
 function pushHist(side,cwd){ const s=state[side]; if(s.hist[s.hi]===cwd)return; s.hist=s.hist.slice(0,s.hi+1); s.hist.push(cwd); s.hi=s.hist.length-1; }
 function setCrumbs(side,cwd){ $("crumbs"+cap(side)).textContent=cwd; }
+function startEditPath(side){ if(side==="remote"&&!connected)return;
+  const s=state[side]; const span=$("crumbs"+cap(side)); const inp=$("edit"+cap(side));
+  inp.value=(side==="local"&&s.cwd==="DRIVES")?"":s.cwd;
+  span.style.display="none"; inp.style.display=""; inp.focus(); inp.select(); }
+function endEditPath(side){ $("edit"+cap(side)).style.display="none"; $("crumbs"+cap(side)).style.display=""; }
 async function nav(side,act){ const s=state[side];
   if(act==="refresh"){refresh(side);return;}
   if(act==="up"){ const r=side==="local"?await API.list_local(s.cwd):await API.list_remote(s.cwd); const parent=r.parent; if(parent!=null) (side==="local"?loadLocal:loadRemote)(parent); return; }
   if(act==="back"&&s.hi>0){ s.hi--; gotoHist(side); } if(act==="fwd"&&s.hi<s.hist.length-1){ s.hi++; gotoHist(side); } }
 function gotoHist(side){ const s=state[side]; const cwd=s.hist[s.hi];
-  (side==="local"?API.list_local(cwd):API.list_remote(cwd)).then(r=>{ if(r.ok){ s.cwd=r.cwd; s.entries=r.entries; s.sel=new Set(); renderPane(side); setCrumbs(side,r.cwd);} }); }
+  (side==="local"?API.list_local(cwd):API.list_remote(cwd)).then(r=>{ if(r.ok){ s.cwd=r.cwd; s.entries=r.entries; s.sel=new Set(); s.anchor=null; renderPane(side); setCrumbs(side,r.cwd);} }); }
 
 function renderPane(side){
   const s=state[side]; const tb=$("tbody"+cap(side)); tb.innerHTML="";
@@ -623,19 +641,52 @@ function renderPane(side){
   if(s.filter) entries=entries.filter(e=>e.name.toLowerCase().includes(s.filter));
   entries.sort((a,b)=>{ if(a.is_dir!==b.is_dir)return a.is_dir?-1:1; let x=a[s.sort],y=b[s.sort];
     if(s.sort==="name"){x=(""+x).toLowerCase();y=(""+y).toLowerCase();} return x<y?-s.dir:x>y?s.dir:0; });
+  s.view=entries.map(e=>s.entries.indexOf(e));
   const frag=document.createDocumentFragment();
-  entries.forEach(e=>{ const idx=s.entries.indexOf(e); const tr=document.createElement("tr");
+  entries.forEach((e,pos)=>{ const idx=s.view[pos]; const tr=document.createElement("tr");
     if(s.sel.has(idx))tr.className="sel";
     if(compareMap&&!e.is_dir&&compareMap[side]&&compareMap[side][e.name])tr.classList.add("c-"+compareMap[side][e.name]);
     tr.draggable=!e.is_dir||true;
     tr.innerHTML=`<td class="name"><span class="ic ${e.is_dir?'':'file'}">${e.is_dir?'\u25B8':'\u00B7'}</span>${esc(e.name)}</td>`+
       `<td class="size">${e.is_dir?'':hsize(e.size)}</td><td class="mod">${fmod(e.mtime)}</td>`;
-    tr.onclick=(ev)=>{ if(ev.ctrlKey||ev.metaKey){ s.sel.has(idx)?s.sel.delete(idx):s.sel.add(idx); } else { s.sel=new Set([idx]); } renderPane(side); updateXfer(); };
+    tr.onclick=(ev)=>{ if(ev.shiftKey&&s.anchor!=null){ selectRange(side,s.anchor,idx); }
+      else if(ev.ctrlKey||ev.metaKey){ s.sel.has(idx)?s.sel.delete(idx):s.sel.add(idx); s.anchor=idx; }
+      else { s.sel=new Set([idx]); s.anchor=idx; } renderPane(side); updateXfer(); };
     tr.ondblclick=()=>{ if(e.is_dir){ (side==="local"?loadLocal:loadRemote)(joinp(side,s.cwd,e.name)); } else if(side==="remote"){ startTransfer("download",[idx]); } else { API.open_local(s.cwd,e.name); } };
-    tr.oncontextmenu=(ev)=>{ ev.preventDefault(); if(!s.sel.has(idx)){s.sel=new Set([idx]);renderPane(side);updateXfer();} showCtx(ev,side,e); };
-    tr.ondragstart=(ev)=>{ if(!s.sel.has(idx)){s.sel=new Set([idx]);renderPane(side);updateXfer();} ev.dataTransfer.setData("text/side",side); };
+    tr.oncontextmenu=(ev)=>{ ev.preventDefault(); if(!s.sel.has(idx)){s.sel=new Set([idx]);s.anchor=idx;renderPane(side);updateXfer();} showCtx(ev,side,e); };
+    tr.ondragstart=(ev)=>{ if(!s.sel.has(idx)){s.sel=new Set([idx]);s.anchor=idx;renderPane(side);updateXfer();} ev.dataTransfer.setData("text/side",side); };
     frag.appendChild(tr); });
   tb.appendChild(frag);
+}
+function selectRange(side,anchor,idx){ const s=state[side]; const a=s.view.indexOf(anchor); const b=s.view.indexOf(idx);
+  if(a===-1||b===-1){ s.sel=new Set([idx]); return; }
+  const lo=Math.min(a,b), hi=Math.max(a,b); s.sel=new Set(s.view.slice(lo,hi+1)); }
+function typeToJump(side,e){
+  if(e.ctrlKey||e.altKey||e.metaKey||e.key.length!==1)return;
+  const s=state[side]; const n=s.view.length; if(!n)return;
+  const ch=e.key.toLowerCase();
+  clearTimeout(jumpTimer[side]);
+  // repeating the same single letter steps through every match (folders and files);
+  // any other key extends the typed prefix and searches from the top
+  let from=0;
+  if(jumpBuf[side]===ch){ const cur=s.view.indexOf([...s.sel][0]); from=(cur+1)%n; }
+  else jumpBuf[side]+=ch;
+  jumpTimer[side]=setTimeout(()=>{jumpBuf[side]="";},800);
+  let pos=-1;
+  for(let i=0;i<n;i++){ const p=(from+i)%n; const en=s.entries[s.view[p]];
+    if(en&&en.name.toLowerCase().startsWith(jumpBuf[side])){ pos=p; break; } }
+  if(pos===-1)return;
+  e.preventDefault();
+  const idx=s.view[pos]; s.sel=new Set([idx]); s.anchor=idx; renderPane(side); updateXfer();
+  const row=$("tbody"+cap(side)).children[pos]; if(row)scrollRowIntoView(side,row);
+}
+// keep the row visible below the sticky header (scrollIntoView hides it under the header)
+function scrollRowIntoView(side,row){
+  const body=$("body"+cap(side)); const head=body.querySelector("thead");
+  const headH=head?head.getBoundingClientRect().height:0;
+  const br=body.getBoundingClientRect(), rr=row.getBoundingClientRect();
+  if(rr.top<br.top+headH) body.scrollTop-=(br.top+headH-rr.top);
+  else if(rr.bottom>br.bottom) body.scrollTop+=(rr.bottom-br.bottom);
 }
 function esc(s){return (s+"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
 function joinp(side,cwd,name){ if(side==="local"){ if(cwd==="DRIVES")return name; return cwd.replace(/[\\/]+$/,"")+"\\"+name; } return (cwd==="/"?"":cwd)+"/"+name; }

@@ -1430,6 +1430,18 @@ class Api:
             return ""
         return res if isinstance(res, str) else res[0]
 
+    def browse_folder(self):
+        if not self._window:
+            return ""
+        try:
+            dlg = webview.FileDialog.FOLDER
+        except AttributeError:  # older pywebview
+            dlg = webview.FOLDER_DIALOG
+        res = self._window.create_file_dialog(dlg)
+        if not res:
+            return ""
+        return res if isinstance(res, str) else res[0]
+
     def generate_key(self, key_type, out_path, passphrase):
         out_path = (out_path or "").strip().strip('"')
         if not out_path:
