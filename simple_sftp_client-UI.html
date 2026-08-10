@@ -112,8 +112,8 @@
   tr.c-local_only td.name,tr.c-remote_only td.name{color:var(--blue);}
   .pane.dragover{outline:2px dashed var(--accent);outline-offset:-4px;}
 
-  /* queue: the footer bar stays one row tall; the detail list only exists
-     while open, and rises above the bar instead of shrinking the panes */
+  /* queue: the footer bar always stays one row tall; the full list opens
+     in a modal instead of floating over the Local pane */
   .queue{position:relative;padding:9px 12px;display:flex;align-items:center;gap:12px;height:41px;}
   .qcurrent{display:flex;align-items:center;gap:10px;flex:0 0 auto;min-width:230px;}
   .qbar{width:110px;flex:0 0 auto;height:7px;background:var(--panel-2);border:1px solid var(--border);border-radius:5px;overflow:hidden;}
@@ -121,17 +121,14 @@
   .qmeta{font-size:11px;color:var(--text-dim);white-space:nowrap;font-family:"JetBrains Mono",monospace;}
   .qsummary{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
     font-size:11px;color:var(--text-dim);font-family:"JetBrains Mono",monospace;}
-  .qtoggle{font-family:"JetBrains Mono",monospace;}
-  /* expandable detail list: hidden and out of flow by default, opens upward */
-  .qdetail{display:none;position:absolute;left:0;right:0;bottom:100%;margin-bottom:6px;max-height:210px;
-    overflow-y:auto;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius-sm);
-    box-shadow:0 8px 24px rgba(0,0,0,.25);z-index:5;}
-  .qdetail.open{display:block;}
+  /* modal queue list: scrollable, reuses the .qrow row styling below */
+  .qlist{max-height:320px;overflow:auto;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:14px;}
   .qrow{display:flex;align-items:center;gap:8px;padding:5px 10px;border-bottom:1px solid var(--border);font-size:11.5px;}
   .qrow:last-child{border-bottom:none;}
   .qrow .qarrow{flex:0 0 auto;color:var(--text-faint);width:12px;text-align:center;}
   .qrow .qrow-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .qrow .qrow-pct{flex:0 0 auto;font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--blue);}
+  .qrow .qrow-state{flex:0 0 auto;font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-faint);}
   .qrow .qrow-err{flex:0 0 auto;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10.5px;color:var(--red);}
   .qrow .qx{cursor:pointer;color:var(--text-faint);opacity:.75;font-weight:700;flex:0 0 auto;}
   .qrow .qx:hover{opacity:1;color:var(--red);}
@@ -283,14 +280,13 @@
 
   <!-- queue -->
   <div class="panel queue">
-    <div class="qdetail" id="qDetail"></div>
     <div class="qcurrent">
       <span class="qmeta" id="qName">Idle</span>
       <div class="qbar"><div id="qFill"></div></div>
       <span class="qmeta" id="qMeta"></span>
     </div>
     <span class="qsummary" id="qSummary"></span>
-    <button id="qToggle" class="icon-btn qtoggle" title="Show queued files">&gt;</button>
+    <button id="qViewBtn" class="btn-ghost btn-sm" title="View the transfer queue">View queue</button>
     <button id="cancelBtn" class="btn-ghost btn-sm" disabled>Cancel</button>
   </div>
 
@@ -329,6 +325,11 @@
 <div id="promptModal" class="modal"><div class="card"><h3 id="pmTitle">Input</h3>
   <div class="row"><div class="f"><input id="pmInput" type="text"></div></div>
   <div class="modal-actions"><button id="pmCancel" class="btn-ghost">Cancel</button><button id="pmOk" class="btn-primary">OK</button></div></div></div>
+
+<div id="queueModal" class="modal"><div class="card"><h3>Transfer queue</h3>
+  <div id="qList" class="qlist"></div>
+  <div class="modal-actions"><button id="qClearBtn" class="btn-ghost">Clear finished</button><button id="qCloseBtn" class="btn-primary">Close</button></div>
+</div></div>
 
 <div id="ctx"></div>
 
@@ -382,12 +383,18 @@ window.appEvent=function(ev,p){
 };
 
 /* ───── Phase 2 queue: worker never pushes, the window pulls on a timer ───── */
-let qPollTimer=null, qPolling=false, qDetailOpen=false;
+let qPollTimer=null, qPolling=false, qModalOpen=false;
+
+const QSTATE_LABEL={waiting:"Waiting",active:"Sending",completed:"Done",skipped:"Skipped",failed:"Failed",cancelled:"Cancelled"};
+const QSTATE_FINISHED={completed:1,skipped:1,failed:1,cancelled:1};
 
 function renderQueueRows(items){
-  const box=$("qDetail"); if(!box)return; box.innerHTML="";
+  const box=$("qList"); if(!box)return; box.innerHTML="";
+  // only offer "Clear finished" when there is something finished to remove
+  const btn=$("qClearBtn"); if(btn)btn.disabled=!(items||[]).some(i=>QSTATE_FINISHED[i.state]);
+  if(!items||!items.length){ box.innerHTML='<div class="meta" style="padding:10px;color:var(--text-faint)">Queue is empty</div>'; return; }
   const frag=document.createDocumentFragment();
-  (items||[]).forEach(it=>{
+  items.forEach(it=>{
     const row=document.createElement("div");
     row.className="qrow st-"+it.state;
     const arrow=document.createElement("span"); arrow.className="qarrow";
@@ -407,6 +414,8 @@ function renderQueueRows(items){
       x.onclick=(ev)=>{ ev.stopPropagation(); API.cancel_item(it.id); };
       row.appendChild(x);
     }
+    const st=document.createElement("span"); st.className="qrow-state"; st.textContent=QSTATE_LABEL[it.state]||it.state;
+    row.appendChild(st);
     frag.appendChild(row);
   });
   box.appendChild(frag);
@@ -443,7 +452,7 @@ async function queueTick(){
       $("qFill").style.width="0%"; $("qName").textContent="Idle"; $("qMeta").textContent="";
     }
     renderQueueSummary(p.items);
-    if(qDetailOpen)renderQueueRows(p.items);
+    if(qModalOpen)renderQueueRows(p.items);
     queuePending=p.pending||0;
     updateCancelBtn();
     if(p.pending===0){
@@ -473,8 +482,10 @@ async function init(){
   $("connBtn").onclick=onConn; $("testBtn").onclick=onTest; $("saveBtn").onclick=onSave; $("manageBtn").onclick=openSessions;
   $("sessions").onchange=onPickSession;
   $("upBtn").onclick=()=>startTransfer("upload"); $("downBtn").onclick=()=>startTransfer("download");
-  $("qToggle").onclick=()=>{ qDetailOpen=!qDetailOpen; $("qDetail").classList.toggle("open",qDetailOpen);
-    $("qToggle").textContent=qDetailOpen?"v":">"; if(qDetailOpen)API.poll_queue().then(p=>renderQueueRows(p.items)); };
+  $("qViewBtn").onclick=()=>{ qModalOpen=true; $("queueModal").classList.add("show");
+    API.poll_queue().then(p=>renderQueueRows(p.items)); };
+  $("qCloseBtn").onclick=()=>{ qModalOpen=false; $("queueModal").classList.remove("show"); };
+  $("qClearBtn").onclick=async()=>{ const r=await API.clear_finished(); renderQueueRows(r.items); };
   $("compareBtn").onclick=onCompare; $("syncUpBtn").onclick=()=>onSync("upload"); $("syncDownBtn").onclick=()=>onSync("download");
   $("watchBtn").onclick=onWatch; $("cancelBtn").onclick=()=>API.cancel();
   $("keygenBtn").onclick=openKeygen;

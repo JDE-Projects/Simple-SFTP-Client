@@ -962,6 +962,12 @@ class Api:
             self.queue.cancel(item_id)
         return {"ok": True}
 
+    def clear_finished(self):
+        """Remove completed/failed/cancelled/skipped items so the window can
+        re-render the queue without the clutter of finished transfers."""
+        self.queue.clear_finished()
+        return {"items": self.queue.snapshot(), "pending": self.queue.pending()}
+
     def enqueue(self, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"):
         """New entry point for pane transfers: expands jobs (same enumeration
         as transfer()) into per-file queue items and returns immediately. The

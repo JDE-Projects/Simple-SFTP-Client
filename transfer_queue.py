@@ -142,6 +142,14 @@ class TransferQueue:
         with self._lock:
             return sum(1 for item in self._items if item.state in (WAITING, ACTIVE))
 
+    def clear_finished(self):
+        """Remove items in a terminal state, keep waiting/active items. Returns
+        the number of items removed."""
+        with self._lock:
+            before = len(self._items)
+            self._items = [item for item in self._items if item.state not in TERMINAL_STATES]
+            return before - len(self._items)
+
     def _find(self, item_id):
         """Caller must hold self._lock."""
         for item in self._items:

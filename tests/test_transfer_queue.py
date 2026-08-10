@@ -168,6 +168,38 @@ def test_append_with_on_conflict_stores_it_on_claimed_item(q):
     assert item.on_conflict == "skip"
 
 
+def test_clear_finished_removes_terminal_items_only(q):
+    active_id = q.append("upload", "/l2", "/r2", "file2")
+    done_id = q.append("upload", "/l3", "/r3", "file3")
+    failed_id = q.append("upload", "/l4", "/r4", "file4")
+
+    active_item = q.claim()
+    assert active_item.id == active_id
+    done_item = q.claim()
+    assert done_item.id == done_id
+    q.mark_completed(done_id)
+    failed_item = q.claim()
+    assert failed_item.id == failed_id
+    q.mark_failed(failed_id, "boom")
+
+    # appended after the others were claimed, so it stays WAITING
+    waiting_id = q.append("upload", "/l1", "/r1", "file1")
+
+    removed = q.clear_finished()
+
+    assert removed == 2
+    remaining_ids = {s["id"] for s in q.snapshot()}
+    assert remaining_ids == {waiting_id, active_id}
+
+
+def test_clear_finished_returns_zero_when_nothing_to_remove(q):
+    q.append("upload", "/l1", "/r1", "file1")
+    q.claim()
+
+    assert q.clear_finished() == 0
+    assert len(q.snapshot()) == 1
+
+
 def test_claim_is_thread_safe_no_duplicates_no_drops(q):
     n = 50
     ids = [q.append("upload", f"/l{i}", f"/r{i}", f"file{i}") for i in range(n)]
