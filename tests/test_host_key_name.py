@@ -11,7 +11,6 @@ server is involved. hostkey_name(host, port) is the source of truth for the name
 import paramiko
 import pytest
 
-import simple_sftp_client
 from simple_sftp_client import Api, UnknownHostKey, hostkey_name
 
 HOST = "example.com"

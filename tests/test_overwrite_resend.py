@@ -5,8 +5,6 @@ match, so overwrite must not skip. on_conflict="skip" keeps skipping.
 
 Runs against the in-process SFTP server from conftest.py.
 """
-import os
-
 from transfer_queue import COMPLETED, SKIPPED
 
 
