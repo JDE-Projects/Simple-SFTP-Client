@@ -327,6 +327,14 @@
   <p id="cfText" style="font-size:12.5px;line-height:1.5;color:var(--text);white-space:pre-line"></p>
   <div class="modal-actions"><button id="cfCancel" class="btn-ghost">Cancel</button><button id="cfOk" class="btn-danger">OK</button></div></div></div>
 
+<div id="diffModal" class="modal"><div class="card"><h3>Overwrite existing files?</h3>
+  <p id="dfText" style="font-size:12.5px;line-height:1.5;color:var(--text)"></p>
+  <div style="max-height:40vh;overflow:auto;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:14px">
+    <table><thead><tr><th>Name</th><th>Local</th><th>Remote</th><th>Newer</th></tr></thead><tbody id="dfBody"></tbody></table>
+  </div>
+  <div class="modal-actions"><button id="dfCancel" class="btn-ghost">Cancel</button><button id="dfSkip" class="btn-ghost">Skip existing</button><button id="dfOk" class="btn-primary">Overwrite</button></div>
+</div></div>
+
 <div id="promptModal" class="modal"><div class="card"><h3 id="pmTitle">Input</h3>
   <div class="row"><div class="f"><input id="pmInput" type="text"></div></div>
   <div class="modal-actions"><button id="pmCancel" class="btn-ghost">Cancel</button><button id="pmOk" class="btn-primary">OK</button></div></div></div>
@@ -706,7 +714,7 @@ async function startTransfer(direction,forceIdx){
   const destNames=new Set(state[destSide].entries.map(e=>e.name));
   const collide=jobs.filter(j=>destNames.has(j.name));
   let policy="overwrite";
-  if(collide.length){ const choice=await confirm3("Overwrite?", collide.length+" item(s) already exist in the destination. Overwrite them, or skip existing?","Overwrite","Skip existing");
+  if(collide.length){ const srcSide=direction==="upload"?"local":"remote"; const choice=await confirmDiff(collide,srcSide,destSide);
     if(choice===null)return; if(choice==="skip"){ jobs=jobs.filter(j=>!destNames.has(j.name)); if(!jobs.length){toast("Nothing to transfer (all skipped)");return;} } }
   $("statusText").textContent="";
   const r=await API.enqueue(jobs,direction,state.local.cwd,state.remote.cwd,policy);
@@ -844,6 +852,30 @@ function confirm3(title,text,okLabel,altLabel){ return new Promise(res=>{ $("cfT
   ok.onclick=()=>{$("confirmModal").classList.remove("show");alt.style.display="none";res("overwrite");};
   alt.onclick=()=>{$("confirmModal").classList.remove("show");alt.style.display="none";res("skip");};
   cancel.onclick=()=>{$("confirmModal").classList.remove("show");alt.style.display="none";res(null);}; }); }
+function confirmDiff(collide,srcSide,destSide){
+  const rows=collide.map(j=>{
+    if(j.is_dir) return `<tr><td class="name">${esc(j.name)}<span class="meta" style="color:var(--text-dim);font-size:10px;border:1px solid var(--border);border-radius:4px;padding:1px 5px;margin-left:6px">folder</span></td><td class="size">—</td><td class="size">—</td><td>—</td></tr>`;
+    const loc=state.local.entries.find(e=>e.name===j.name), rem=state.remote.entries.find(e=>e.name===j.name);
+    const locCell=loc?`${hsize(loc.size)}<br>${fmod(loc.mtime)}`:"—";
+    const remCell=rem?`${hsize(rem.size)}<br>${fmod(rem.mtime)}`:"—";
+    let newer="—";
+    if(loc&&rem&&loc.mtime&&rem.mtime){
+      if(loc.mtime>rem.mtime) newer=`<b style="color:var(--green)">Local</b>`;
+      else if(rem.mtime>loc.mtime) newer=`<b style="color:var(--amber)">Remote</b>`;
+      else newer="Same";
+    }
+    return `<tr><td class="name">${esc(j.name)}</td><td class="size">${locCell}</td><td class="size">${remCell}</td><td>${newer}</td></tr>`;
+  }).join("");
+  $("dfBody").innerHTML=rows;
+  $("dfText").textContent=collide.length+" item(s) already exist in the destination. Review the details below, then choose Overwrite or Skip existing.";
+  return new Promise(res=>{
+    $("diffModal").classList.add("show");
+    const done=v=>{$("diffModal").classList.remove("show");res(v);};
+    $("dfCancel").onclick=()=>done(null);
+    $("dfSkip").onclick=()=>done("skip");
+    $("dfOk").onclick=()=>done("overwrite");
+  });
+}
 function prompt2(title,label,val){ return new Promise(res=>{ $("pmTitle").textContent=title; $("pmInput").value=val||""; $("pmInput").placeholder=label||"";
   $("promptModal").classList.add("show"); setTimeout(()=>$("pmInput").focus(),50);
   $("pmOk").onclick=()=>{$("promptModal").classList.remove("show");res($("pmInput").value.trim());};
