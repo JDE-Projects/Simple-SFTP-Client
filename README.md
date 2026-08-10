@@ -88,7 +88,7 @@ pipeline from this repo. You can also check the file against the published
 - `pip install -r requirements.txt` (pinned versions: PySide6, pywebview,
   paramiko, cryptography, keyring, and PyInstaller)
 - Keep `simple_sftp_client.py`, `simple_sftp_client-UI.html`, the `fonts/`
-  folder, the `.ico`, `.png`, and `-splash.png` together.
+  folder, the `.ico`, and `.png` together.
 - Run from source: `python simple_sftp_client.py`
 - Build the .exe: `Build_Simple_SFTP_Client.bat` -> `dist\Simple SFTP Client\Simple SFTP Client.exe`
 

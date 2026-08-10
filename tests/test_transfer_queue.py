@@ -200,6 +200,38 @@ def test_clear_finished_returns_zero_when_nothing_to_remove(q):
     assert len(q.snapshot()) == 1
 
 
+def test_fail_waiting_fails_only_waiting_items(q):
+    # Build a mix of states. claim() is FIFO, so claim the first two and
+    # finalize them (one ACTIVE, one COMPLETED), then append fresh WAITING
+    # items at the tail that were never claimed.
+    active_id = q.append("upload", "/l1", "/r1", "file1")
+    done_id = q.append("upload", "/l2", "/r2", "file2")
+
+    assert q.claim().id == active_id          # file1 -> ACTIVE, left as-is
+    assert q.claim().id == done_id
+    q.mark_completed(done_id)                  # file2 -> COMPLETED
+
+    wait1 = q.append("upload", "/l3", "/r3", "file3")   # WAITING
+    wait2 = q.append("upload", "/l4", "/r4", "file4")   # WAITING
+
+    failed = q.fail_waiting("no session")
+
+    assert failed == 2
+    states = {s["id"]: s for s in q.snapshot()}
+    assert states[wait1]["state"] == FAILED and states[wait1]["error"] == "no session"
+    assert states[wait2]["state"] == FAILED and states[wait2]["error"] == "no session"
+    assert states[active_id]["state"] == ACTIVE       # active untouched
+    assert states[done_id]["state"] == COMPLETED      # terminal untouched
+
+
+def test_fail_waiting_returns_zero_when_nothing_waiting(q):
+    q.append("upload", "/l", "/r", "file")
+    q.claim()  # now ACTIVE, nothing WAITING
+
+    assert q.fail_waiting("no session") == 0
+    assert q.snapshot()[0]["state"] == ACTIVE
+
+
 def test_claim_is_thread_safe_no_duplicates_no_drops(q):
     n = 50
     ids = [q.append("upload", f"/l{i}", f"/r{i}", f"file{i}") for i in range(n)]

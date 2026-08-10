@@ -9,6 +9,9 @@ build/
 dist/
 *.spec
 
+# Local test SFTP server runtime (host key, served data, sample files)
+tools/.sftp_test/
+
 # Python
 __pycache__/
 .pytest_cache/
@@ -20,9 +23,6 @@ Debug_Log_*.txt
 
 # Theme preference (per-machine: the light/dark choice)
 *.pref
-
-# Personal roadmap notes (ideas, not for distribution)
-roadmap.md
 
 # Local planning notes (kept private, not shared)
 roadmap.md

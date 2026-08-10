@@ -43,8 +43,9 @@ import paramiko
 
 from transfer_queue import TransferQueue
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 GITHUB_REPO = "JDE-Projects/Simple-SFTP-Client"   # owner/repo for update checks
+WORKER_COUNT = 2   # transfer queue workers running concurrently, each its own SFTP session
 
 # Weak / deprecated / CVE-prone algorithms we refuse (secure-or-fail).
 DISABLED_ALGORITHMS = {
@@ -511,16 +512,20 @@ class Api:
         self._cancel = threading.Event()
         self._watch_stop = None
         self._watch_thread = None
-        # transfer queue (Phase 2): one background worker drains it, concurrency 1
+        # transfer queue: a pool of up to WORKER_COUNT background workers drains
+        # it, each over its own SFTP session (never self.sftp, that stays
+        # reserved for the file browser).
         self.queue = TransferQueue()
-        self._worker = None
+        self._workers = []  # live worker Thread objects, at most WORKER_COUNT
         self._worker_lock = threading.Lock()
-        self._active_item = None
         # set while sync/watch/external-drop run, so the queue worker knows to wait
         self._legacy_active = threading.Event()
-        # Phase 2 poll model: the worker never touches evaluate_js. It writes
-        # plain state here, the window pulls it on a timer via poll_queue().
-        self._progress_state = None
+        # Poll model: workers never touch evaluate_js. They write plain state
+        # here, the window pulls it on a timer via poll_queue(). Progress is
+        # keyed by queue item id since up to WORKER_COUNT items can be active
+        # at once; guarded by its own lock since multiple workers write it.
+        self._progress_by_id = {}
+        self._progress_lock = threading.Lock()
         self._console_buffer = []
         self._console_lock = threading.Lock()
         self._poll_mode = False
@@ -938,49 +943,53 @@ class Api:
     # ───────────── transfers (queue + progress + resume + retry) ─────────────
     def cancel(self):
         """Cancel-all, wired to the footer Cancel button: cancels every waiting
-        queue item and flags the active one so the worker's byte loop stops and
-        finalizes it as cancelled."""
+        queue item and flags every active one so each worker's byte loop stops
+        and finalizes it as cancelled. self._cancel is still set for the legacy
+        path (sync/watch/external-drop), which is not on the per-item flag."""
         self.queue.cancel_all()
         self._cancel.set()
         return {"ok": True}
 
     def poll_queue(self):
         """Pulled by the window on a timer (~200ms) while a queue is active.
-        This is the only channel from the worker thread to the UI: it never
+        This is the only channel from the worker threads to the UI: it never
         calls evaluate_js, so it cannot deadlock the window."""
         with self._console_lock:
             lines = self._console_buffer
             self._console_buffer = []
+        items, pending = self.queue.snapshot_and_pending()
+        active_ids = [it["id"] for it in items if it["state"] == "active"]
+        with self._progress_lock:
+            progress = {str(k): v for k, v in self._progress_by_id.items()}
         return {
-            "items": self.queue.snapshot(),
-            "pending": self.queue.pending(),
-            "active_id": self._active_item.id if self._active_item else None,
-            "progress": self._progress_state,
+            "items": items,
+            "pending": pending,
+            "active_ids": active_ids,
+            "progress": progress,
             "console": lines,
         }
 
     def cancel_item(self, item_id):
-        """Cancel a single queued item. Waiting items go straight to cancelled.
-        The active item is flagged and its byte loop interrupted."""
-        if self._active_item is not None and self._active_item.id == item_id:
-            self.queue.cancel(item_id)
-            self._cancel.set()
-        else:
-            self.queue.cancel(item_id)
+        """Cancel a single queued item. Waiting items go straight to cancelled;
+        an active item is flagged (TransferItem.cancel_requested) so whichever
+        worker owns it interrupts its byte loop and finalizes it."""
+        self.queue.cancel(item_id)
         return {"ok": True}
 
     def clear_finished(self):
         """Remove completed/failed/cancelled/skipped items so the window can
         re-render the queue without the clutter of finished transfers."""
         self.queue.clear_finished()
-        return {"items": self.queue.snapshot(), "pending": self.queue.pending()}
+        items, pending = self.queue.snapshot_and_pending()
+        return {"items": items, "pending": pending}
 
     def enqueue(self, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"):
         """New entry point for pane transfers: expands jobs (same enumeration
-        as transfer()) into per-file queue items and returns immediately. The
-        single background worker (_worker_loop) drains the queue one file at a
-        time over the existing self.sftp session; no new sessions, no
-        parallelism (that is Phase 3)."""
+        as transfer()) into per-file queue items and returns immediately. Folder
+        enumeration below runs once, up front, over the shared self.sftp session
+        (the same one the file browser uses); the per-file transfers that follow
+        are drained by the worker pool (_ensure_worker), each over its own
+        SFTP session opened when that worker starts."""
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
         if self._legacy_active.is_set():
@@ -1009,48 +1018,86 @@ class Api:
         return {"ok": True, "queued": len(files)}
 
     def _ensure_worker(self):
-        """Start the single background worker thread if it is not already running.
-        Poll mode is turned on here, under the same lock the worker retires
-        itself with, so starting and stopping a worker can never overlap and
-        leave poll mode in the wrong state."""
+        """Top the worker pool up to WORKER_COUNT live threads whenever there
+        is waiting work. Poll mode is turned on here, under the same lock a
+        worker retires itself with, so starting and stopping workers can never
+        overlap and leave poll mode in the wrong state."""
         with self._worker_lock:
-            if self._worker is None or not self._worker.is_alive():
+            self._workers = [w for w in self._workers if w.is_alive()]
+            while len(self._workers) < WORKER_COUNT and self.queue.waiting() > 0:
                 self._poll_mode = True
-                self._worker = threading.Thread(target=self._worker_loop, daemon=True)
-                self._worker.start()
+                w = threading.Thread(target=self._worker_loop, daemon=True)
+                self._workers.append(w)
+                w.start()
 
     def _worker_loop(self):
-        """Drains the queue one item at a time. Reuses the existing self.sftp
-        session, same as the old blocking transfer path; never opens a second
-        session (Phase 3 territory). done_count/total are only for the
-        progress display, an approximation is fine there.
+        """Drains the queue, one item at a time, as one of up to WORKER_COUNT
+        workers running concurrently. Each worker opens its own SFTP session
+        here and closes it on exit; workers never touch self.sftp, that stays
+        reserved for the file browser. done_count/total are only for the
+        progress display, an approximation is fine there (each worker only
+        knows its own done_count).
 
         Runs entirely off the pywebview bridge thread, so it must never call
-        evaluate_js (that is what deadlocked the window). While this loop
-        runs, _poll_mode is True: _progress() only updates in-memory state
-        instead of emitting, and _worker_log() buffers console lines for the
-        window to pull via poll_queue()."""
+        evaluate_js (that is what deadlocked the window). While any worker in
+        the pool is running, _poll_mode is True: _progress() only updates
+        in-memory state instead of emitting, and _worker_log() buffers console
+        lines for the window to pull via poll_queue()."""
+        me = threading.current_thread()
+        try:
+            sftp = self.client.open_sftp()
+        except Exception as e:
+            # No silent failure: surface it in the console log and let this
+            # worker retire; the other worker (if any) keeps draining the queue.
+            self._worker_log(f"could not open a transfer session: {e}", "error")
+            with self._worker_lock:
+                if me in self._workers:
+                    self._workers.remove(me)
+                if not self._workers:
+                    self._poll_mode = False
+                    with self._progress_lock:
+                        self._progress_by_id = {}
+                    # Last worker out and none could open a session: don't leave
+                    # queued items sitting as WAITING with nothing to drain them.
+                    # Mark them failed so the failure is visible in the queue.
+                    stranded = self.queue.fail_waiting(f"transfer session unavailable: {e}")
+                    if stranded:
+                        self._worker_log(
+                            f"{stranded} queued item(s) marked failed: no transfer session",
+                            "error")
+            return
         try:
             done_count = 0
             while True:
                 item = self.queue.claim()
                 if item is None:
                     # Decide whether to stop under the same lock _ensure_worker
-                    # starts a worker with, and re-check the queue while holding
-                    # it. Without this, a file enqueued in the instant the queue
-                    # empties sees this still-alive worker, so _ensure_worker
-                    # skips starting one, yet this worker has already left the
-                    # loop, and the file would wait forever.
+                    # starts workers with, and re-check the queue while holding
+                    # it. Without this, a file enqueued in the instant this
+                    # worker finds the queue empty would see a still-alive
+                    # worker (this one) and _ensure_worker would skip starting
+                    # one, yet this worker has already left the loop, and the
+                    # file would wait forever. waiting() (not pending()) is the
+                    # right check: pending() also counts items ACTIVE on the
+                    # other worker, which would wrongly keep this one alive.
                     with self._worker_lock:
-                        if self.queue.pending() == 0:
-                            self._active_item = None
-                            self._progress_state = None
-                            self._worker = None
-                            self._poll_mode = False
+                        if self.queue.waiting() == 0:
+                            if me in self._workers:
+                                self._workers.remove(me)
+                            # Only the last worker to leave clears pool-wide
+                            # state and logs the drain summary; the others just
+                            # retire quietly.
+                            if not self._workers:
+                                self._poll_mode = False
+                                with self._progress_lock:
+                                    self._progress_by_id = {}
+                                counts = self.queue.counts()
+                                self._worker_log(
+                                    f"Queue drained: {counts.get('completed', 0)} completed, "
+                                    f"{counts.get('failed', 0)} failed, {counts.get('cancelled', 0)} cancelled, "
+                                    f"{counts.get('skipped', 0)} skipped")
                             break
                     continue
-                self._active_item = item
-                self._cancel.clear()
                 total = done_count + self.queue.pending()
                 if item.cancel_requested:
                     # cancel() on a waiting item goes straight to CANCELLED, so this
@@ -1058,27 +1105,33 @@ class Api:
                     self.queue.mark_cancelled(item.id)
                     self._worker_log(f"cancelled {item.name}", "warn")
                     done_count += 1
-                    self._active_item = None
                     continue
                 arrow = "↑" if item.direction == "upload" else "↓"
                 ok = False
                 res = None
                 last_err = ""
                 for attempt in range(3):
-                    if self._cancel.is_set() or item.cancel_requested:
+                    if item.cancel_requested:
                         break
                     try:
                         res = self._one(item.direction, item.local_path, item.remote_path,
-                                         item.name, done_count, total, item.on_conflict)
+                                         item.name, done_count, total, item.on_conflict,
+                                         sftp, cancel_check=lambda it=item: it.cancel_requested,
+                                         progress_key=item.id)
                         ok = True
-                        break
+                        break  # success (including "skip"/"cancelled"): stop retrying
                     except Exception as e:
                         last_err = str(e)
                         debug.log(f"transfer retry {attempt+1}", f"{item.name}: {e}")
-                        if self._cancel.is_set() or item.cancel_requested:
+                        if item.cancel_requested:
                             break
                         time.sleep(0.6)
-                if self._cancel.is_set() or item.cancel_requested:
+                if res == "cancelled" or (not ok and item.cancel_requested):
+                    # res == "cancelled": the byte loop itself broke early, so
+                    # the transfer did not finish; that is the one true source
+                    # of truth here, not a flag re-check after the fact, which
+                    # could mislabel a file that finished sending its very last
+                    # byte the instant cancel arrived.
                     self.queue.mark_cancelled(item.id)
                     self._worker_log(f"cancelled {item.name}", "warn")
                 elif res == "skip":
@@ -1091,20 +1144,23 @@ class Api:
                     self.queue.mark_failed(item.id, last_err or "transfer failed")
                     self._worker_log(f"failed {item.name}", "error")
                 done_count += 1
-                self._active_item = None
-            counts = self.queue.counts()
-            self._worker_log(f"Queue drained: {counts.get('completed', 0)} completed, "
-                              f"{counts.get('failed', 0)} failed, {counts.get('cancelled', 0)} cancelled, "
-                              f"{counts.get('skipped', 0)} skipped")
+                with self._progress_lock:
+                    self._progress_by_id.pop(item.id, None)
         finally:
+            try:
+                sftp.close()
+            except Exception:
+                pass
             # Safety net for an exit by exception rather than the clean
-            # empty-queue path above: retire this worker only if it is still the
-            # current one, so a worker that has since started is left untouched
-            # (poll mode stays on for it).
+            # empty-queue path above: remove this worker if it is still in the
+            # pool, and only clear pool-wide state if it was the last one.
             with self._worker_lock:
-                if self._worker is threading.current_thread():
-                    self._worker = None
+                if me in self._workers:
+                    self._workers.remove(me)
+                if not self._workers:
                     self._poll_mode = False
+                    with self._progress_lock:
+                        self._progress_by_id = {}
 
     def transfer(self, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"):
         """jobs: list of {name, is_dir}. Expands dirs, transfers files with
@@ -1196,7 +1252,8 @@ class Api:
             res = None
             for attempt in range(3):
                 try:
-                    res = self._one(direction, lp, rp, name, done, total, on_conflict)
+                    res = self._one(direction, lp, rp, name, done, total, on_conflict,
+                                     self.sftp, cancel_check=lambda: self._cancel.is_set())
                     if res == "skip":
                         skipped += 1
                     ok = True
@@ -1218,81 +1275,114 @@ class Api:
         return {"ok": True, "total": total, "errors": errors, "skipped": skipped,
                 "cancelled": self._cancel.is_set()}
 
-    def _one(self, direction, lp, rp, name, idx, total, on_conflict):
+    def _one(self, direction, lp, rp, name, idx, total, on_conflict, sftp,
+             cancel_check=None, progress_key=None):
+        """sftp is the session to transfer over: self.sftp for the legacy
+        path, a worker's own session for the queue path. cancel_check is a
+        callable returning True to stop the byte loop early; defaults to the
+        legacy self._cancel flag. progress_key is what _progress() files this
+        transfer's progress under (a queue item id, or the file name for the
+        legacy path, which does not read it back by key)."""
+        if cancel_check is None:
+            def cancel_check():
+                return self._cancel.is_set()
+        if progress_key is None:
+            progress_key = name
         # size-aware: skip identical, resume partial, else fresh
         if direction == "upload":
             src_size = os.path.getsize(lp)
-            dst_size = self._rsize(rp)
+            dst_size = self._rsize(sftp, rp)
         else:
-            src_size = self._rsize(rp)
+            src_size = self._rsize(sftp, rp)
             dst_size = os.path.getsize(lp) if os.path.exists(lp) else -1
         if dst_size == src_size and src_size >= 0 and on_conflict == "skip":
             # user chose skip and the other side is the same size -> leave it.
             # overwrite deliberately falls through and resends, even on equal
             # size, since size alone does not prove the contents match.
-            self._progress(name, idx, total, src_size, src_size, 0)
+            self._progress(name, idx, total, src_size, src_size, 0, progress_key)
             return "skip"
         offset = dst_size if (0 < dst_size < src_size) else 0
         start = time.time()
 
         def cb(done_b, _t, base=offset):
-            self._progress(name, idx, total, base + done_b, src_size, time.time() - start)
+            self._progress(name, idx, total, base + done_b, src_size, time.time() - start, progress_key)
 
         os.makedirs(os.path.dirname(lp), exist_ok=True) if direction == "download" else None
         if direction == "upload":
-            self._put_resume(lp, rp, offset, cb)
+            finished = self._put_resume(sftp, lp, rp, offset, cb, cancel_check)
         else:
-            self._get_resume(rp, lp, offset, cb)
-        return "ok"
+            finished = self._get_resume(sftp, rp, lp, offset, cb, cancel_check)
+        # finished is False only if the byte loop broke early on cancel_check;
+        # a transfer that sent every byte is "ok" even if cancel arrived a
+        # moment later, so the caller must not re-check a cancel flag itself.
+        return "ok" if finished else "cancelled"
 
-    def _put_resume(self, lp, rp, offset, cb):
+    def _put_resume(self, sftp, lp, rp, offset, cb, cancel_check):
+        # Check cancel_check() only once there is another chunk actually to
+        # send, and only after confirming there is more file left (the read
+        # came back non-empty). That way a cancel arriving in the instant
+        # right after the last real chunk was already written finds nothing
+        # left to abort: the next read hits EOF first and the loop exits with
+        # finished=True, so a fully-sent file is never mislabeled cancelled.
+        finished = True
         with open(lp, "rb") as src:
             src.seek(offset)
-            with self.sftp.open(rp, "a" if offset else "w") as dst:
+            with sftp.open(rp, "a" if offset else "w") as dst:
                 dst.set_pipelined(True)
                 sent = 0
                 while True:
-                    if self._cancel.is_set():
-                        break
                     chunk = src.read(32768)
                     if not chunk:
+                        break
+                    if cancel_check():
+                        finished = False
                         break
                     dst.write(chunk)
                     sent += len(chunk)
                     cb(sent, 0)
+        return finished
 
-    def _get_resume(self, rp, lp, offset, cb):
-        with self.sftp.open(rp, "r") as src:
+    def _get_resume(self, sftp, rp, lp, offset, cb, cancel_check):
+        # Same ordering as _put_resume, for the same reason: only treat a
+        # cancel as having interrupted the transfer if there was still more
+        # to read when it was observed.
+        finished = True
+        with sftp.open(rp, "r") as src:
             src.prefetch()
             src.seek(offset)
             with open(lp, "ab" if offset else "wb") as dst:
                 got = 0
                 while True:
-                    if self._cancel.is_set():
-                        break
                     chunk = src.read(32768)
                     if not chunk:
+                        break
+                    if cancel_check():
+                        finished = False
                         break
                     dst.write(chunk)
                     got += len(chunk)
                     cb(got, 0)
+        return finished
 
-    def _progress(self, name, idx, total, sent, size, elapsed):
+    def _progress(self, name, idx, total, sent, size, elapsed, progress_key=None):
         speed = (sent / elapsed) if elapsed > 0 else 0
         eta = ((size - sent) / speed) if speed > 0 and size > 0 else 0
         payload = {"name": name, "index": idx, "total": total,
                    "pct": int(sent * 100 / size) if size else 100,
                    "speed": human_size(speed) + "/s" if speed else "",
                    "eta": int(eta)}
-        self._progress_state = payload
-        # Worker thread (queue path): never emit, the window polls instead.
-        # Legacy bridge-thread path (_run_transfer): emit as before.
-        if not self._poll_mode:
+        # Worker threads (queue path): keyed by item id, in-memory only, the
+        # window polls instead. Legacy bridge-thread path (_run_transfer):
+        # emit as before, nothing to key by since only one file is active.
+        if self._poll_mode:
+            with self._progress_lock:
+                self._progress_by_id[progress_key] = payload
+        else:
             self._emit("progress", payload)
 
-    def _rsize(self, rp):
+    def _rsize(self, sftp, rp):
         try:
-            return self.sftp.stat(rp).st_size
+            return sftp.stat(rp).st_size
         except Exception:
             return -1
 
@@ -1426,6 +1516,18 @@ class Api:
             dlg = webview.SAVE_DIALOG
         res = self._window.create_file_dialog(
             dlg, save_filename=suggested or "id_ed25519")
+        if not res:
+            return ""
+        return res if isinstance(res, str) else res[0]
+
+    def browse_folder(self):
+        if not self._window:
+            return ""
+        try:
+            dlg = webview.FileDialog.FOLDER
+        except AttributeError:  # older pywebview
+            dlg = webview.FOLDER_DIALOG
+        res = self._window.create_file_dialog(dlg)
         if not res:
             return ""
         return res if isinstance(res, str) else res[0]
@@ -1629,35 +1731,7 @@ class Api:
             return {"ok": False, "error": friendly_error(e)}
 
 
-# ───────────── splash + main ─────────────
-try:
-    import pyi_splash  # type: ignore
-    HAS_SPLASH = True
-except Exception:
-    HAS_SPLASH = False
-
-_splash_lock = threading.Lock()
-_splash_done = False
-_start = time.time()
-
-
-def _close_splash():
-    global _splash_done
-    with _splash_lock:
-        if _splash_done:
-            return
-        _splash_done = True
-    if HAS_SPLASH:
-        try:
-            pyi_splash.close()
-        except Exception:
-            pass
-
-
-def _on_loaded():
-    threading.Timer(max(0.0, 5.0 - (time.time() - _start)), _close_splash).start()
-
-
+# ───────────── main ─────────────
 _mutex_handle = None   # module-level: must live for the process lifetime
 
 def _acquire_single_instance(mutex_name: str) -> bool:
@@ -1706,8 +1780,6 @@ def main():
             sys.exit(0)
         IS_SECOND_INSTANCE = True
 
-    if HAS_SPLASH:
-        threading.Timer(30.0, _close_splash).start()
     if sys.platform == "win32":
         try:
             import ctypes
@@ -1720,7 +1792,6 @@ def main():
         js_api=api, width=1480, height=980, min_size=(1000, 700),
         background_color="#0a0e14")
     api.set_window(window)
-    window.events.loaded += _on_loaded
 
     def _wire_external_drop():
         # Let users drag files in from Windows Explorer onto the remote pane.
