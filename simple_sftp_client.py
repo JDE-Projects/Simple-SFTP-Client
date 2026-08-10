@@ -43,7 +43,7 @@ import paramiko
 
 from transfer_queue import TransferQueue
 
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.5.0"
 GITHUB_REPO = "JDE-Projects/Simple-SFTP-Client"   # owner/repo for update checks
 
 # Weak / deprecated / CVE-prone algorithms we refuse (secure-or-fail).
