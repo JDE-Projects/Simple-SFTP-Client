@@ -43,7 +43,7 @@ import paramiko
 
 from transfer_queue import TransferQueue
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 GITHUB_REPO = "JDE-Projects/Simple-SFTP-Client"   # owner/repo for update checks
 WORKER_COUNT = 2   # transfer queue workers running concurrently, each its own SFTP session
 
