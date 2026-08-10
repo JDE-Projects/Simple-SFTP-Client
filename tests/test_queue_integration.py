@@ -70,27 +70,31 @@ def test_multiple_files_drain_in_order_and_all_complete(sftp_env, wait_for_drain
 
 def test_cancel_waiting_item_behind_a_slower_active_one(sftp_env, wait_for_drain, state_of):
     api, server_root, local_dir = sftp_env
-    # a few MB, so the first item's byte loop keeps the worker busy long
-    # enough for the second (waiting) item to be cancelled deterministically
-    big = local_dir / "big.bin"
-    big.write_bytes(os.urandom(4 * 1024 * 1024))
+    # two big files, a few MB each, so both of the pool's two workers stay
+    # busy long enough for the trailing (still-waiting) item to be cancelled
+    # deterministically instead of getting claimed itself
+    big1 = local_dir / "big1.bin"
+    big1.write_bytes(os.urandom(4 * 1024 * 1024))
+    big2 = local_dir / "big2.bin"
+    big2.write_bytes(os.urandom(4 * 1024 * 1024))
     small = local_dir / "small.bin"
     small.write_bytes(os.urandom(16))
 
-    jobs = [{"name": "big.bin", "is_dir": False}, {"name": "small.bin", "is_dir": False}]
+    jobs = [{"name": "big1.bin", "is_dir": False}, {"name": "big2.bin", "is_dir": False},
+            {"name": "small.bin", "is_dir": False}]
     result = api.enqueue(jobs, "upload", str(local_dir), "/", "overwrite")
     assert result["ok"] is True
 
     snap = api.queue.snapshot()
-    big_id = next(e["id"] for e in snap if e["name"] == "big.bin")
+    big1_id = next(e["id"] for e in snap if e["name"] == "big1.bin")
+    big2_id = next(e["id"] for e in snap if e["name"] == "big2.bin")
     small_id = next(e["id"] for e in snap if e["name"] == "small.bin")
 
-    # wait until the big item is claimed (active) before cancelling the one
-    # still waiting behind it
+    # wait until both big items are claimed (active), so both workers are busy
+    # and the small item behind them is still waiting
     deadline = time.time() + 15
     while time.time() < deadline:
-        entry = state_of(api, big_id)
-        if entry["state"] != WAITING:
+        if state_of(api, big1_id)["state"] != WAITING and state_of(api, big2_id)["state"] != WAITING:
             break
         time.sleep(0.02)
 
@@ -99,7 +103,8 @@ def test_cancel_waiting_item_behind_a_slower_active_one(sftp_env, wait_for_drain
     wait_for_drain(api)
 
     assert state_of(api, small_id)["state"] == CANCELLED
-    assert state_of(api, big_id)["state"] == COMPLETED
+    assert state_of(api, big1_id)["state"] == COMPLETED
+    assert state_of(api, big2_id)["state"] == COMPLETED
     served_small = server_root / "small.bin"
     assert not served_small.exists()
 
@@ -132,10 +137,10 @@ def test_second_batch_runs_after_the_queue_drained(sftp_env, wait_for_drain, sta
                 str(local_dir), "/", "overwrite")
     wait_for_drain(api)
 
-    # let the worker fully retire (poll mode off, thread gone) before round two
+    # let every worker fully retire (poll mode off, pool empty) before round two
     deadline = time.time() + 15
     while time.time() < deadline:
-        if api._worker is None or not api._worker.is_alive():
+        if not any(w.is_alive() for w in api._workers):
             break
         time.sleep(0.02)
     assert api._poll_mode is False

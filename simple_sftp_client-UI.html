@@ -418,7 +418,8 @@ function renderQueueRows(items){
     row.appendChild(nm);
     if(it.state==="active"){
       const pct=document.createElement("span"); pct.className="qrow-pct";
-      pct.textContent=(lastProgress&&lastProgress.name===it.name)?lastProgress.pct+"%":"";
+      const pr=lastProgressById[String(it.id)];
+      pct.textContent=pr?pr.pct+"%":"";
       row.appendChild(pct);
     } else if(it.state==="failed"&&it.error){
       const err=document.createElement("span"); err.className="qrow-err"; err.textContent=it.error; err.title=it.error;
@@ -445,7 +446,7 @@ function renderQueueSummary(items){
   if(skipped)parts.push(`${skipped} skipped`);
   $("qSummary").textContent=parts.join(" · ");
 }
-let lastProgress=null;
+let lastProgressById={};   // progress payloads keyed by queue item id (string keys, JSON)
 function startQueuePoll(){
   if(qPollTimer)return;
   qPollTimer=setInterval(queueTick,200);
@@ -458,10 +459,20 @@ async function queueTick(){
   try{
     const p=await API.poll_queue();
     (p.console||[]).forEach(line=>clog(line.msg,line.level));
-    lastProgress=p.progress;
-    if(p.progress){
-      $("qName").textContent=p.progress.name; $("qFill").style.width=p.progress.pct+"%";
-      $("qMeta").textContent=`${p.progress.index+1}/${p.progress.total}  ${p.progress.pct}%  ${p.progress.speed||""}${p.progress.eta?"  ETA "+p.progress.eta+"s":""}`;
+    lastProgressById=p.progress||{};
+    // up to two files can be active at once; roll them up into the footer.
+    const activeProgress=(p.active_ids||[]).map(id=>lastProgressById[String(id)]).filter(Boolean);
+    if(activeProgress.length===1){
+      const pr=activeProgress[0];
+      $("qName").textContent=pr.name; $("qFill").style.width=pr.pct+"%";
+      $("qMeta").textContent=`${pr.index+1}/${pr.total}  ${pr.pct}%  ${pr.speed||""}${pr.eta?"  ETA "+pr.eta+"s":""}`;
+    } else if(activeProgress.length>=2){
+      const avgPct=Math.round(activeProgress.reduce((sum,pr)=>sum+pr.pct,0)/activeProgress.length);
+      const c=n=>(p.items||[]).filter(i=>i.state===n).length;
+      const done=c("completed")+c("skipped")+c("failed")+c("cancelled");
+      $("qName").textContent=`${activeProgress.length} transfers active`;
+      $("qFill").style.width=avgPct+"%";
+      $("qMeta").textContent=`${done} of ${(p.items||[]).length} done`;
     } else {
       $("qFill").style.width="0%"; $("qName").textContent="Idle"; $("qMeta").textContent="";
     }
@@ -497,7 +508,7 @@ async function init(){
   $("sessions").onchange=onPickSession;
   $("upBtn").onclick=()=>startTransfer("upload"); $("downBtn").onclick=()=>startTransfer("download");
   $("qViewBtn").onclick=()=>{ qModalOpen=true; $("queueModal").classList.add("show");
-    API.poll_queue().then(p=>renderQueueRows(p.items)); };
+    API.poll_queue().then(p=>{ lastProgressById=p.progress||{}; renderQueueRows(p.items); }); };
   $("qCloseBtn").onclick=()=>{ qModalOpen=false; $("queueModal").classList.remove("show"); };
   $("qClearBtn").onclick=async()=>{ const r=await API.clear_finished(); renderQueueRows(r.items); };
   $("compareBtn").onclick=onCompare; $("syncUpBtn").onclick=()=>onSync("upload"); $("syncDownBtn").onclick=()=>onSync("download");

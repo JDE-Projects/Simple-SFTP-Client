@@ -1,10 +1,10 @@
 """
 Thread-safe in-memory FIFO transfer queue.
 
-Phase 1: pure logic, no paramiko or network dependency. A single lock guards
-every state change so multiple workers can claim items concurrently without
-ever grabbing the same one. Concurrency is 1 today, but claim() is written
-to be safe for a future worker pool.
+Pure logic, no paramiko or network dependency. A single lock guards every
+state change so multiple workers can claim items concurrently without ever
+grabbing the same one; claim() is what makes the worker pool in
+simple_sftp_client.py (two workers by default) safe.
 """
 import threading
 from dataclasses import dataclass
@@ -141,6 +141,33 @@ class TransferQueue:
     def pending(self):
         with self._lock:
             return sum(1 for item in self._items if item.state in (WAITING, ACTIVE))
+
+    def waiting(self):
+        """Count of items still WAITING to be claimed (not counting ACTIVE).
+        Used by the worker pool to decide whether to start another worker or
+        let one retire; pending() includes ACTIVE items too, so it is not the
+        right check there (an active item on another worker would wrongly
+        keep an idle worker's decision looking like there is more to do)."""
+        with self._lock:
+            return sum(1 for item in self._items if item.state == WAITING)
+
+    def snapshot_and_pending(self):
+        """Same data as snapshot() and pending(), read under one lock grab so
+        the two numbers can never disagree by one item mid-transfer, the way
+        two separate lock grabs could."""
+        with self._lock:
+            items = [
+                {
+                    "id": item.id,
+                    "direction": item.direction,
+                    "name": item.name,
+                    "state": item.state,
+                    "error": item.error,
+                }
+                for item in self._items
+            ]
+            pending = sum(1 for item in self._items if item.state in (WAITING, ACTIVE))
+            return items, pending
 
     def clear_finished(self):
         """Remove items in a terminal state, keep waiting/active items. Returns

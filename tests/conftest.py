@@ -185,6 +185,7 @@ def sftp_env(tmp_path):
     sftp = client.open_sftp()
 
     api = simple_sftp_client.Api()
+    api.client = client
     api.sftp = sftp
     api.connected = True
 
