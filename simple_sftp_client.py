@@ -1198,11 +1198,12 @@ class Api:
         else:
             src_size = self._rsize(rp)
             dst_size = os.path.getsize(lp) if os.path.exists(lp) else -1
-        if dst_size == src_size and src_size >= 0:
-            if on_conflict == "skip" or on_conflict == "overwrite":
-                # identical size -> treat as already transferred
-                self._progress(name, idx, total, src_size, src_size, 0)
-                return "skip"
+        if dst_size == src_size and src_size >= 0 and on_conflict == "skip":
+            # user chose skip and the other side is the same size -> leave it.
+            # overwrite deliberately falls through and resends, even on equal
+            # size, since size alone does not prove the contents match.
+            self._progress(name, idx, total, src_size, src_size, 0)
+            return "skip"
         offset = dst_size if (0 < dst_size < src_size) else 0
         start = time.time()
 
