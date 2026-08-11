@@ -134,6 +134,8 @@
   .qrow .qrow-err{flex:0 0 auto;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10.5px;color:var(--red);}
   .qrow .qx{cursor:pointer;color:var(--text-faint);opacity:.75;font-weight:700;flex:0 0 auto;}
   .qrow .qx:hover{opacity:1;color:var(--red);}
+  .qrow .qretry{cursor:pointer;color:var(--text-faint);opacity:.75;font-weight:700;flex:0 0 auto;}
+  .qrow .qretry:hover{opacity:1;color:var(--accent);}
   .qrow.st-active .qrow-name{color:var(--blue);}
   .qrow.st-completed .qrow-name{color:var(--green);}
   .qrow.st-failed .qrow-name{color:var(--red);}
@@ -293,6 +295,7 @@
     <span class="qsummary" id="qSummary"></span>
     <button id="qViewBtn" class="btn-ghost btn-sm" title="View the transfer queue">View queue</button>
     <button id="cancelBtn" class="btn-ghost btn-sm" disabled>Cancel</button>
+    <button id="pauseBtn" class="btn-ghost btn-sm" disabled>Pause</button>
   </div>
 
   <div class="statusbar">
@@ -335,6 +338,14 @@
   <div class="modal-actions"><button id="dfCancel" class="btn-ghost">Cancel</button><button id="dfSkip" class="btn-ghost">Skip existing</button><button id="dfOk" class="btn-primary">Overwrite</button></div>
 </div></div>
 
+<div id="syncModal" class="modal"><div class="card"><h3>Sync preview</h3>
+  <p id="syText" style="font-size:12.5px;line-height:1.5;color:var(--text)"></p>
+  <div style="max-height:40vh;overflow:auto;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:14px">
+    <table><thead><tr><th>Name</th><th>Local</th><th>Remote</th><th>Newer</th></tr></thead><tbody id="syBody"></tbody></table>
+  </div>
+  <div class="modal-actions"><button id="syCancel" class="btn-ghost">Cancel</button><button id="syOk" class="btn-primary">Transfer</button></div>
+</div></div>
+
 <div id="promptModal" class="modal"><div class="card"><h3 id="pmTitle">Input</h3>
   <div class="row"><div class="f"><input id="pmInput" type="text"></div></div>
   <div class="modal-actions"><button id="pmCancel" class="btn-ghost">Cancel</button><button id="pmOk" class="btn-primary">OK</button></div></div></div>
@@ -349,8 +360,10 @@
 <script>
 const $=id=>document.getElementById(id);
 let API=null, connected=false, busy=false, queuePending=0;
+let queuePaused=false;
 function queueActive(){ return queuePending>0; }
 function updateCancelBtn(){ $("cancelBtn").disabled=!(queuePending>0||busy); }
+function updatePauseBtn(){ const b=$("pauseBtn"); b.disabled=!(queuePending>0); b.textContent=queuePaused?"Resume":"Pause"; }
 let authMode="password", rememberPw=false;
 const state={ local:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],anchor:null},
               remote:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],anchor:null} };
@@ -402,6 +415,12 @@ let qPollTimer=null, qPolling=false, qModalOpen=false;
 const QSTATE_LABEL={waiting:"Waiting",active:"Sending",completed:"Done",skipped:"Skipped",failed:"Failed",cancelled:"Cancelled"};
 const QSTATE_FINISHED={completed:1,skipped:1,failed:1,cancelled:1};
 
+function addRetryButton(row, id){
+  const rt=document.createElement("span"); rt.className="qretry"; rt.textContent="↻"; rt.title="Retry";
+  rt.onclick=(ev)=>{ ev.stopPropagation(); API.retry_item(id).then(r=>{ if(r&&r.ok) startQueuePoll(); }); };
+  row.appendChild(rt);
+}
+
 function renderQueueRows(items){
   const box=$("qList"); if(!box)return; box.innerHTML="";
   // only offer "Clear finished" when there is something finished to remove
@@ -421,9 +440,14 @@ function renderQueueRows(items){
       const pr=lastProgressById[String(it.id)];
       pct.textContent=pr?pr.pct+"%":"";
       row.appendChild(pct);
-    } else if(it.state==="failed"&&it.error){
-      const err=document.createElement("span"); err.className="qrow-err"; err.textContent=it.error; err.title=it.error;
-      row.appendChild(err);
+    } else if(it.state==="failed"){
+      if(it.error){
+        const err=document.createElement("span"); err.className="qrow-err"; err.textContent=it.error; err.title=it.error;
+        row.appendChild(err);
+      }
+      addRetryButton(row, it.id);
+    } else if(it.state==="cancelled"){
+      addRetryButton(row, it.id);
     } else if(it.state==="waiting"){
       const x=document.createElement("span"); x.className="qx"; x.textContent="×"; x.title="Cancel";
       x.onclick=(ev)=>{ ev.stopPropagation(); API.cancel_item(it.id); };
@@ -480,6 +504,13 @@ async function queueTick(){
     if(qModalOpen)renderQueueRows(p.items);
     queuePending=p.pending||0;
     updateCancelBtn();
+    queuePaused=!!p.paused;
+    updatePauseBtn();
+    if(queuePaused){
+      const finishing=(p.active_ids||[]).length;
+      if(finishing>0){ $("qName").textContent=`Pausing (${finishing} finishing)…`; }
+      else { $("qName").textContent="Paused"; $("qFill").style.width="0%"; $("qMeta").textContent=""; }
+    }
     if(p.pending===0){
       stopQueuePoll();
       $("qName").textContent="Idle";
@@ -488,6 +519,8 @@ async function queueTick(){
       $("qMeta").textContent=`Done: ${completed} completed`+(failed?`, ${failed} failed`:"")+
         (cancelled?`, ${cancelled} cancelled`:"")+(skipped?`, ${skipped} skipped`:"");
       refresh("local"); refresh("remote");
+      queuePaused=false;
+      updatePauseBtn();
     }
   } finally { qPolling=false; }
 }
@@ -513,6 +546,7 @@ async function init(){
   $("qClearBtn").onclick=async()=>{ const r=await API.clear_finished(); renderQueueRows(r.items); };
   $("compareBtn").onclick=onCompare; $("syncUpBtn").onclick=()=>onSync("upload"); $("syncDownBtn").onclick=()=>onSync("download");
   $("watchBtn").onclick=onWatch; $("cancelBtn").onclick=()=>API.cancel();
+  $("pauseBtn").onclick=async()=>{ if(queuePaused){ const r=await API.resume_queue(); if(r&&!r.ok){ clog(r.error||"Could not resume","error"); return; } startQueuePoll(); } else { await API.pause_queue(); } };
   $("keygenBtn").onclick=openKeygen;
   $("hostKeyBtn").onclick=onViewHostKey;
   $("kgBrowse").onclick=async()=>{ const sug=$("kgType").value.startsWith("Ed25519")?"id_ed25519":"id_rsa"; const p=await API.browse_save_key(sug); if(p)$("kgPath").value=p; };
@@ -738,19 +772,16 @@ async function startTransfer(direction,forceIdx){
 async function externalUpload(paths){
   if(!paths||!paths.length)return;
   if(!connected){ infoBox("Not connected","Connect to a server before dropping files onto the remote pane."); return; }
-  if(busy){ clog("A transfer is already running — drop ignored","warn"); return; }
-  if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
   const base=p=>p.replace(/[\\/]+$/,"").split(/[\\/]/).pop();
   const names=paths.map(base); const destNames=new Set(state.remote.entries.map(e=>e.name));
   const collide=names.filter(n=>destNames.has(n));
   if(collide.length){ const choice=await confirm3("Overwrite?", collide.length+" item(s) already exist in the destination. Overwrite them, or skip existing?","Overwrite","Skip existing");
     if(choice===null)return;
     if(choice==="skip"){ paths=paths.filter((p,i)=>!destNames.has(names[i])); if(!paths.length){ clog("Nothing to upload (all skipped)"); return; } } }
-  busy=true; updateCancelBtn();
   clog(`Uploading ${paths.length} dropped item(s) to ${state.remote.cwd}`);
   const r=await API.upload_paths(paths, state.remote.cwd, "overwrite");
-  busy=false; updateCancelBtn();
-  if(!r.ok){ clog(r.error||"Upload failed","error"); }
+  if(!r.ok){ clog(r.error||"Upload failed","error"); return; }
+  startQueuePoll();
 }
 function setupDrop(side){ const pane=$("pane"+cap(side));
   pane.addEventListener("dragover",e=>{e.preventDefault();pane.classList.add("dragover");});
@@ -766,12 +797,15 @@ async function onCompare(){ if(!connected)return; const r=await API.compare(stat
   $("statusText").innerHTML=`Compared: <b style="color:var(--green)">${c.newer_local} newer here</b>, <b style="color:var(--amber)">${c.newer_remote} newer remote</b>, ${c.local_only} local-only, ${c.remote_only} remote-only`; }
 async function onSync(direction){ if(!connected||busy)return;
   if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
-  const msg=direction==="upload"?"Upload new/changed files from local to remote?":"Download new/changed files from remote to local?";
-  if(!await confirm2("Sync folder",msg))return; busy=true; updateCancelBtn();
-  const r=await API.sync(state.local.cwd,state.remote.cwd,direction,true);
-  busy=false; updateCancelBtn();
+  const r=await API.sync_plan(state.local.cwd,state.remote.cwd,direction,true);
   if(!r.ok){toast(r.error||"Sync failed",true);return;}
-  if(r.total===0){toast("Already in sync, nothing to transfer");} }
+  const plan=r.plan;
+  if(!plan.length){toast("Already in sync, nothing to transfer");return;}
+  if(!await confirmSyncPlan(plan))return;
+  const jobs=plan.map(p=>({name:p.name,is_dir:false}));
+  const rr=await API.enqueue(jobs,direction,state.local.cwd,state.remote.cwd,"overwrite");
+  if(!rr.ok){toast(rr.error||"Could not queue the transfer",true);return;}
+  startQueuePoll(); }
 let watching=false;
 async function onWatch(){ if(!connected)return;
   if(watching){ await API.stop_watch(); watching=false; $("watchBtn").classList.remove("btn-primary"); $("watchBtn").classList.add("btn-ghost"); $("watchBtn").textContent="Watch"; $("statusText").textContent="Watch stopped"; return; }
@@ -887,6 +921,28 @@ function confirmDiff(collide,srcSide,destSide){
     $("dfCancel").onclick=()=>done(null);
     $("dfSkip").onclick=()=>done("skip");
     $("dfOk").onclick=()=>done("overwrite");
+  });
+}
+function confirmSyncPlan(plan){
+  const rows=plan.map(p=>{
+    const locCell=p.local?`${hsize(p.local.size)}<br>${fmod(p.local.mtime)}`:"—";
+    const remCell=p.remote?`${hsize(p.remote.size)}<br>${fmod(p.remote.mtime)}`:"—";
+    let newer="—";
+    if(p.local&&p.remote&&p.local.mtime&&p.remote.mtime){
+      if(p.local.mtime>p.remote.mtime) newer=`<b style="color:var(--green)">Local</b>`;
+      else if(p.remote.mtime>p.local.mtime) newer=`<b style="color:var(--amber)">Remote</b>`;
+      else newer="Same";
+    }
+    return `<tr><td class="name">${esc(p.name)}</td><td class="size">${locCell}</td><td class="size">${remCell}</td><td>${newer}</td></tr>`;
+  }).join("");
+  $("syBody").innerHTML=rows;
+  $("syText").textContent=plan.length+" file(s) will transfer:";
+  $("syOk").textContent=`Transfer (${plan.length} file${plan.length===1?"":"s"})`;
+  return new Promise(res=>{
+    $("syncModal").classList.add("show");
+    const done=v=>{$("syncModal").classList.remove("show");res(v);};
+    $("syCancel").onclick=()=>done(false);
+    $("syOk").onclick=()=>done(true);
   });
 }
 function prompt2(title,label,val){ return new Promise(res=>{ $("pmTitle").textContent=title; $("pmInput").value=val||""; $("pmInput").placeholder=label||"";

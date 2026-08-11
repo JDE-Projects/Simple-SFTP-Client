@@ -4,7 +4,8 @@ Thread-safe in-memory FIFO transfer queue.
 Pure logic, no paramiko or network dependency. A single lock guards every
 state change so multiple workers can claim items concurrently without ever
 grabbing the same one; claim() is what makes the worker pool in
-simple_sftp_client.py (two workers by default) safe.
+simple_sftp_client.py (2 workers by default, up to 5 for a batch of many
+small files) safe.
 """
 import threading
 from dataclasses import dataclass
@@ -42,6 +43,22 @@ class TransferQueue:
         self._lock = threading.Lock()
         self._items = []  # FIFO order, append order preserved
         self._next_id = 1
+        self._paused = False
+
+    def pause(self):
+        """Stop claim() from handing out new items. Items already ACTIVE are
+        left alone and run to completion."""
+        with self._lock:
+            self._paused = True
+
+    def resume(self):
+        """Let claim() hand out WAITING items again."""
+        with self._lock:
+            self._paused = False
+
+    def is_paused(self):
+        with self._lock:
+            return self._paused
 
     def append(self, direction, local_path, remote_path, name, size=0, on_conflict="overwrite"):
         with self._lock:
@@ -61,6 +78,10 @@ class TransferQueue:
     def claim(self):
         """Atomically find the oldest WAITING item, mark it ACTIVE, and return it."""
         with self._lock:
+            # Workers retire on a None claim, so this is what makes the pool
+            # wind down while paused instead of picking up more WAITING work.
+            if self._paused:
+                return None
             for item in self._items:
                 if item.state == WAITING:
                     item.state = ACTIVE
@@ -108,6 +129,19 @@ class TransferQueue:
                 item.cancel_requested = True
                 return True
             return False
+
+    def requeue(self, item_id):
+        """How a failed or user-cancelled item gets put back in line for the
+        worker pool: reset it to WAITING with a clean error and cancel flag.
+        False (no change) for any other state or an unknown id."""
+        with self._lock:
+            item = self._find(item_id)
+            if item is None or item.state not in (FAILED, CANCELLED):
+                return False
+            item.state = WAITING
+            item.error = ""
+            item.cancel_requested = False
+            return True
 
     def cancel_all(self):
         with self._lock:
