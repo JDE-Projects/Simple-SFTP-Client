@@ -1572,9 +1572,9 @@ class Api:
             for name in set(loc) | set(rem):
                 status = self._classify(name, loc, rem)
                 if status in wanted or (not changed_only and status != "same"):
-                    l = {"size": loc[name][0], "mtime": loc[name][1]} if name in loc else None
-                    r = {"size": rem[name][0], "mtime": rem[name][1]} if name in rem else None
-                    plan.append({"name": name, "status": status, "local": l, "remote": r})
+                    local = {"size": loc[name][0], "mtime": loc[name][1]} if name in loc else None
+                    remote = {"size": rem[name][0], "mtime": rem[name][1]} if name in rem else None
+                    plan.append({"name": name, "status": status, "local": local, "remote": remote})
             return {"ok": True, "plan": plan}
         except Exception as e:
             return {"ok": False, "error": friendly_error(e)}
