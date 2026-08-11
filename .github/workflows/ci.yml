@@ -6,5 +6,7 @@ on:
 jobs:
   ci:
     uses: JDE-Projects/Build-Tools/.github/workflows/ci-windows.yml@f75ec6a3c182e787970f347a1f4cbe34a5681ef7 # Build-Tools main (ruff, import check, pytest)
+    permissions:
+      contents: read
     with:
       entry_script: "simple_sftp_client.py"
