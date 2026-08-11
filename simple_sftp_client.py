@@ -45,7 +45,17 @@ from transfer_queue import TransferQueue
 
 APP_VERSION = "1.6.0"
 GITHUB_REPO = "JDE-Projects/Simple-SFTP-Client"   # owner/repo for update checks
-WORKER_COUNT = 2   # transfer queue workers running concurrently, each its own SFTP session
+WORKER_COUNT = 2   # transfer queue workers by default, each its own SFTP session
+WORKER_COUNT_MAX = 5   # ceiling for a batch of many small files (channels-per-connection headroom, see status.md)
+
+
+def worker_target(sizes):
+    """Decide the worker-pool size for a batch from its file sizes (bytes).
+    Returns WORKER_COUNT_MAX when the batch has enough small files to make
+    extra channels pay off, else the WORKER_COUNT default. Sizes below zero
+    are unknown and never count as small."""
+    small = sum(1 for s in sizes if 0 <= s < 1024 * 1024)
+    return WORKER_COUNT_MAX if small >= 8 else WORKER_COUNT
 
 # Weak / deprecated / CVE-prone algorithms we refuse (secure-or-fail).
 DISABLED_ALGORITHMS = {
@@ -512,18 +522,22 @@ class Api:
         self._cancel = threading.Event()
         self._watch_stop = None
         self._watch_thread = None
-        # transfer queue: a pool of up to WORKER_COUNT background workers drains
-        # it, each over its own SFTP session (never self.sftp, that stays
-        # reserved for the file browser).
+        # transfer queue: a pool of workers drains it, each over its own SFTP
+        # session (never self.sftp, that stays reserved for the file browser).
+        # Pool size is WORKER_COUNT (2) by default, up to WORKER_COUNT_MAX (5)
+        # for a batch of many small files.
         self.queue = TransferQueue()
-        self._workers = []  # live worker Thread objects, at most WORKER_COUNT
+        self._workers = []  # live worker Thread objects, at most self._target_workers
         self._worker_lock = threading.Lock()
+        # How many workers the pool tops up to. A fresh batch sets this (see
+        # _enqueue_files); it resets to WORKER_COUNT once the pool empties.
+        self._target_workers = WORKER_COUNT
         # set while sync/watch/external-drop run, so the queue worker knows to wait
         self._legacy_active = threading.Event()
         # Poll model: workers never touch evaluate_js. They write plain state
         # here, the window pulls it on a timer via poll_queue(). Progress is
-        # keyed by queue item id since up to WORKER_COUNT items can be active
-        # at once; guarded by its own lock since multiple workers write it.
+        # keyed by queue item id since up to WORKER_COUNT_MAX items can be
+        # active at once; guarded by its own lock since multiple workers write it.
         self._progress_by_id = {}
         self._progress_lock = threading.Lock()
         self._console_buffer = []
@@ -1023,53 +1037,75 @@ class Api:
             return {"ok": False, "error": "Not connected."}
         if self._legacy_active.is_set():
             return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}
-        files = []   # (local_path, remote_path)
+        files = []   # (local_path, remote_path, size)
         try:
             for j in jobs:
                 if direction == "upload":
                     lp = os.path.join(local_dir, j["name"])
                     rp = posixpath.join(remote_dir, j["name"])
-                    files += self._walk_local(lp, rp) if j["is_dir"] else [(lp, rp)]
+                    if j["is_dir"]:
+                        files += self._walk_local(lp, rp)
+                    else:
+                        try:
+                            size = os.path.getsize(lp)
+                        except OSError:
+                            size = 0
+                        files.append((lp, rp, size))
                 else:
                     rp = posixpath.join(remote_dir, j["name"])
                     lp = os.path.join(local_dir, j["name"])
-                    files += self._walk_remote(rp, lp) if j["is_dir"] else [(lp, rp)]
+                    files += self._walk_remote(rp, lp) if j["is_dir"] else \
+                        [(lp, rp, self._rsize(self.sftp, rp))]
         except Exception as e:
             return {"ok": False, "error": f"Could not enumerate: {e}"}
         return {"ok": True, "queued": self._enqueue_files(files, direction, on_conflict)}
 
     def _enqueue_files(self, files, direction, on_conflict):
-        """Append (local_path, remote_path) pairs to the queue as per-file items
-        and wake the worker pool. Returns the count enqueued. Shared by pane
-        transfers (enqueue) and external drops (upload_paths)."""
-        for lp, rp in files:
+        """Append (local_path, remote_path, size) triples to the queue as
+        per-file items and wake the worker pool. Returns the count enqueued.
+        Shared by pane transfers (enqueue) and external drops (upload_paths).
+        Sizes are carried from enumeration (real local size for uploads, real
+        remote size for downloads), never re-stat here.
+
+        Also decides the worker-pool size for this batch (worker_target) and
+        raises the pool's target under _worker_lock: only ever up, never torn
+        down under a still-draining pool, so a mid-batch top-up never shrinks
+        workers already running."""
+        sizes = []
+        for lp, rp, size in files:
             name = os.path.basename(lp)
-            try:
-                size = os.path.getsize(lp) if direction == "upload" and os.path.exists(lp) else 0
-            except OSError:
-                size = 0
-            self.queue.append(direction, lp, rp, name, size=size, on_conflict=on_conflict)
+            sizes.append(size)
+            queue_size = size if size and size > 0 else 0
+            self.queue.append(direction, lp, rp, name, size=queue_size, on_conflict=on_conflict)
+        batch_target = worker_target(sizes)
+        with self._worker_lock:
+            if not self._workers:
+                self._target_workers = batch_target
+            else:
+                self._target_workers = max(self._target_workers, batch_target)
         self._ensure_worker()
         return len(files)
 
     def _ensure_worker(self):
-        """Top the worker pool up to WORKER_COUNT live threads whenever there
-        is waiting work. Poll mode is turned on here, under the same lock a
-        worker retires itself with, so starting and stopping workers can never
-        overlap and leave poll mode in the wrong state."""
+        """Top the worker pool up to self._target_workers live threads
+        whenever there is waiting work. Poll mode is turned on here, under the
+        same lock a worker retires itself with, so starting and stopping
+        workers can never overlap and leave poll mode in the wrong state."""
         with self._worker_lock:
             if self.queue.is_paused():
                 return
             self._workers = [w for w in self._workers if w.is_alive()]
-            while len(self._workers) < WORKER_COUNT and self.queue.waiting() > 0:
+            while len(self._workers) < self._target_workers and self.queue.waiting() > 0:
                 self._poll_mode = True
                 w = threading.Thread(target=self._worker_loop, daemon=True)
                 self._workers.append(w)
                 w.start()
 
     def _worker_loop(self):
-        """Drains the queue, one item at a time, as one of up to WORKER_COUNT
-        workers running concurrently. Each worker opens its own SFTP session
+        """Drains the queue, one item at a time, as one of up to
+        self._target_workers (WORKER_COUNT by default, up to WORKER_COUNT_MAX
+        for a batch of many small files) workers running concurrently. Each
+        worker opens its own SFTP session
         here and closes it on exit; workers never touch self.sftp, that stays
         reserved for the file browser. done_count/total are only for the
         progress display, an approximation is fine there (each worker only
@@ -1092,6 +1128,7 @@ class Api:
                     self._workers.remove(me)
                 if not self._workers:
                     self._poll_mode = False
+                    self._target_workers = WORKER_COUNT
                     with self._progress_lock:
                         self._progress_by_id = {}
                     # Last worker out and none could open a session: don't leave
@@ -1134,13 +1171,19 @@ class Api:
                                 with self._progress_lock:
                                     self._progress_by_id = {}
                                 if paused and self.queue.waiting() > 0:
+                                    # Paused with items still held: leave the target
+                                    # alone so a resume drains the rest at the count
+                                    # this batch was scaled to, not the default.
                                     self._worker_log(
                                         f"Queue paused ({self.queue.waiting()} still waiting)")
                                 else:
                                     # Reached the empty queue (paused with nothing
-                                    # left, or a normal drain). Clear a stale pause
-                                    # flag so the next batch is not held back by a
-                                    # pause that belonged to a queue now emptied.
+                                    # left, or a normal drain). Reset the pool target
+                                    # so a later lone retry does not inherit a stale
+                                    # scaled-up count, and clear a stale pause flag so
+                                    # the next batch is not held back by a pause that
+                                    # belonged to a queue now emptied.
+                                    self._target_workers = WORKER_COUNT
                                     self.queue.resume()
                                     counts = self.queue.counts()
                                     self._worker_log(
@@ -1210,6 +1253,10 @@ class Api:
                     self._workers.remove(me)
                 if not self._workers:
                     self._poll_mode = False
+                    # Leave the target alone during a pause-hold so a resume drains
+                    # the rest at the scaled count; any real drain resets it.
+                    if not (self.queue.is_paused() and self.queue.waiting() > 0):
+                        self._target_workers = WORKER_COUNT
                     with self._progress_lock:
                         self._progress_by_id = {}
 
@@ -1219,17 +1266,17 @@ class Api:
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
         self._cancel.clear()
-        files = []   # (local_path, remote_path)
+        files = []   # (local_path, remote_path, size)
         try:
             for j in jobs:
                 if direction == "upload":
                     lp = os.path.join(local_dir, j["name"])
                     rp = posixpath.join(remote_dir, j["name"])
-                    files += self._walk_local(lp, rp) if j["is_dir"] else [(lp, rp)]
+                    files += self._walk_local(lp, rp) if j["is_dir"] else [(lp, rp, 0)]
                 else:
                     rp = posixpath.join(remote_dir, j["name"])
                     lp = os.path.join(local_dir, j["name"])
-                    files += self._walk_remote(rp, lp) if j["is_dir"] else [(lp, rp)]
+                    files += self._walk_remote(rp, lp) if j["is_dir"] else [(lp, rp, 0)]
         except Exception as e:
             return {"ok": False, "error": f"Could not enumerate: {e}"}
         return self._run_transfer(files, direction, on_conflict)
@@ -1254,7 +1301,11 @@ class Api:
                 if os.path.isdir(lp):
                     files += self._walk_local(lp, rp)
                 elif os.path.isfile(lp):
-                    files.append((lp, rp))
+                    try:
+                        size = os.path.getsize(lp)
+                    except OSError:
+                        size = 0
+                    files.append((lp, rp, size))
         except Exception as e:
             return {"ok": False, "error": f"Could not read the dropped items: {e}"}
         if not files:
@@ -1289,7 +1340,7 @@ class Api:
         done = 0
         errors = []
         skipped = 0
-        for lp, rp in files:
+        for lp, rp, _size in files:
             if self._cancel.is_set():
                 break
             name = os.path.basename(lp)
@@ -1448,7 +1499,12 @@ class Api:
             except Exception:
                 pass
             for fn in fnames:
-                out.append((os.path.join(root, fn), posixpath.join(rbase, fn)))
+                full = os.path.join(root, fn)
+                try:
+                    size = os.path.getsize(full)
+                except OSError:
+                    size = 0
+                out.append((full, posixpath.join(rbase, fn), size))
         return out
 
     def _walk_remote(self, rp, lp):
@@ -1464,7 +1520,7 @@ class Api:
             if stat.S_ISDIR(a.st_mode):
                 out += self._walk_remote(rchild, lchild)
             else:
-                out.append((lchild, rchild))
+                out.append((lchild, rchild, a.st_size))
         return out
 
     # ───────────── compare / sync plan / download-changed ─────────────

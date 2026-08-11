@@ -4,7 +4,8 @@ Thread-safe in-memory FIFO transfer queue.
 Pure logic, no paramiko or network dependency. A single lock guards every
 state change so multiple workers can claim items concurrently without ever
 grabbing the same one; claim() is what makes the worker pool in
-simple_sftp_client.py (two workers by default) safe.
+simple_sftp_client.py (2 workers by default, up to 5 for a batch of many
+small files) safe.
 """
 import threading
 from dataclasses import dataclass
