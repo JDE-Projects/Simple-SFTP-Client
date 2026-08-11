@@ -1426,60 +1426,61 @@ class Api:
                 out.append((lchild, rchild))
         return out
 
-    # ───────────── compare / sync / download-changed ─────────────
+    # ───────────── compare / sync plan / download-changed ─────────────
+    def _scan_pair(self, local_dir, remote_dir):
+        """Lists both sides of a folder pair into name -> (size, mtime) maps.
+        Shared by compare() and sync_plan() so the two never drift apart."""
+        loc = {}
+        for n in os.listdir(local_dir):
+            full = os.path.join(local_dir, n)
+            if os.path.isfile(full):
+                st = os.stat(full)
+                loc[n] = (st.st_size, int(st.st_mtime))
+        rem = {}
+        for a in self.sftp.listdir_attr(remote_dir):
+            if not stat.S_ISDIR(a.st_mode):
+                rem[a.filename] = (a.st_size, int(a.st_mtime or 0))
+        return loc, rem
+
+    @staticmethod
+    def _classify(name, loc, rem):
+        if name in loc and name not in rem:
+            return "local_only"
+        if name in rem and name not in loc:
+            return "remote_only"
+        if loc[name][0] == rem[name][0]:
+            return "same"
+        return "newer_local" if loc[name][1] >= rem[name][1] else "newer_remote"
+
     def compare(self, local_dir, remote_dir):
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
         try:
-            loc = {}
-            for n in os.listdir(local_dir):
-                full = os.path.join(local_dir, n)
-                if os.path.isfile(full):
-                    st = os.stat(full)
-                    loc[n] = (st.st_size, int(st.st_mtime))
-            rem = {}
-            for a in self.sftp.listdir_attr(remote_dir):
-                if not stat.S_ISDIR(a.st_mode):
-                    rem[a.filename] = (a.st_size, int(a.st_mtime or 0))
-            out = {}
-            for n in set(loc) | set(rem):
-                if n in loc and n not in rem:
-                    out[n] = "local_only"
-                elif n in rem and n not in loc:
-                    out[n] = "remote_only"
-                elif loc[n][0] == rem[n][0]:
-                    out[n] = "same"
-                else:
-                    out[n] = "newer_local" if loc[n][1] >= rem[n][1] else "newer_remote"
+            loc, rem = self._scan_pair(local_dir, remote_dir)
+            out = {n: self._classify(n, loc, rem) for n in set(loc) | set(rem)}
             return {"ok": True, "result": out}
         except Exception as e:
             return {"ok": False, "error": friendly_error(e)}
 
-    def sync(self, local_dir, remote_dir, direction, changed_only=True):
-        """Kept out of the queue this phase (roadmap Phase 2); mutually
-        exclusive with it instead, since both would otherwise drive the same
-        self.sftp session."""
-        if self.queue.pending() > 0:
-            return {"ok": False, "error": "A transfer queue is active. Wait for it to finish."}
-        cmp = self.compare(local_dir, remote_dir)
-        if not cmp.get("ok"):
-            return cmp
-        res = cmp["result"]
-        jobs = []
-        for name, status in res.items():
-            if direction == "upload":
-                if status in ("local_only", "newer_local") or (not changed_only and status != "same"):
-                    jobs.append({"name": name, "is_dir": False})
-            else:
-                if status in ("remote_only", "newer_remote") or (not changed_only and status != "same"):
-                    jobs.append({"name": name, "is_dir": False})
-        if not jobs:
-            return {"ok": True, "total": 0, "errors": [], "skipped": 0, "cancelled": False}
-        self._legacy_active.set()
+    def sync_plan(self, local_dir, remote_dir, direction, changed_only=True):
+        """Computes what a sync would transfer, without transferring anything.
+        The UI shows this plan and, on confirm, enqueues it onto the normal
+        transfer queue (see enqueue())."""
+        if not self.connected:
+            return {"ok": False, "error": "Not connected."}
         try:
-            return self.transfer(jobs, direction, local_dir, remote_dir)
-        finally:
-            self._legacy_active.clear()
+            loc, rem = self._scan_pair(local_dir, remote_dir)
+            wanted = ("local_only", "newer_local") if direction == "upload" else ("remote_only", "newer_remote")
+            plan = []
+            for name in set(loc) | set(rem):
+                status = self._classify(name, loc, rem)
+                if status in wanted or (not changed_only and status != "same"):
+                    l = {"size": loc[name][0], "mtime": loc[name][1]} if name in loc else None
+                    r = {"size": rem[name][0], "mtime": rem[name][1]} if name in rem else None
+                    plan.append({"name": name, "status": status, "local": l, "remote": r})
+            return {"ok": True, "plan": plan}
+        except Exception as e:
+            return {"ok": False, "error": friendly_error(e)}
 
     def calc_remote_size(self, remote_dir, name):
         if not self.connected:

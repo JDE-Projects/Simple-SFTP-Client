@@ -337,6 +337,14 @@
   <div class="modal-actions"><button id="dfCancel" class="btn-ghost">Cancel</button><button id="dfSkip" class="btn-ghost">Skip existing</button><button id="dfOk" class="btn-primary">Overwrite</button></div>
 </div></div>
 
+<div id="syncModal" class="modal"><div class="card"><h3>Sync preview</h3>
+  <p id="syText" style="font-size:12.5px;line-height:1.5;color:var(--text)"></p>
+  <div style="max-height:40vh;overflow:auto;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:14px">
+    <table><thead><tr><th>Name</th><th>Local</th><th>Remote</th><th>Newer</th></tr></thead><tbody id="syBody"></tbody></table>
+  </div>
+  <div class="modal-actions"><button id="syCancel" class="btn-ghost">Cancel</button><button id="syOk" class="btn-primary">Transfer</button></div>
+</div></div>
+
 <div id="promptModal" class="modal"><div class="card"><h3 id="pmTitle">Input</h3>
   <div class="row"><div class="f"><input id="pmInput" type="text"></div></div>
   <div class="modal-actions"><button id="pmCancel" class="btn-ghost">Cancel</button><button id="pmOk" class="btn-primary">OK</button></div></div></div>
@@ -774,12 +782,15 @@ async function onCompare(){ if(!connected)return; const r=await API.compare(stat
   $("statusText").innerHTML=`Compared: <b style="color:var(--green)">${c.newer_local} newer here</b>, <b style="color:var(--amber)">${c.newer_remote} newer remote</b>, ${c.local_only} local-only, ${c.remote_only} remote-only`; }
 async function onSync(direction){ if(!connected||busy)return;
   if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
-  const msg=direction==="upload"?"Upload new/changed files from local to remote?":"Download new/changed files from remote to local?";
-  if(!await confirm2("Sync folder",msg))return; busy=true; updateCancelBtn();
-  const r=await API.sync(state.local.cwd,state.remote.cwd,direction,true);
-  busy=false; updateCancelBtn();
+  const r=await API.sync_plan(state.local.cwd,state.remote.cwd,direction,true);
   if(!r.ok){toast(r.error||"Sync failed",true);return;}
-  if(r.total===0){toast("Already in sync, nothing to transfer");} }
+  const plan=r.plan;
+  if(!plan.length){toast("Already in sync, nothing to transfer");return;}
+  if(!await confirmSyncPlan(plan))return;
+  const jobs=plan.map(p=>({name:p.name,is_dir:false}));
+  const rr=await API.enqueue(jobs,direction,state.local.cwd,state.remote.cwd,"overwrite");
+  if(!rr.ok){toast(rr.error||"Could not queue the transfer",true);return;}
+  startQueuePoll(); }
 let watching=false;
 async function onWatch(){ if(!connected)return;
   if(watching){ await API.stop_watch(); watching=false; $("watchBtn").classList.remove("btn-primary"); $("watchBtn").classList.add("btn-ghost"); $("watchBtn").textContent="Watch"; $("statusText").textContent="Watch stopped"; return; }
@@ -895,6 +906,28 @@ function confirmDiff(collide,srcSide,destSide){
     $("dfCancel").onclick=()=>done(null);
     $("dfSkip").onclick=()=>done("skip");
     $("dfOk").onclick=()=>done("overwrite");
+  });
+}
+function confirmSyncPlan(plan){
+  const rows=plan.map(p=>{
+    const locCell=p.local?`${hsize(p.local.size)}<br>${fmod(p.local.mtime)}`:"—";
+    const remCell=p.remote?`${hsize(p.remote.size)}<br>${fmod(p.remote.mtime)}`:"—";
+    let newer="—";
+    if(p.local&&p.remote&&p.local.mtime&&p.remote.mtime){
+      if(p.local.mtime>p.remote.mtime) newer=`<b style="color:var(--green)">Local</b>`;
+      else if(p.remote.mtime>p.local.mtime) newer=`<b style="color:var(--amber)">Remote</b>`;
+      else newer="Same";
+    }
+    return `<tr><td class="name">${esc(p.name)}</td><td class="size">${locCell}</td><td class="size">${remCell}</td><td>${newer}</td></tr>`;
+  }).join("");
+  $("syBody").innerHTML=rows;
+  $("syText").textContent=plan.length+" file(s) will transfer:";
+  $("syOk").textContent=`Transfer (${plan.length} file${plan.length===1?"":"s"})`;
+  return new Promise(res=>{
+    $("syncModal").classList.add("show");
+    const done=v=>{$("syncModal").classList.remove("show");res(v);};
+    $("syCancel").onclick=()=>done(false);
+    $("syOk").onclick=()=>done(true);
   });
 }
 function prompt2(title,label,val){ return new Promise(res=>{ $("pmTitle").textContent=title; $("pmInput").value=val||""; $("pmInput").placeholder=label||"";
