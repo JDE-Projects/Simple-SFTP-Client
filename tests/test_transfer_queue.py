@@ -278,6 +278,51 @@ def test_requeue_does_nothing_for_waiting_active_completed_or_unknown(q):
     assert q.requeue(999) is False
 
 
+def test_pause_stops_claim_but_leaves_waiting_items_waiting(q):
+    ids = [q.append("upload", f"/l{i}", f"/r{i}", f"file{i}") for i in range(3)]
+
+    q.pause()
+
+    assert q.claim() is None
+    states = {s["id"]: s["state"] for s in q.snapshot()}
+    for item_id in ids:
+        assert states[item_id] == WAITING
+
+
+def test_resume_lets_claim_hand_out_waiting_items_in_fifo_order(q):
+    ids = [q.append("upload", f"/l{i}", f"/r{i}", f"file{i}") for i in range(3)]
+
+    q.pause()
+    assert q.claim() is None
+    q.resume()
+
+    claimed_ids = [q.claim().id for _ in range(3)]
+    assert claimed_ids == ids
+    assert q.claim() is None
+
+
+def test_is_paused_reflects_pause_and_resume(q):
+    assert q.is_paused() is False
+
+    q.pause()
+    assert q.is_paused() is True
+
+    q.resume()
+    assert q.is_paused() is False
+
+
+def test_pause_does_not_disturb_an_already_active_item(q):
+    item_id = q.append("upload", "/l", "/r", "file")
+    item = q.claim()
+    assert item.id == item_id
+
+    q.pause()
+
+    assert q.snapshot()[0]["state"] == ACTIVE
+    assert q.mark_completed(item_id) is True
+    assert q.snapshot()[0]["state"] == COMPLETED
+
+
 def test_claim_is_thread_safe_no_duplicates_no_drops(q):
     n = 50
     ids = [q.append("upload", f"/l{i}", f"/r{i}", f"file{i}") for i in range(n)]

@@ -295,6 +295,7 @@
     <span class="qsummary" id="qSummary"></span>
     <button id="qViewBtn" class="btn-ghost btn-sm" title="View the transfer queue">View queue</button>
     <button id="cancelBtn" class="btn-ghost btn-sm" disabled>Cancel</button>
+    <button id="pauseBtn" class="btn-ghost btn-sm" disabled>Pause</button>
   </div>
 
   <div class="statusbar">
@@ -359,8 +360,10 @@
 <script>
 const $=id=>document.getElementById(id);
 let API=null, connected=false, busy=false, queuePending=0;
+let queuePaused=false;
 function queueActive(){ return queuePending>0; }
 function updateCancelBtn(){ $("cancelBtn").disabled=!(queuePending>0||busy); }
+function updatePauseBtn(){ const b=$("pauseBtn"); b.disabled=!(queuePending>0); b.textContent=queuePaused?"Resume":"Pause"; }
 let authMode="password", rememberPw=false;
 const state={ local:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],anchor:null},
               remote:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],anchor:null} };
@@ -499,6 +502,13 @@ async function queueTick(){
     if(qModalOpen)renderQueueRows(p.items);
     queuePending=p.pending||0;
     updateCancelBtn();
+    queuePaused=!!p.paused;
+    updatePauseBtn();
+    if(queuePaused){
+      const finishing=(p.active_ids||[]).length;
+      if(finishing>0){ $("qName").textContent=`Pausing (${finishing} finishing)…`; }
+      else { $("qName").textContent="Paused"; $("qFill").style.width="0%"; $("qMeta").textContent=""; }
+    }
     if(p.pending===0){
       stopQueuePoll();
       $("qName").textContent="Idle";
@@ -507,6 +517,8 @@ async function queueTick(){
       $("qMeta").textContent=`Done: ${completed} completed`+(failed?`, ${failed} failed`:"")+
         (cancelled?`, ${cancelled} cancelled`:"")+(skipped?`, ${skipped} skipped`:"");
       refresh("local"); refresh("remote");
+      queuePaused=false;
+      updatePauseBtn();
     }
   } finally { qPolling=false; }
 }
@@ -532,6 +544,7 @@ async function init(){
   $("qClearBtn").onclick=async()=>{ const r=await API.clear_finished(); renderQueueRows(r.items); };
   $("compareBtn").onclick=onCompare; $("syncUpBtn").onclick=()=>onSync("upload"); $("syncDownBtn").onclick=()=>onSync("download");
   $("watchBtn").onclick=onWatch; $("cancelBtn").onclick=()=>API.cancel();
+  $("pauseBtn").onclick=async()=>{ if(queuePaused){ const r=await API.resume_queue(); if(r&&!r.ok){ clog(r.error||"Could not resume","error"); return; } startQueuePoll(); } else { await API.pause_queue(); } };
   $("keygenBtn").onclick=openKeygen;
   $("hostKeyBtn").onclick=onViewHostKey;
   $("kgBrowse").onclick=async()=>{ const sug=$("kgType").value.startsWith("Ed25519")?"id_ed25519":"id_rsa"; const p=await API.browse_save_key(sug); if(p)$("kgPath").value=p; };

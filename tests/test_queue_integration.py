@@ -9,7 +9,7 @@ installed or left running.
 import os
 import time
 
-from transfer_queue import COMPLETED, CANCELLED, WAITING, FAILED
+from transfer_queue import COMPLETED, CANCELLED, WAITING, FAILED, ACTIVE
 
 
 def test_upload_byte_integrity(sftp_env, wait_for_drain, state_of):
@@ -259,6 +259,102 @@ def test_retry_item_runs_to_completion(sftp_env, wait_for_drain, state_of):
 
     assert state_of(api, item_id)["state"] == COMPLETED
     assert (local_dir / "later.bin").read_bytes() == data
+
+
+def test_pause_holds_waiting_items_then_resume_drains_them(sftp_env, wait_for_drain, state_of):
+    # Two big files fill both pool workers; several small files sit behind them.
+    # Pausing while the bigs are active must let the bigs finish but never let a
+    # small get claimed, so the smalls stay WAITING until resume.
+    api, server_root, local_dir = sftp_env
+    big1 = local_dir / "big1.bin"
+    big1.write_bytes(os.urandom(4 * 1024 * 1024))
+    big2 = local_dir / "big2.bin"
+    big2.write_bytes(os.urandom(4 * 1024 * 1024))
+    smalls = [f"small{i}.bin" for i in range(3)]
+    for name in smalls:
+        (local_dir / name).write_bytes(os.urandom(16))
+
+    jobs = [{"name": "big1.bin", "is_dir": False}, {"name": "big2.bin", "is_dir": False}]
+    jobs += [{"name": n, "is_dir": False} for n in smalls]
+    assert api.enqueue(jobs, "upload", str(local_dir), "/", "overwrite")["ok"] is True
+
+    snap = api.queue.snapshot()
+    big1_id = next(e["id"] for e in snap if e["name"] == "big1.bin")
+    big2_id = next(e["id"] for e in snap if e["name"] == "big2.bin")
+
+    # wait until both bigs are claimed (both workers busy), then pause
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if state_of(api, big1_id)["state"] == ACTIVE and state_of(api, big2_id)["state"] == ACTIVE:
+            break
+        time.sleep(0.02)
+    assert api.pause_queue() == {"ok": True}
+
+    # the bigs run to completion; the pool then winds down. Wait for both bigs
+    # done and every worker retired, which only happens because claim() returns
+    # None while paused instead of picking up a small.
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        bigs_done = (state_of(api, big1_id)["state"] == COMPLETED and
+                     state_of(api, big2_id)["state"] == COMPLETED)
+        if bigs_done and not any(w.is_alive() for w in api._workers):
+            break
+        time.sleep(0.02)
+
+    assert state_of(api, big1_id)["state"] == COMPLETED
+    assert state_of(api, big2_id)["state"] == COMPLETED
+    # every small is still WAITING: paused claim() never handed one out
+    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    for name in smalls:
+        assert states[name] == WAITING
+    assert api.queue.is_paused() is True
+
+    # resume drains the rest
+    assert api.resume_queue() == {"ok": True}
+    wait_for_drain(api)
+    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    for name in smalls:
+        assert states[name] == COMPLETED
+        assert (server_root / name).read_bytes() == (local_dir / name).read_bytes()
+
+
+def test_pause_flag_clears_once_a_paused_queue_empties(sftp_env, wait_for_drain, state_of):
+    # Pausing a batch that has nothing waiting behind it lets the active files
+    # finish and the queue empty. The pause flag must not survive that: a fresh
+    # batch enqueued afterward has to run without an explicit resume.
+    api, server_root, local_dir = sftp_env
+    first = [f"a{i}.bin" for i in range(2)]
+    for name in first:
+        (local_dir / name).write_bytes(os.urandom(2 * 1024 * 1024))
+    assert api.enqueue([{"name": n, "is_dir": False} for n in first], "upload",
+                       str(local_dir), "/", "overwrite")["ok"] is True
+
+    # pause only once both files are active (nothing left waiting behind them),
+    # so the pause lands on a queue that then genuinely empties
+    snap = api.queue.snapshot()
+    first_ids = [e["id"] for e in snap]
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if all(state_of(api, i)["state"] == ACTIVE for i in first_ids):
+            break
+        time.sleep(0.02)
+    api.pause_queue()
+    wait_for_drain(api)  # the two active files finish and the queue empties
+
+    # the stale pause flag was cleared as the queue drained
+    assert api.queue.is_paused() is False
+
+    second = [f"b{i}.bin" for i in range(2)]
+    for name in second:
+        (local_dir / name).write_bytes(os.urandom(2048))
+    assert api.enqueue([{"name": n, "is_dir": False} for n in second], "upload",
+                       str(local_dir), "/", "overwrite")["ok"] is True
+    wait_for_drain(api)
+
+    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    for name in first + second:
+        assert states[name] == COMPLETED
+        assert (server_root / name).exists()
 
 
 def test_dropped_paths_land_on_the_queue(sftp_env, wait_for_drain):

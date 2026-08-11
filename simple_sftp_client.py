@@ -967,6 +967,7 @@ class Api:
             "active_ids": active_ids,
             "progress": progress,
             "console": lines,
+            "paused": self.queue.is_paused(),
         }
 
     def cancel_item(self, item_id):
@@ -990,6 +991,24 @@ class Api:
             return {"ok": False, "error": "Not connected."}
         if not self.queue.requeue(item_id):
             return {"ok": False, "error": "That item can't be retried."}
+        self._ensure_worker()
+        return {"ok": True}
+
+    def pause_queue(self):
+        """Pause the queue: stop claiming new items. Files already mid-transfer
+        are left to finish; the worker pool winds down once they do. Wired to the
+        footer Pause control."""
+        self.queue.pause()
+        self._worker_log("Pausing queue…")
+        return {"ok": True}
+
+    def resume_queue(self):
+        """Resume a paused queue and wake the worker pool to drain the waiting
+        items in order."""
+        if not self.connected:
+            return {"ok": False, "error": "Not connected."}
+        self.queue.resume()
+        self._worker_log("Resuming queue")
         self._ensure_worker()
         return {"ok": True}
 
@@ -1039,6 +1058,8 @@ class Api:
         worker retires itself with, so starting and stopping workers can never
         overlap and leave poll mode in the wrong state."""
         with self._worker_lock:
+            if self.queue.is_paused():
+                return
             self._workers = [w for w in self._workers if w.is_alive()]
             while len(self._workers) < WORKER_COUNT and self.queue.waiting() > 0:
                 self._poll_mode = True
@@ -1096,8 +1117,13 @@ class Api:
                     # file would wait forever. waiting() (not pending()) is the
                     # right check: pending() also counts items ACTIVE on the
                     # other worker, which would wrongly keep this one alive.
+                    # Paused also retires here: claim() returns None while
+                    # paused even with items still WAITING, and without this
+                    # the worker would just busy-loop on those items instead
+                    # of winding down.
                     with self._worker_lock:
-                        if self.queue.waiting() == 0:
+                        paused = self.queue.is_paused()
+                        if self.queue.waiting() == 0 or paused:
                             if me in self._workers:
                                 self._workers.remove(me)
                             # Only the last worker to leave clears pool-wide
@@ -1107,11 +1133,20 @@ class Api:
                                 self._poll_mode = False
                                 with self._progress_lock:
                                     self._progress_by_id = {}
-                                counts = self.queue.counts()
-                                self._worker_log(
-                                    f"Queue drained: {counts.get('completed', 0)} completed, "
-                                    f"{counts.get('failed', 0)} failed, {counts.get('cancelled', 0)} cancelled, "
-                                    f"{counts.get('skipped', 0)} skipped")
+                                if paused and self.queue.waiting() > 0:
+                                    self._worker_log(
+                                        f"Queue paused ({self.queue.waiting()} still waiting)")
+                                else:
+                                    # Reached the empty queue (paused with nothing
+                                    # left, or a normal drain). Clear a stale pause
+                                    # flag so the next batch is not held back by a
+                                    # pause that belonged to a queue now emptied.
+                                    self.queue.resume()
+                                    counts = self.queue.counts()
+                                    self._worker_log(
+                                        f"Queue drained: {counts.get('completed', 0)} completed, "
+                                        f"{counts.get('failed', 0)} failed, {counts.get('cancelled', 0)} cancelled, "
+                                        f"{counts.get('skipped', 0)} skipped")
                             break
                     continue
                 total = done_count + self.queue.pending()
