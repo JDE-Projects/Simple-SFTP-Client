@@ -1299,7 +1299,7 @@ class Api:
                 return self._cancel.is_set()
         if progress_key is None:
             progress_key = name
-        # size-aware: skip identical, resume partial, else fresh
+        # size-aware: skip identical when asked, otherwise resend the whole file
         if direction == "upload":
             src_size = os.path.getsize(lp)
             dst_size = self._rsize(sftp, rp)
@@ -1312,7 +1312,13 @@ class Api:
             # size, since size alone does not prove the contents match.
             self._progress(name, idx, total, src_size, src_size, 0, progress_key)
             return "skip"
-        offset = dst_size if (0 < dst_size < src_size) else 0
+        # Always rewrite from the start. A smaller destination is not proof of
+        # an interrupted transfer worth resuming: it is just as likely an older,
+        # different file. Appending onto it would splice the old head onto the
+        # new tail, and because that mangled file often ends up the same size as
+        # the source, a later compare would read it as "same" and never fix it.
+        # Sending fresh every time is the only safe rule size alone supports.
+        offset = 0
         start = time.time()
 
         def cb(done_b, _t, base=offset):
