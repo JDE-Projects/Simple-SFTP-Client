@@ -415,6 +415,12 @@ let qPollTimer=null, qPolling=false, qModalOpen=false;
 const QSTATE_LABEL={waiting:"Waiting",active:"Sending",completed:"Done",skipped:"Skipped",failed:"Failed",cancelled:"Cancelled"};
 const QSTATE_FINISHED={completed:1,skipped:1,failed:1,cancelled:1};
 
+function addRetryButton(row, id){
+  const rt=document.createElement("span"); rt.className="qretry"; rt.textContent="↻"; rt.title="Retry";
+  rt.onclick=(ev)=>{ ev.stopPropagation(); API.retry_item(id).then(r=>{ if(r&&r.ok) startQueuePoll(); }); };
+  row.appendChild(rt);
+}
+
 function renderQueueRows(items){
   const box=$("qList"); if(!box)return; box.innerHTML="";
   // only offer "Clear finished" when there is something finished to remove
@@ -439,13 +445,9 @@ function renderQueueRows(items){
         const err=document.createElement("span"); err.className="qrow-err"; err.textContent=it.error; err.title=it.error;
         row.appendChild(err);
       }
-      const rt=document.createElement("span"); rt.className="qretry"; rt.textContent="↻"; rt.title="Retry";
-      rt.onclick=(ev)=>{ ev.stopPropagation(); API.retry_item(it.id).then(r=>{ if(r&&r.ok) startQueuePoll(); }); };
-      row.appendChild(rt);
+      addRetryButton(row, it.id);
     } else if(it.state==="cancelled"){
-      const rt=document.createElement("span"); rt.className="qretry"; rt.textContent="↻"; rt.title="Retry";
-      rt.onclick=(ev)=>{ ev.stopPropagation(); API.retry_item(it.id).then(r=>{ if(r&&r.ok) startQueuePoll(); }); };
-      row.appendChild(rt);
+      addRetryButton(row, it.id);
     } else if(it.state==="waiting"){
       const x=document.createElement("span"); x.className="qx"; x.textContent="×"; x.title="Cancel";
       x.onclick=(ev)=>{ ev.stopPropagation(); API.cancel_item(it.id); };
