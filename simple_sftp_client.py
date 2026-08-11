@@ -1170,7 +1170,7 @@ class Api:
                                 self._poll_mode = False
                                 with self._progress_lock:
                                     self._progress_by_id = {}
-                                if paused and self.queue.waiting() > 0:
+                                if self.queue.is_paused() and self.queue.waiting() > 0:
                                     # Paused with items still held: leave the target
                                     # alone so a resume drains the rest at the count
                                     # this batch was scaled to, not the default.
