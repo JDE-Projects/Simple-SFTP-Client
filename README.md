@@ -23,9 +23,11 @@ If you enjoyed this project and would like to buy me a coffee, check out my [Ko-
   never a password).
 - Key authentication, with a built-in generator for Ed25519 (default) or
   RSA-4096 key pairs.
-- Background transfer queue that runs two files at once, with progress, ETA,
-  resume, and auto-retry.
-- Compare local vs remote, folder sync, and download-changed-only.
+- Background transfer queue with progress and ETA: pause and resume it, retry a
+  failed item in one click, and it speeds up automatically for big batches of
+  small files.
+- Compare local vs remote, folder sync with a preview of what will transfer, and
+  download-changed-only.
 - Before overwriting, a per-file comparison shows each file's size, date, and
   which side is newer, so you can overwrite, skip existing, or cancel.
 - Upload watcher: keep a remote folder up to date from a local one.
