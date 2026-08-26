@@ -3,7 +3,7 @@
 # green CI build (Python 3.14). SFTP stack pinned to current stable 2026-06-18.
 # Dependabot opens review-PRs for these == deps when newer releases appear.
 pywebview==6.2.1
-PySide6==6.11.1
+PySide6==6.11.2
 qtpy==2.4.3
 pyinstaller==6.22.1
 
