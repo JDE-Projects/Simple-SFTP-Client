@@ -9,6 +9,7 @@ not legal advice.
 # Always bundled (every app)
 PySide6 / Qt          LGPL-3.0       qt.io/licensing
 pywebview             BSD-3-Clause   github.com/r0x0r/pywebview
+qtpy                  MIT            github.com/spyder-ide/qtpy
 Sora (font)           OFL-1.1        github.com/sora-xor/sora-font
   Sora Copyright 2019 The Sora Project Authors
 JetBrains Mono        OFL-1.1        github.com/JetBrains/JetBrainsMono
