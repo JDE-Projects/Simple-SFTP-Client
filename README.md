@@ -4,7 +4,7 @@ A clean, dual-pane SFTP client: browse local and remote side by side, transfer
 with a background queue, save sessions, compare and sync folders, and watch a
 local folder for auto-upload. Secure connections only.
 
-Built by [JDE-Projects](https://github.com/JDE-Projects).
+Built by [JDE-Projects](https://jde-projects.com), home of the Simple X Tools suite.
 
 If you enjoyed this project and would like to buy me a coffee, check out my [Ko-fi](https://ko-fi.com/jdeprojects).
 
@@ -121,6 +121,7 @@ pipeline from this repo. You can also check the file against the published
   confirms first.
 - The optional debug log is off by default; when on it writes
   `Debug_Log_MMDDYYYY_HHMMSS.txt` next to the app with credentials redacted.
+- **Network use.** Other than the job you ask of it, this app makes one automatic network call: a check to GitHub for a newer release (at startup and when you press **Check for updates**), which sends only a version request. It collects and sends no personal data, usage data, or analytics.
 
 ## A note on how this was built
 This project was built with AI assistance. The design decisions, feature
