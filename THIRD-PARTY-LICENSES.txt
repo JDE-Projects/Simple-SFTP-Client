@@ -24,3 +24,11 @@ truststore            MIT            github.com/sethmlarson/truststore
 
 Paramiko's bundled crypto deps (cryptography, bcrypt, PyNaCl) are Apache-2.0.
 Full license texts are available at the source links above.
+
+# Qt / PySide6 LGPL notice (required, do not remove)
+This app links the Qt libraries (through PySide6) under the GNU LGPL v3. The full
+LGPL v3 text ships as LICENSE.LGPL-3.0.txt beside this file, and the GNU GPL v3 it
+builds on as LICENSE.GPL-3.0.txt. The Qt libraries are the loose files in this
+folder and may be replaced or relinked with your own build of the same Qt version.
+Corresponding source for the exact Qt version is available at https://download.qt.io,
+and on written request through this repository's Issues page.
