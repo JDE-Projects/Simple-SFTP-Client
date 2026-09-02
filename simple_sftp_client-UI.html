@@ -293,6 +293,7 @@
       <span class="qmeta" id="qMeta"></span>
     </div>
     <span class="qsummary" id="qSummary"></span>
+    <button id="qRetryFailedFooterBtn" class="btn-ghost btn-sm" style="display:none">Retry all failed</button>
     <button id="qViewBtn" class="btn-ghost btn-sm" title="View the transfer queue">View queue</button>
     <button id="cancelBtn" class="btn-ghost btn-sm" disabled>Cancel</button>
     <button id="pauseBtn" class="btn-ghost btn-sm" disabled>Pause</button>
@@ -352,7 +353,7 @@
 
 <div id="queueModal" class="modal"><div class="card"><h3>Transfer queue</h3>
   <div id="qList" class="qlist"></div>
-  <div class="modal-actions"><button id="qClearBtn" class="btn-ghost">Clear finished</button><button id="qCloseBtn" class="btn-primary">Close</button></div>
+  <div class="modal-actions"><button id="qRetryFailedBtn" class="btn-ghost" disabled>Retry all failed</button><button id="qClearBtn" class="btn-ghost">Clear finished</button><button id="qCloseBtn" class="btn-primary">Close</button></div>
 </div></div>
 
 <div id="ctx"></div>
@@ -414,6 +415,13 @@ let qPollTimer=null, qPolling=false, qModalOpen=false;
 
 const QSTATE_LABEL={waiting:"Waiting",active:"Sending",completed:"Done",skipped:"Skipped",failed:"Failed",cancelled:"Cancelled"};
 const QSTATE_FINISHED={completed:1,skipped:1,failed:1,cancelled:1};
+// clear_finished doesn't return a counts object (only the trimmed items list),
+// so tally it client-side for the one place that needs it after a clear.
+function countsFromItems(items){
+  const c={waiting:0,active:0,completed:0,failed:0,cancelled:0,skipped:0};
+  (items||[]).forEach(i=>{ if(c[i.state]!==undefined)c[i.state]++; });
+  return c;
+}
 
 function addRetryButton(row, id){
   const rt=document.createElement("span"); rt.className="qretry"; rt.textContent="↻"; rt.title="Retry";
@@ -426,8 +434,11 @@ function renderQueueRows(items){
   // only offer "Clear finished" when there is something finished to remove
   const btn=$("qClearBtn"); if(btn)btn.disabled=!(items||[]).some(i=>QSTATE_FINISHED[i.state]);
   if(!items||!items.length){ box.innerHTML='<div class="meta" style="padding:10px;color:var(--text-faint)">Queue is empty</div>'; return; }
+  // A big scan can hand us thousands of rows; capping the DOM keeps the modal responsive.
+  const ROW_CAP=300;
+  const shown=items.length>ROW_CAP?items.slice(0,ROW_CAP):items;
   const frag=document.createDocumentFragment();
-  items.forEach(it=>{
+  shown.forEach(it=>{
     const row=document.createElement("div");
     row.className="qrow st-"+it.state;
     const arrow=document.createElement("span"); arrow.className="qarrow";
@@ -458,16 +469,24 @@ function renderQueueRows(items){
     frag.appendChild(row);
   });
   box.appendChild(frag);
+  if(items.length>ROW_CAP){
+    const more=document.createElement("div");
+    more.className="meta"; more.style.cssText="padding:6px 10px;color:var(--text-faint)";
+    more.textContent=`+${items.length-ROW_CAP} more…`;
+    box.appendChild(more);
+  }
 }
-function renderQueueSummary(items){
-  const c=n=>(items||[]).filter(i=>i.state===n).length;
+// counts is the authoritative {waiting,active,completed,failed,cancelled,skipped}
+// tally from the backend: items/snapshot age out successful entries on huge
+// jobs, so counting them under-reports once a transfer runs long.
+function renderQueueSummary(counts){
+  counts=counts||{};
   const parts=[];
-  const completed=c("completed"), failed=c("failed"), waiting=c("waiting"), cancelled=c("cancelled"), skipped=c("skipped");
-  if(completed)parts.push(`${completed} done`);
-  if(failed)parts.push(`${failed} failed`);
-  if(waiting)parts.push(`${waiting} waiting`);
-  if(cancelled)parts.push(`${cancelled} cancelled`);
-  if(skipped)parts.push(`${skipped} skipped`);
+  if(counts.completed)parts.push(`${counts.completed} done`);
+  if(counts.failed)parts.push(`${counts.failed} failed`);
+  if(counts.waiting)parts.push(`${counts.waiting} waiting`);
+  if(counts.cancelled)parts.push(`${counts.cancelled} cancelled`);
+  if(counts.skipped)parts.push(`${counts.skipped} skipped`);
   $("qSummary").textContent=parts.join(" · ");
 }
 let lastProgressById={};   // progress payloads keyed by queue item id (string keys, JSON)
@@ -484,24 +503,42 @@ async function queueTick(){
     const p=await API.poll_queue();
     (p.console||[]).forEach(line=>clog(line.msg,line.level));
     lastProgressById=p.progress||{};
+    const counts=p.counts||{};
     // up to two files can be active at once; roll them up into the footer.
     const activeProgress=(p.active_ids||[]).map(id=>lastProgressById[String(id)]).filter(Boolean);
-    if(activeProgress.length===1){
+    if(p.scanning){
+      // A background scan is still finding/queuing files. Say so in qName so
+      // it's never mistaken for the queue being idle or finished, but still
+      // surface live transfer progress in qMeta when work is already moving.
+      $("qName").textContent=`Scanning… ${p.scan_found||0} found`;
+      if(activeProgress.length===1){
+        const pr=activeProgress[0];
+        $("qFill").style.width=pr.pct+"%";
+        $("qMeta").textContent=`${pr.index+1}/${pr.total}  ${pr.pct}%  ${pr.speed||""}${pr.eta?"  ETA "+pr.eta+"s":""}`;
+      } else if(activeProgress.length>=2){
+        const avgPct=Math.round(activeProgress.reduce((sum,pr)=>sum+pr.pct,0)/activeProgress.length);
+        $("qFill").style.width=avgPct+"%";
+        $("qMeta").textContent=`${activeProgress.length} transfers active`;
+      } else {
+        $("qFill").style.width="0%"; $("qMeta").textContent="";
+      }
+    } else if(activeProgress.length===1){
       const pr=activeProgress[0];
       $("qName").textContent=pr.name; $("qFill").style.width=pr.pct+"%";
       $("qMeta").textContent=`${pr.index+1}/${pr.total}  ${pr.pct}%  ${pr.speed||""}${pr.eta?"  ETA "+pr.eta+"s":""}`;
     } else if(activeProgress.length>=2){
       const avgPct=Math.round(activeProgress.reduce((sum,pr)=>sum+pr.pct,0)/activeProgress.length);
-      const c=n=>(p.items||[]).filter(i=>i.state===n).length;
-      const done=c("completed")+c("skipped")+c("failed")+c("cancelled");
+      const done=(counts.completed||0)+(counts.skipped||0)+(counts.failed||0)+(counts.cancelled||0);
+      const total=done+(counts.waiting||0)+(counts.active||0);
       $("qName").textContent=`${activeProgress.length} transfers active`;
       $("qFill").style.width=avgPct+"%";
-      $("qMeta").textContent=`${done} of ${(p.items||[]).length} done`;
+      $("qMeta").textContent=`${done} of ${total} done`;
     } else {
       $("qFill").style.width="0%"; $("qName").textContent="Idle"; $("qMeta").textContent="";
     }
-    renderQueueSummary(p.items);
+    renderQueueSummary(counts);
     if(qModalOpen)renderQueueRows(p.items);
+    const rfBtn=$("qRetryFailedBtn"); if(rfBtn)rfBtn.disabled=!((counts.failed||0)>0);
     queuePending=p.pending||0;
     updateCancelBtn();
     queuePaused=!!p.paused;
@@ -511,19 +548,24 @@ async function queueTick(){
       if(finishing>0){ $("qName").textContent=`Pausing (${finishing} finishing)…`; }
       else { $("qName").textContent="Paused"; $("qFill").style.width="0%"; $("qMeta").textContent=""; }
     }
-    if(p.pending===0){
+    const footerRetry=$("qRetryFailedFooterBtn");
+    // A scan queues files as it goes, so pending can briefly read 0 between
+    // batches; only treat the queue as finished once the scan itself is done.
+    if(!p.scanning && p.pending===0){
       stopQueuePoll();
       $("qName").textContent="Idle";
-      const c=n=>(p.items||[]).filter(i=>i.state===n).length;
-      const completed=c("completed"), failed=c("failed"), cancelled=c("cancelled"), skipped=c("skipped");
+      const completed=counts.completed||0, failed=counts.failed||0, cancelled=counts.cancelled||0, skipped=counts.skipped||0;
       $("qMeta").textContent=`Done: ${completed} completed`+(failed?`, ${failed} failed`:"")+
         (cancelled?`, ${cancelled} cancelled`:"")+(skipped?`, ${skipped} skipped`:"");
       // The finished line above already reports failures; drop the live
       // summary so the same count doesn't show twice in the footer.
       $("qSummary").textContent="";
+      if(footerRetry)footerRetry.style.display=failed>0?"":"none";
       refresh("local"); refresh("remote");
       queuePaused=false;
       updatePauseBtn();
+    } else if(footerRetry){
+      footerRetry.style.display="none";
     }
   } finally { qPolling=false; }
 }
@@ -544,13 +586,24 @@ async function init(){
   $("sessions").onchange=onPickSession;
   $("upBtn").onclick=()=>startTransfer("upload"); $("downBtn").onclick=()=>startTransfer("download");
   $("qViewBtn").onclick=()=>{ qModalOpen=true; $("queueModal").classList.add("show");
-    API.poll_queue().then(p=>{ lastProgressById=p.progress||{}; renderQueueRows(p.items); }); };
+    API.poll_queue().then(p=>{ lastProgressById=p.progress||{}; renderQueueRows(p.items); renderQueueSummary(p.counts);
+      const rfBtn=$("qRetryFailedBtn"); if(rfBtn)rfBtn.disabled=!((p.counts&&p.counts.failed)>0); }); };
   $("qCloseBtn").onclick=()=>{ qModalOpen=false; $("queueModal").classList.remove("show"); };
   $("qClearBtn").onclick=async()=>{ const r=await API.clear_finished(); renderQueueRows(r.items);
+    // clear_finished doesn't return a counts object, so tally the trimmed
+    // items list ourselves for the summary and the retry-all button state.
+    const counts=countsFromItems(r.items);
     // The footer poll stops once a batch ends, so Clear must reset the footer
     // itself, otherwise the old "Done:"/summary text lingers over an empty queue.
-    renderQueueSummary(r.items);
+    renderQueueSummary(counts);
+    const rfBtn=$("qRetryFailedBtn"); if(rfBtn)rfBtn.disabled=!(counts.failed>0);
+    const footerRetry=$("qRetryFailedFooterBtn"); if(footerRetry)footerRetry.style.display="none";
     if(!r.pending){ $("qName").textContent="Idle"; $("qMeta").textContent=""; $("qFill").style.width="0%"; } };
+  $("qRetryFailedBtn").onclick=async()=>{ const r=await API.retry_all_failed(); if(r&&r.ok){ startQueuePoll();
+    const p=await API.poll_queue(); lastProgressById=p.progress||{}; renderQueueRows(p.items); renderQueueSummary(p.counts);
+    $("qRetryFailedBtn").disabled=!((p.counts&&p.counts.failed)>0); } };
+  $("qRetryFailedFooterBtn").onclick=async()=>{ const r=await API.retry_all_failed(); if(r&&r.ok){
+    $("qRetryFailedFooterBtn").style.display="none"; startQueuePoll(); } };
   $("compareBtn").onclick=onCompare; $("syncUpBtn").onclick=()=>onSync("upload"); $("syncDownBtn").onclick=()=>onSync("download");
   $("watchBtn").onclick=onWatch; $("cancelBtn").onclick=()=>API.cancel();
   $("pauseBtn").onclick=async()=>{ if(queuePaused){ const r=await API.resume_queue(); if(r&&!r.ok){ clog(r.error||"Could not resume","error"); return; } startQueuePoll(); } else { await API.pause_queue(); } };
