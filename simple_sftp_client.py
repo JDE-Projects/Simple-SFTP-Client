@@ -1118,11 +1118,17 @@ class Api:
         lines for the window to pull via poll_queue()."""
         me = threading.current_thread()
         try:
+            if not self.connected or self.client is None:
+                # Disconnected before this worker could start. Give a plain
+                # reason instead of leaking a raw "'NoneType' has no attribute
+                # open_sftp" from the line below.
+                raise ConnectionError("disconnected before the transfer started")
             sftp = self.client.open_sftp()
         except Exception as e:
+            reason = str(e).strip() or e.__class__.__name__
             # No silent failure: surface it in the console log and let this
             # worker retire; the other worker (if any) keeps draining the queue.
-            self._worker_log(f"could not open a transfer session: {e}", "error")
+            self._worker_log(f"could not open a transfer session: {reason}", "error")
             with self._worker_lock:
                 if me in self._workers:
                     self._workers.remove(me)
@@ -1134,7 +1140,7 @@ class Api:
                     # Last worker out and none could open a session: don't leave
                     # queued items sitting as WAITING with nothing to drain them.
                     # Mark them failed so the failure is visible in the queue.
-                    stranded = self.queue.fail_waiting(f"transfer session unavailable: {e}")
+                    stranded = self.queue.fail_waiting(f"transfer session unavailable: {reason}")
                     if stranded:
                         self._worker_log(
                             f"{stranded} queued item(s) marked failed: no transfer session",
