@@ -518,6 +518,9 @@ async function queueTick(){
       const completed=c("completed"), failed=c("failed"), cancelled=c("cancelled"), skipped=c("skipped");
       $("qMeta").textContent=`Done: ${completed} completed`+(failed?`, ${failed} failed`:"")+
         (cancelled?`, ${cancelled} cancelled`:"")+(skipped?`, ${skipped} skipped`:"");
+      // The finished line above already reports failures; drop the live
+      // summary so the same count doesn't show twice in the footer.
+      $("qSummary").textContent="";
       refresh("local"); refresh("remote");
       queuePaused=false;
       updatePauseBtn();
@@ -543,7 +546,11 @@ async function init(){
   $("qViewBtn").onclick=()=>{ qModalOpen=true; $("queueModal").classList.add("show");
     API.poll_queue().then(p=>{ lastProgressById=p.progress||{}; renderQueueRows(p.items); }); };
   $("qCloseBtn").onclick=()=>{ qModalOpen=false; $("queueModal").classList.remove("show"); };
-  $("qClearBtn").onclick=async()=>{ const r=await API.clear_finished(); renderQueueRows(r.items); };
+  $("qClearBtn").onclick=async()=>{ const r=await API.clear_finished(); renderQueueRows(r.items);
+    // The footer poll stops once a batch ends, so Clear must reset the footer
+    // itself, otherwise the old "Done:"/summary text lingers over an empty queue.
+    renderQueueSummary(r.items);
+    if(!r.pending){ $("qName").textContent="Idle"; $("qMeta").textContent=""; $("qFill").style.width="0%"; } };
   $("compareBtn").onclick=onCompare; $("syncUpBtn").onclick=()=>onSync("upload"); $("syncDownBtn").onclick=()=>onSync("download");
   $("watchBtn").onclick=onWatch; $("cancelBtn").onclick=()=>API.cancel();
   $("pauseBtn").onclick=async()=>{ if(queuePaused){ const r=await API.resume_queue(); if(r&&!r.ok){ clog(r.error||"Could not resume","error"); return; } startQueuePoll(); } else { await API.pause_queue(); } };
