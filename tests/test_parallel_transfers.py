@@ -99,7 +99,8 @@ def test_each_worker_uses_its_own_session_never_the_shared_one(sftp_env, wait_fo
         assert s is not api.sftp
 
 
-def test_cancel_one_active_item_leaves_the_other_to_complete(sftp_env, wait_for_drain, state_of):
+def test_cancel_one_active_item_leaves_the_other_to_complete(
+        sftp_env, wait_for_drain, wait_for_queue_count, state_of):
     api, server_root, local_dir = sftp_env
     # large enough that the byte loop is still running when cancel_item lands
     victim = local_dir / "victim.bin"
@@ -111,6 +112,7 @@ def test_cancel_one_active_item_leaves_the_other_to_complete(sftp_env, wait_for_
     result = api.enqueue(jobs, "upload", str(local_dir), "/", "overwrite")
     assert result["ok"] is True
 
+    wait_for_queue_count(api, len(jobs))
     snap = api.queue.snapshot()
     victim_id = next(e["id"] for e in snap if e["name"] == "victim.bin")
     survivor_id = next(e["id"] for e in snap if e["name"] == "survivor.bin")
@@ -130,7 +132,7 @@ def test_cancel_one_active_item_leaves_the_other_to_complete(sftp_env, wait_for_
     assert state_of(api, survivor_id)["state"] == COMPLETED
 
 
-def test_cancel_all_stops_both_active_items(sftp_env, wait_for_drain, state_of):
+def test_cancel_all_stops_both_active_items(sftp_env, wait_for_drain, wait_for_queue_count, state_of):
     api, server_root, local_dir = sftp_env
     names = ["a.bin", "b.bin"]
     for name in names:
@@ -140,6 +142,7 @@ def test_cancel_all_stops_both_active_items(sftp_env, wait_for_drain, state_of):
     result = api.enqueue(jobs, "upload", str(local_dir), "/", "overwrite")
     assert result["ok"] is True
 
+    wait_for_queue_count(api, len(names))
     snap = api.queue.snapshot()
     ids = {e["name"]: e["id"] for e in snap}
 

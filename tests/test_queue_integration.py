@@ -12,7 +12,7 @@ import time
 from transfer_queue import COMPLETED, CANCELLED, WAITING, FAILED, ACTIVE
 
 
-def test_upload_byte_integrity(sftp_env, wait_for_drain, state_of):
+def test_upload_byte_integrity(sftp_env, wait_for_drain, wait_for_queue_count, state_of):
     api, server_root, local_dir = sftp_env
     data = os.urandom(64 * 1024 + 37)  # not a round chunk multiple, on purpose
     src = local_dir / "up.bin"
@@ -21,6 +21,8 @@ def test_upload_byte_integrity(sftp_env, wait_for_drain, state_of):
     result = api.enqueue([{"name": "up.bin", "is_dir": False}], "upload",
                           str(local_dir), "/", "overwrite")
     assert result["ok"] is True
+    assert result["scanning"] is True
+    wait_for_queue_count(api, 1)
     item_id = api.queue.snapshot()[0]["id"]
 
     wait_for_drain(api)
@@ -31,7 +33,7 @@ def test_upload_byte_integrity(sftp_env, wait_for_drain, state_of):
     assert served_copy.read_bytes() == data
 
 
-def test_download_byte_integrity(sftp_env, wait_for_drain, state_of):
+def test_download_byte_integrity(sftp_env, wait_for_drain, wait_for_queue_count, state_of):
     api, server_root, local_dir = sftp_env
     data = os.urandom(96 * 1024 + 5)
     (server_root / "down.bin").write_bytes(data)
@@ -39,6 +41,7 @@ def test_download_byte_integrity(sftp_env, wait_for_drain, state_of):
     result = api.enqueue([{"name": "down.bin", "is_dir": False}], "download",
                           str(local_dir), "/", "overwrite")
     assert result["ok"] is True
+    wait_for_queue_count(api, 1)
     item_id = api.queue.snapshot()[0]["id"]
 
     wait_for_drain(api)
@@ -58,7 +61,7 @@ def test_multiple_files_drain_in_order_and_all_complete(sftp_env, wait_for_drain
     jobs = [{"name": name, "is_dir": False} for name in names]
     result = api.enqueue(jobs, "upload", str(local_dir), "/", "overwrite")
     assert result["ok"] is True
-    assert result["queued"] == len(names)
+    assert result["scanning"] is True
 
     wait_for_drain(api)
 
@@ -68,7 +71,8 @@ def test_multiple_files_drain_in_order_and_all_complete(sftp_env, wait_for_drain
     assert api.queue.pending() == 0
 
 
-def test_cancel_waiting_item_behind_a_slower_active_one(sftp_env, wait_for_drain, state_of):
+def test_cancel_waiting_item_behind_a_slower_active_one(
+        sftp_env, wait_for_drain, wait_for_queue_count, state_of):
     api, server_root, local_dir = sftp_env
     # two big files, a few MB each, so both of the pool's two workers stay
     # busy long enough for the trailing (still-waiting) item to be cancelled
@@ -85,6 +89,7 @@ def test_cancel_waiting_item_behind_a_slower_active_one(sftp_env, wait_for_drain
     result = api.enqueue(jobs, "upload", str(local_dir), "/", "overwrite")
     assert result["ok"] is True
 
+    wait_for_queue_count(api, 3)
     snap = api.queue.snapshot()
     big1_id = next(e["id"] for e in snap if e["name"] == "big1.bin")
     big2_id = next(e["id"] for e in snap if e["name"] == "big2.bin")
@@ -210,7 +215,7 @@ def test_upload_paths_joins_the_queue_alongside_pending_items(sftp_env, wait_for
     result = api.upload_paths([str(dropped_file)], "/", "overwrite")
 
     assert result["ok"] is True
-    assert result["queued"] == 1
+    assert result["scanning"] is True
 
     wait_for_drain(api)
 
@@ -236,13 +241,14 @@ def test_upload_paths_locked_out_while_legacy_active(sftp_env):
     assert api.queue.pending() == 0
 
 
-def test_retry_item_runs_to_completion(sftp_env, wait_for_drain, state_of):
+def test_retry_item_runs_to_completion(sftp_env, wait_for_drain, wait_for_queue_count, state_of):
     api, server_root, local_dir = sftp_env
 
     # the remote path does not exist yet, so the download fails
     result = api.enqueue([{"name": "later.bin", "is_dir": False}], "download",
                           str(local_dir), "/", "overwrite")
     assert result["ok"] is True
+    wait_for_queue_count(api, 1)
     item_id = api.queue.snapshot()[0]["id"]
 
     wait_for_drain(api)
@@ -261,7 +267,8 @@ def test_retry_item_runs_to_completion(sftp_env, wait_for_drain, state_of):
     assert (local_dir / "later.bin").read_bytes() == data
 
 
-def test_pause_holds_waiting_items_then_resume_drains_them(sftp_env, wait_for_drain, state_of):
+def test_pause_holds_waiting_items_then_resume_drains_them(
+        sftp_env, wait_for_drain, wait_for_queue_count, state_of):
     # Two big files fill both pool workers; several small files sit behind them.
     # Pausing while the bigs are active must let the bigs finish but never let a
     # small get claimed, so the smalls stay WAITING until resume.
@@ -278,6 +285,7 @@ def test_pause_holds_waiting_items_then_resume_drains_them(sftp_env, wait_for_dr
     jobs += [{"name": n, "is_dir": False} for n in smalls]
     assert api.enqueue(jobs, "upload", str(local_dir), "/", "overwrite")["ok"] is True
 
+    wait_for_queue_count(api, len(jobs))
     snap = api.queue.snapshot()
     big1_id = next(e["id"] for e in snap if e["name"] == "big1.bin")
     big2_id = next(e["id"] for e in snap if e["name"] == "big2.bin")
@@ -318,7 +326,8 @@ def test_pause_holds_waiting_items_then_resume_drains_them(sftp_env, wait_for_dr
         assert (server_root / name).read_bytes() == (local_dir / name).read_bytes()
 
 
-def test_pause_flag_clears_once_a_paused_queue_empties(sftp_env, wait_for_drain, state_of):
+def test_pause_flag_clears_once_a_paused_queue_empties(
+        sftp_env, wait_for_drain, wait_for_queue_count, state_of):
     # Pausing a batch that has nothing waiting behind it lets the active files
     # finish and the queue empty. The pause flag must not survive that: a fresh
     # batch enqueued afterward has to run without an explicit resume.
@@ -331,6 +340,7 @@ def test_pause_flag_clears_once_a_paused_queue_empties(sftp_env, wait_for_drain,
 
     # pause only once both files are active (nothing left waiting behind them),
     # so the pause lands on a queue that then genuinely empties
+    wait_for_queue_count(api, len(first))
     snap = api.queue.snapshot()
     first_ids = [e["id"] for e in snap]
     deadline = time.time() + 15
@@ -370,7 +380,7 @@ def test_dropped_paths_land_on_the_queue(sftp_env, wait_for_drain):
     result = api.upload_paths([str(file1), str(file2), str(subfolder)], "/", "overwrite")
 
     assert result["ok"] is True
-    assert result["queued"] == 3
+    assert result["scanning"] is True
 
     wait_for_drain(api)
 

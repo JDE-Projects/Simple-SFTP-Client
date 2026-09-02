@@ -205,14 +205,38 @@ def sftp_env(tmp_path):
 
 @pytest.fixture
 def wait_for_drain():
-    """Return a helper that polls api.queue.pending() until it hits 0."""
+    """Return a helper that polls until the queue is truly empty: no
+    background scan still streaming files in, AND api.queue.pending() == 0.
+    enqueue()/upload_paths() now return before the scan has queued anything,
+    so pending() can read 0 for an instant before the scan starts; checking
+    only pending() would let this fixture return too early on a slow scan."""
     def _wait(api, timeout=15):
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if api.queue.pending() == 0:
+            if not api._scan_active() and api.queue.pending() == 0:
                 return
             time.sleep(0.05)
-        pytest.fail(f"queue did not drain within {timeout}s, pending={api.queue.pending()}")
+        pytest.fail(
+            f"queue did not drain within {timeout}s, "
+            f"scanning={api._scan_active()}, pending={api.queue.pending()}")
+    return _wait
+
+
+@pytest.fixture
+def wait_for_queue_count():
+    """Return a helper that polls until at least n items have appeared on the
+    queue (or fails loudly after timeout). Scanning is async now, so a test
+    that wants an item's id right after enqueue()/upload_paths() must wait
+    for it to actually land first."""
+    def _wait(api, n, timeout=15):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if len(api.queue.snapshot()) >= n:
+                return
+            time.sleep(0.02)
+        pytest.fail(
+            f"queue did not reach {n} item(s) within {timeout}s, "
+            f"has {len(api.queue.snapshot())}")
     return _wait
 
 

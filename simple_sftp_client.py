@@ -47,6 +47,12 @@ APP_VERSION = "1.7.1"
 GITHUB_REPO = "JDE-Projects/Simple-SFTP-Client"   # owner/repo for update checks
 WORKER_COUNT = 2   # transfer queue workers by default, each its own SFTP session
 WORKER_COUNT_MAX = 5   # ceiling for a batch of many small files (channels-per-connection headroom, see status.md)
+# A background scan pauses queuing new files once this many are still WAITING,
+# and resumes once the worker pool has drained enough of them. This is what
+# keeps memory bounded while a 200GB / 1M-file folder is being scanned: the
+# queue never grows past roughly this many items ahead of what the workers
+# can drain.
+SCAN_QUEUE_HIGH_WATER = 3000
 
 
 def worker_target(sizes):
@@ -543,6 +549,13 @@ class Api:
         self._console_buffer = []
         self._console_lock = threading.Lock()
         self._poll_mode = False
+        # Background folder scans (enqueue/upload_paths): each running scan
+        # gets its own id and stop Event here, guarded by _scan_lock. A fresh
+        # transfer always gets a brand-new Event, so a stop from a previous,
+        # already-finished scan can never reach into a later one.
+        self._scan_lock = threading.Lock()
+        self._scans = {}   # scan_id -> {"stop": threading.Event, "found": int}
+        self._scan_next_id = 1
 
     def set_window(self, w):
         self._window = w
@@ -834,6 +847,10 @@ class Api:
                          "answering on it.")}
 
     def disconnect(self):
+        # Halt any background scan promptly: it also checks self.connected on
+        # its own, but the explicit stop makes it exit immediately rather than
+        # waiting for its next loop check.
+        self._stop_all_scans()
         self.stop_watch()
         try:
             if self.sftp:
@@ -954,12 +971,195 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": friendly_error(e)}
 
+    # ───────────── background scans (streaming enqueue) ─────────────
+    def _register_scan(self):
+        """Start tracking a new background scan: a fresh stop Event and found
+        count, keyed by its own id. Always a brand-new Event, never a shared
+        or reused one, so a stop from an earlier scan can never reach a scan
+        started after it."""
+        with self._scan_lock:
+            scan_id = self._scan_next_id
+            self._scan_next_id += 1
+            self._scans[scan_id] = {"stop": threading.Event(), "found": 0}
+            return scan_id, self._scans[scan_id]["stop"]
+
+    def _deregister_scan(self, scan_id):
+        with self._scan_lock:
+            self._scans.pop(scan_id, None)
+
+    def _stop_all_scans(self):
+        """Signal every currently-running scan to stop walking. Used by
+        cancel-all and disconnect so a huge scan halts promptly instead of
+        continuing to queue files nobody will drain."""
+        with self._scan_lock:
+            for s in self._scans.values():
+                s["stop"].set()
+
+    def _scan_active(self):
+        with self._scan_lock:
+            return bool(self._scans)
+
+    def _bump_scan_found(self, scan_id, n):
+        with self._scan_lock:
+            entry = self._scans.get(scan_id)
+            if entry is not None:
+                entry["found"] += n
+
+    def _scan_found_total(self):
+        """Sum of found-so-far across every active scan, for poll_queue()."""
+        with self._scan_lock:
+            return sum(s["found"] for s in self._scans.values())
+
+    def _scan_wait_for_room(self, stop_event):
+        """Block the scanner thread (never the bridge thread) while the queue
+        has too many WAITING items, or is paused, so a huge scan cannot flood
+        memory faster than the worker pool can drain it. Returns as soon as
+        there is room, the scan is stopped, or the connection drops."""
+        while not stop_event.is_set() and self.connected:
+            if self.queue.waiting() >= SCAN_QUEUE_HIGH_WATER:
+                time.sleep(0.05)
+                continue
+            if self.queue.is_paused():
+                time.sleep(0.05)
+                continue
+            break
+
+    def _iter_local(self, lp, rp, is_dir):
+        """Stream (local_path, remote_path, size) one file at a time from a
+        local file or folder, without creating any directories. A single file
+        yields one tuple; a folder is walked depth-first, one subfolder's
+        listing in memory at a time rather than the whole tree."""
+        if not is_dir:
+            try:
+                size = os.path.getsize(lp)
+            except OSError:
+                size = 0
+            yield (lp, rp, size)
+            return
+        try:
+            entries = sorted(os.scandir(lp), key=lambda e: e.name)
+        except OSError as e:
+            self._worker_log(f"could not list {lp}: {e}", "error")
+            return
+        for entry in entries:
+            rchild = posixpath.join(rp, entry.name)
+            try:
+                child_is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                child_is_dir = False
+            if child_is_dir:
+                yield from self._iter_local(entry.path, rchild, True)
+            else:
+                try:
+                    size = entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    size = 0
+                yield (entry.path, rchild, size)
+
+    def _iter_remote(self, sftp, rp, lp, is_dir):
+        """Same as _iter_local but over an sftp session for a remote file or
+        folder, again without creating any directories. sftp must be a
+        session owned by the caller (the scanner opens its own, never
+        self.sftp, which stays reserved for the file browser)."""
+        if not is_dir:
+            yield (lp, rp, self._rsize(sftp, rp))
+            return
+        try:
+            attrs = sftp.listdir_attr(rp)
+        except Exception as e:
+            self._worker_log(f"could not list {rp}: {friendly_error(e)}", "error")
+            return
+        for a in sorted(attrs, key=lambda a: a.filename):
+            rchild = posixpath.join(rp, a.filename)
+            lchild = os.path.join(lp, a.filename)
+            if stat.S_ISDIR(a.st_mode):
+                yield from self._iter_remote(sftp, rchild, lchild, True)
+            else:
+                yield (lchild, rchild, a.st_size)
+
+    def _scan_and_queue(self, roots, direction, on_conflict, scan_id, stop_event):
+        """Runs entirely on its own daemon thread, never the pywebview bridge
+        thread: walks roots (a list of (local_path, remote_path, is_dir)
+        tuples) streaming file-by-file, and flushes small batches through
+        _enqueue_files as it goes, so the existing worker-pool scaling logic
+        is reused unchanged. Backpressure (_scan_wait_for_room) is what keeps
+        the queue bounded during a huge scan; batches are also capped to
+        SCAN_QUEUE_HIGH_WATER so a tiny high-water (as in a test) is actually
+        observable, not just the production default. Always deregisters
+        itself, and never lets an unexpected exception fail silently."""
+        sftp = None
+        found = 0
+        batch = []
+        try:
+            if direction == "download":
+                try:
+                    sftp = self.client.open_sftp()
+                except Exception as e:
+                    self._worker_log(
+                        f"scan: could not open a transfer session: {friendly_error(e)}", "error")
+                    return
+
+            def flush():
+                nonlocal batch, found
+                if not batch:
+                    return
+                self._scan_wait_for_room(stop_event)
+                if stop_event.is_set() or not self.connected:
+                    return
+                found += len(batch)
+                self._bump_scan_found(scan_id, len(batch))
+                self._enqueue_files(batch, direction, on_conflict)
+                batch = []
+
+            stopped_early = False
+            for lp, rp, is_dir in roots:
+                if stop_event.is_set() or not self.connected:
+                    stopped_early = True
+                    break
+                gen = self._iter_local(lp, rp, is_dir) if direction == "upload" \
+                    else self._iter_remote(sftp, rp, lp, is_dir)
+                for triple in gen:
+                    if stop_event.is_set() or not self.connected:
+                        stopped_early = True
+                        break
+                    batch.append(triple)
+                    batch_cap = min(64, SCAN_QUEUE_HIGH_WATER) or 64
+                    if len(batch) >= batch_cap:
+                        flush()
+                        if stop_event.is_set() or not self.connected:
+                            stopped_early = True
+                            break
+                if stopped_early:
+                    break
+            flush()
+            if stop_event.is_set():
+                self._worker_log(f"Scan stopped ({found} file(s) queued before stopping)", "warn")
+            elif not self.connected:
+                self._worker_log(f"Scan halted: disconnected ({found} file(s) queued)", "warn")
+            elif found:
+                self._worker_log(f"Scan complete: {found} file(s) queued")
+            else:
+                self._worker_log("Scan complete: nothing to transfer")
+        except Exception as e:
+            self._worker_log(f"scan failed: {friendly_error(e)}", "error")
+            debug.log("SCAN failed", traceback.format_exc())
+        finally:
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+            self._deregister_scan(scan_id)
+
     # ───────────── transfers (queue + progress + resume + retry) ─────────────
     def cancel(self):
         """Cancel-all, wired to the footer Cancel button: cancels every waiting
         queue item and flags every active one so each worker's byte loop stops
-        and finalizes it as cancelled. self._cancel is still set for the legacy
-        path (sync/watch/external-drop), which is not on the per-item flag."""
+        and finalizes it as cancelled. Also stops any background scan still
+        streaming files in, so a cancel during a huge scan halts it promptly.
+        self._cancel is still set for the legacy path (sync/watch/external-drop),
+        which is not on the per-item flag."""
+        self._stop_all_scans()
         self.queue.cancel_all()
         self._cancel.set()
         return {"ok": True}
@@ -982,6 +1182,13 @@ class Api:
             "progress": progress,
             "console": lines,
             "paused": self.queue.is_paused(),
+            # A background scan (enqueue/upload_paths) queues files as it
+            # finds them, so the UI needs its own signal to show "Scanning…
+            # N found" and read accurate totals even after old items have
+            # aged out of items/pending above.
+            "scanning": self._scan_active(),
+            "scan_found": self._scan_found_total(),
+            "counts": self.queue.counts(),
         }
 
     def cancel_item(self, item_id):
@@ -1008,6 +1215,15 @@ class Api:
         self._ensure_worker()
         return {"ok": True}
 
+    def retry_all_failed(self):
+        """Put every FAILED item back in line and wake the worker pool.
+        Wired to a footer "retry all failed" control."""
+        if not self.connected:
+            return {"ok": False, "error": "Not connected."}
+        n = self.queue.retry_all_failed()
+        self._ensure_worker()
+        return {"ok": True, "requeued": n}
+
     def pause_queue(self):
         """Pause the queue: stop claiming new items. Files already mid-transfer
         are left to finish; the worker pool winds down once they do. Wired to the
@@ -1027,38 +1243,36 @@ class Api:
         return {"ok": True}
 
     def enqueue(self, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"):
-        """New entry point for pane transfers: expands jobs (same enumeration
-        as transfer()) into per-file queue items and returns immediately. Folder
-        enumeration below runs once, up front, over the shared self.sftp session
-        (the same one the file browser uses); the per-file transfers that follow
-        are drained by the worker pool (_ensure_worker), each over its own
-        SFTP session opened when that worker starts."""
+        """New entry point for pane transfers: starts a background scan that
+        streams jobs (same is_dir shape as transfer()) into per-file queue
+        items and returns immediately, instead of walking the whole tree up
+        front. On a huge folder that walk used to block with zero feedback
+        and create empty folder shells; now files are queued (and their
+        remote/local parent folders created) as they are found, one at a
+        time, with backpressure so the queue never balloons ahead of what the
+        worker pool can drain. See _scan_and_queue and poll_queue's
+        "scanning"/"scan_found" keys for how the UI observes progress."""
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
         if self._legacy_active.is_set():
             return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}
-        files = []   # (local_path, remote_path, size)
-        try:
-            for j in jobs:
-                if direction == "upload":
-                    lp = os.path.join(local_dir, j["name"])
-                    rp = posixpath.join(remote_dir, j["name"])
-                    if j["is_dir"]:
-                        files += self._walk_local(lp, rp)
-                    else:
-                        try:
-                            size = os.path.getsize(lp)
-                        except OSError:
-                            size = 0
-                        files.append((lp, rp, size))
-                else:
-                    rp = posixpath.join(remote_dir, j["name"])
-                    lp = os.path.join(local_dir, j["name"])
-                    files += self._walk_remote(rp, lp) if j["is_dir"] else \
-                        [(lp, rp, self._rsize(self.sftp, rp))]
-        except Exception as e:
-            return {"ok": False, "error": f"Could not enumerate: {e}"}
-        return {"ok": True, "queued": self._enqueue_files(files, direction, on_conflict)}
+        roots = []   # (local_path, remote_path, is_dir)
+        for j in jobs:
+            name = j["name"]
+            is_dir = bool(j.get("is_dir"))
+            if direction == "upload":
+                lp = os.path.join(local_dir, name)
+                rp = posixpath.join(remote_dir, name)
+            else:
+                rp = posixpath.join(remote_dir, name)
+                lp = os.path.join(local_dir, name)
+            roots.append((lp, rp, is_dir))
+        scan_id, stop_event = self._register_scan()
+        t = threading.Thread(target=self._scan_and_queue,
+                              args=(roots, direction, on_conflict, scan_id, stop_event),
+                              daemon=True)
+        t.start()
+        return {"ok": True, "scanning": True}
 
     def _enqueue_files(self, files, direction, on_conflict):
         """Append (local_path, remote_path, size) triples to the queue as
@@ -1146,6 +1360,10 @@ class Api:
                             f"{stranded} queued item(s) marked failed: no transfer session",
                             "error")
             return
+        # Remote directories this worker has already confirmed exist, so an
+        # upload only pays the stat/mkdir round trip once per directory, not
+        # once per file (see _one's dir_cache parameter).
+        dir_cache = set()
         try:
             done_count = 0
             while True:
@@ -1217,7 +1435,7 @@ class Api:
                         res = self._one(item.direction, item.local_path, item.remote_path,
                                          item.name, done_count, total, item.on_conflict,
                                          sftp, cancel_check=lambda it=item: it.cancel_requested,
-                                         progress_key=item.id)
+                                         progress_key=item.id, dir_cache=dir_cache)
                         ok = True
                         break  # success (including "skip"/"cancelled"): stop retrying
                     except Exception as e:
@@ -1289,14 +1507,15 @@ class Api:
 
     def upload_paths(self, paths, remote_dir, on_conflict="overwrite"):
         """Upload absolute local paths (files or folders) dragged in from outside
-        the app, into remote_dir. Enumerated up front over the shared self.sftp
-        session, then enqueued as ordinary queue items and drained by the
-        worker pool, the same as a pane transfer (enqueue)."""
+        the app, into remote_dir. Only the top-level dropped items are stat'd
+        here (cheap: one isdir check each); the actual folder contents stream
+        in via the same background scan as enqueue(), so a huge dropped folder
+        does not block this call."""
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
         if self._legacy_active.is_set():
             return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}
-        files = []
+        roots = []   # (local_path, remote_path, is_dir)
         try:
             for raw in paths or []:
                 lp = self._normalize_drop_path(raw)
@@ -1305,19 +1524,20 @@ class Api:
                 name = os.path.basename(lp.rstrip("\\/"))
                 rp = posixpath.join(remote_dir, name)
                 if os.path.isdir(lp):
-                    files += self._walk_local(lp, rp)
+                    roots.append((lp, rp, True))
                 elif os.path.isfile(lp):
-                    try:
-                        size = os.path.getsize(lp)
-                    except OSError:
-                        size = 0
-                    files.append((lp, rp, size))
+                    roots.append((lp, rp, False))
         except Exception as e:
             return {"ok": False, "error": f"Could not read the dropped items: {e}"}
-        if not files:
+        if not roots:
             return {"ok": False, "error": "No files were found in the dropped items."}
-        debug.log("EXTERNAL UPLOAD", {"items": len(files), "remote": remote_dir})
-        return {"ok": True, "queued": self._enqueue_files(files, "upload", on_conflict)}
+        debug.log("EXTERNAL UPLOAD", {"items": len(roots), "remote": remote_dir})
+        scan_id, stop_event = self._register_scan()
+        t = threading.Thread(target=self._scan_and_queue,
+                              args=(roots, "upload", on_conflict, scan_id, stop_event),
+                              daemon=True)
+        t.start()
+        return {"ok": True, "scanning": True}
 
     @staticmethod
     def _normalize_drop_path(p):
@@ -1379,13 +1599,18 @@ class Api:
                 "cancelled": self._cancel.is_set()}
 
     def _one(self, direction, lp, rp, name, idx, total, on_conflict, sftp,
-             cancel_check=None, progress_key=None):
+             cancel_check=None, progress_key=None, dir_cache=None):
         """sftp is the session to transfer over: self.sftp for the legacy
         path, a worker's own session for the queue path. cancel_check is a
         callable returning True to stop the byte loop early; defaults to the
         legacy self._cancel flag. progress_key is what _progress() files this
         transfer's progress under (a queue item id, or the file name for the
-        legacy path, which does not read it back by key)."""
+        legacy path, which does not read it back by key). dir_cache, if given,
+        is a set of remote directories this worker has already confirmed
+        exist, owned by the caller: since folders are no longer created up
+        front by a scan, an upload must ensure its remote parent directory
+        exists lazily, and the cache avoids a stat/mkdir round trip for every
+        single file once a worker has already ensured that directory."""
         if cancel_check is None:
             def cancel_check():
                 return self._cancel.is_set()
@@ -1418,6 +1643,11 @@ class Api:
 
         os.makedirs(os.path.dirname(lp), exist_ok=True) if direction == "download" else None
         if direction == "upload":
+            rdir = posixpath.dirname(rp)
+            if rdir and rdir != "/" and (dir_cache is None or rdir not in dir_cache):
+                self._ensure_remote_dir(rdir, sftp)
+                if dir_cache is not None:
+                    dir_cache.add(rdir)
             finished = self._put_resume(sftp, lp, rp, offset, cb, cancel_check)
         else:
             finished = self._get_resume(sftp, rp, lp, offset, cb, cancel_check)
@@ -1783,16 +2013,20 @@ class Api:
         debug.log("WATCH start", {"local": local_dir, "remote": remote_dir})
         return {"ok": True}
 
-    def _ensure_remote_dir(self, path):
+    def _ensure_remote_dir(self, path, sftp=None):
+        """Create path and any missing parents over sftp (defaults to
+        self.sftp for existing legacy callers; a worker passes its own
+        session, never the shared browsing one)."""
+        sftp = self.sftp if sftp is None else sftp
         parts = path.strip("/").split("/")
         cur = "/"
         for part in parts:
             cur = posixpath.join(cur, part)
             try:
-                self.sftp.stat(cur)
+                sftp.stat(cur)
             except Exception:
                 try:
-                    self.sftp.mkdir(cur)
+                    sftp.mkdir(cur)
                 except Exception:
                     pass
 

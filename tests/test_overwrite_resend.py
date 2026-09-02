@@ -9,21 +9,38 @@ new tail. That splice used to pass silently and even matched the source size.
 
 Runs against the in-process SFTP server from conftest.py.
 """
+import time
+
 from transfer_queue import COMPLETED, SKIPPED
 
 
 def _download_one(api, local_dir, name):
+    before = len(api.queue.snapshot())
     result = api.enqueue([{"name": name, "is_dir": False}], "download",
                          str(local_dir), "/", "overwrite")
     assert result["ok"] is True
+    _wait_for_new_item(api, before)
     return api.queue.snapshot()[-1]["id"]
 
 
 def _upload_one(api, local_dir, name, on_conflict):
+    before = len(api.queue.snapshot())
     result = api.enqueue([{"name": name, "is_dir": False}], "upload",
                           str(local_dir), "/", on_conflict)
     assert result["ok"] is True
+    _wait_for_new_item(api, before)
     return api.queue.snapshot()[-1]["id"]
+
+
+def _wait_for_new_item(api, before, timeout=15):
+    """Scanning is async now: poll until a new item lands on the queue rather
+    than assuming it is already there the instant enqueue() returns."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if len(api.queue.snapshot()) > before:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"no new queue item appeared within {timeout}s")
 
 
 def test_overwrite_resends_same_size_changed_file(sftp_env, wait_for_drain, state_of):

@@ -56,7 +56,7 @@ def test_target_workers_resets_to_default_once_the_pool_empties(sftp_env, wait_f
 
 
 def test_paused_scaled_batch_keeps_its_target_then_resets_on_drain(
-        sftp_env, wait_for_drain, state_of):
+        sftp_env, wait_for_drain, wait_for_queue_count, state_of):
     # A batch of enough small files scales the pool up to WORKER_COUNT_MAX. Two
     # big files ride along to keep workers busy so a pause can land while smalls
     # are still WAITING. Through the pause-hold the raised target must survive, so
@@ -73,6 +73,10 @@ def test_paused_scaled_batch_keeps_its_target_then_resets_on_drain(
     # bigs first so the FIFO hands them to the first two workers
     jobs = [{"name": n, "is_dir": False} for n in bigs + smalls]
     assert api.enqueue(jobs, "upload", str(local_dir), "/", "overwrite")["ok"] is True
+
+    # scanning is async: wait for the whole batch to land before checking how
+    # it scaled the pool
+    wait_for_queue_count(api, len(jobs))
     # eight small files in the batch -> the pool scales to the max
     assert api._target_workers == WORKER_COUNT_MAX
 
