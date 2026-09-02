@@ -21,6 +21,13 @@ SKIPPED = "skipped"
 ALL_STATES = (WAITING, ACTIVE, COMPLETED, FAILED, CANCELLED, SKIPPED)
 TERMINAL_STATES = (COMPLETED, FAILED, CANCELLED, SKIPPED)
 
+# Most-recent completed/skipped items kept as objects in self._items; once a
+# batch has more than this many finished successfully, the oldest ones
+# collapse into the self._pruned counters instead of staying in memory. This
+# keeps a normal small transfer fully inspectable while still bounding memory
+# for a huge job.
+RETAIN_FINISHED = 200
+
 
 @dataclass
 class TransferItem:
@@ -44,6 +51,12 @@ class TransferQueue:
         self._items = []  # FIFO order, append order preserved
         self._next_id = 1
         self._paused = False
+        # Once more than RETAIN_FINISHED items have completed/skipped, the
+        # oldest ones are dropped from self._items (see _finish) so a huge
+        # finished batch doesn't keep every item object in memory and get
+        # copied on every UI poll. These tallies keep counts() accurate for
+        # the ones that aged out and no longer exist as objects.
+        self._pruned = {COMPLETED: 0, SKIPPED: 0}
 
     def pause(self):
         """Stop claim() from handing out new items. Items already ACTIVE are
@@ -89,7 +102,12 @@ class TransferQueue:
             return None
 
     def _finish(self, item_id, new_state, error=""):
-        """Move an ACTIVE item to a terminal state. No-op (returns False) otherwise."""
+        """Move an ACTIVE item to a terminal state. No-op (returns False) otherwise.
+        COMPLETED and SKIPPED items stay visible in self._items up to
+        RETAIN_FINISHED of them; beyond that cap the oldest ones collapse
+        into the self._pruned counter instead of staying in memory forever,
+        which is what keeps a million-file job bounded. FAILED and CANCELLED
+        are never pruned, so they remain visible and retryable."""
         with self._lock:
             item = self._find(item_id)
             if item is None or item.state != ACTIVE:
@@ -97,6 +115,19 @@ class TransferQueue:
             item.state = new_state
             if error:
                 item.error = error
+            if new_state in (COMPLETED, SKIPPED):
+                # Only one item can cross into COMPLETED/SKIPPED per call, so
+                # the count can be at most one over the cap: drop the single
+                # oldest finished item (FIFO, scan from the front) if so.
+                finished_count = sum(
+                    1 for i in self._items if i.state in (COMPLETED, SKIPPED)
+                )
+                if finished_count > RETAIN_FINISHED:
+                    for i in self._items:
+                        if i.state in (COMPLETED, SKIPPED):
+                            self._pruned[i.state] += 1
+                            self._items.remove(i)
+                            break
             return True
 
     def mark_completed(self, item_id):
@@ -143,6 +174,21 @@ class TransferQueue:
             item.cancel_requested = False
             return True
 
+    def retry_all_failed(self):
+        """Put every FAILED item back to WAITING, clearing its error and
+        cancel flag, same as requeue() does for a single item. CANCELLED
+        items are left alone: those were intentional and keep the existing
+        per-item requeue(). Returns how many items were requeued."""
+        with self._lock:
+            requeued = 0
+            for item in self._items:
+                if item.state == FAILED:
+                    item.state = WAITING
+                    item.error = ""
+                    item.cancel_requested = False
+                    requeued += 1
+            return requeued
+
     def cancel_all(self):
         with self._lock:
             for item in self._items:
@@ -185,6 +231,12 @@ class TransferQueue:
             result = {state: 0 for state in ALL_STATES}
             for item in self._items:
                 result[item.state] += 1
+            # Live COMPLETED/SKIPPED items are already counted from
+            # self._items above. self._pruned only covers the ones that
+            # aged out past RETAIN_FINISHED and no longer exist as objects,
+            # so adding it in here cannot double count.
+            result[COMPLETED] += self._pruned[COMPLETED]
+            result[SKIPPED] += self._pruned[SKIPPED]
             return result
 
     def pending(self):
@@ -219,11 +271,14 @@ class TransferQueue:
             return items, pending
 
     def clear_finished(self):
-        """Remove items in a terminal state, keep waiting/active items. Returns
-        the number of items removed."""
+        """Remove items in a terminal state, keep waiting/active items. Also
+        resets the pruned tallies to zero so the next batch's summary starts
+        clean. Returns the number of item objects removed (the tally reset
+        is not counted)."""
         with self._lock:
             before = len(self._items)
             self._items = [item for item in self._items if item.state not in TERMINAL_STATES]
+            self._pruned = {COMPLETED: 0, SKIPPED: 0}
             return before - len(self._items)
 
     def _find(self, item_id):

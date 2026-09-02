@@ -7,6 +7,7 @@ import threading
 
 import pytest
 
+import transfer_queue
 from transfer_queue import (
     TransferQueue,
     WAITING,
@@ -14,6 +15,7 @@ from transfer_queue import (
     COMPLETED,
     FAILED,
     CANCELLED,
+    SKIPPED,
 )
 
 
@@ -62,6 +64,16 @@ def test_mark_completed_shows_in_snapshot_and_counts(q):
                       "state": COMPLETED, "error": ""}]
     assert q.counts()[COMPLETED] == 1
     assert q.pending() == 0
+
+
+def test_mark_skipped_shows_in_snapshot_and_counts(q):
+    item_id = q.append("upload", "/l", "/r", "file")
+    q.claim()
+
+    assert q.mark_skipped(item_id) is True
+
+    assert q.snapshot()[0]["state"] == SKIPPED
+    assert q.counts()[SKIPPED] == 1
 
 
 def test_mark_failed_stores_error(q):
@@ -190,6 +202,9 @@ def test_clear_finished_removes_terminal_items_only(q):
     assert removed == 2
     remaining_ids = {s["id"] for s in q.snapshot()}
     assert remaining_ids == {waiting_id, active_id}
+    # the completed tally is reset to zero by clear_finished() for a clean
+    # summary on the next batch.
+    assert q.counts()[COMPLETED] == 0
 
 
 def test_clear_finished_returns_zero_when_nothing_to_remove(q):
@@ -347,3 +362,125 @@ def test_claim_is_thread_safe_no_duplicates_no_drops(q):
     assert sorted(claimed) == sorted(ids)
     assert len(claimed) == n
     assert q.counts()[ACTIVE] == n
+
+
+def test_failed_and_cancelled_items_stay_visible_in_snapshot(q):
+    failed_id = q.append("upload", "/l1", "/r1", "file1")
+    cancelled_id = q.append("upload", "/l2", "/r2", "file2")
+
+    q.claim()
+    q.mark_failed(failed_id, "boom")
+    q.claim()
+    q.mark_cancelled(cancelled_id)
+
+    states = {s["id"]: s["state"] for s in q.snapshot()}
+    assert states[failed_id] == FAILED
+    assert states[cancelled_id] == CANCELLED
+
+
+def test_retry_all_failed_requeues_only_failed_items(q):
+    failed_id1 = q.append("upload", "/l1", "/r1", "file1")
+    failed_id2 = q.append("upload", "/l2", "/r2", "file2")
+    cancelled_id = q.append("upload", "/l3", "/r3", "file3")
+    completed_id = q.append("upload", "/l4", "/r4", "file4")
+
+    q.claim()
+    q.mark_failed(failed_id1, "boom")
+    q.claim()
+    q.mark_failed(failed_id2, "bang")
+    q.cancel(cancelled_id)  # WAITING -> CANCELLED directly
+    q.claim()
+    q.mark_completed(completed_id)
+
+    waiting_id = q.append("upload", "/l5", "/r5", "file5")
+
+    requeued = q.retry_all_failed()
+
+    assert requeued == 2
+    states = {s["id"]: s for s in q.snapshot()}
+    assert states[failed_id1]["state"] == WAITING
+    assert states[failed_id1]["error"] == ""
+    assert states[failed_id2]["state"] == WAITING
+    assert states[failed_id2]["error"] == ""
+    # cancelled item is left alone, not swept up by the bulk retry
+    assert states[cancelled_id]["state"] == CANCELLED
+    # untouched waiting item stays waiting
+    assert states[waiting_id]["state"] == WAITING
+    # completed item is untouched either way
+    assert states[completed_id]["state"] == COMPLETED
+    assert q.counts()[COMPLETED] == 1
+
+
+def test_completed_items_beyond_the_cap_age_out_of_snapshot(q, monkeypatch):
+    # Patch a small cap so the test runs fast instead of creating 200+ real
+    # transfers. transfer_queue._finish() reads the module-level constant by
+    # name at call time, so patching the module attribute is enough.
+    monkeypatch.setattr(transfer_queue, "RETAIN_FINISHED", 3)
+
+    ids = [q.append("upload", f"/l{i}", f"/r{i}", f"file{i}") for i in range(5)]
+    for item_id in ids:
+        q.claim()
+        q.mark_completed(item_id)
+
+    # only the newest RETAIN_FINISHED (3) completed items are still objects
+    snap_ids = [s["id"] for s in q.snapshot()]
+    assert snap_ids == ids[-3:]
+    # the oldest two aged out of snapshot() entirely
+    assert ids[0] not in snap_ids
+    assert ids[1] not in snap_ids
+    # counts() still reports the full completed total, live plus pruned
+    assert q.counts()[COMPLETED] == 5
+
+
+def test_retry_all_failed_returns_zero_when_nothing_failed(q):
+    q.append("upload", "/l1", "/r1", "file1")
+
+    assert q.retry_all_failed() == 0
+
+
+def test_clear_finished_zeroes_pruned_tallies_for_a_clean_summary(q):
+    id1 = q.append("upload", "/l1", "/r1", "file1")
+    id2 = q.append("upload", "/l2", "/r2", "file2")
+    failed_id = q.append("upload", "/l3", "/r3", "file3")
+
+    q.claim()
+    q.mark_completed(id1)
+    q.claim()
+    q.mark_completed(id2)
+    q.claim()
+    q.mark_failed(failed_id, "boom")
+
+    assert q.counts()[COMPLETED] == 2
+
+    removed = q.clear_finished()
+
+    assert removed == 3  # both completed objects plus the failed one
+    assert q.counts()[COMPLETED] == 0
+    assert q.snapshot() == []
+
+
+def test_counts_totals_stay_correct_across_a_mix_of_outcomes(q):
+    complete_id = q.append("upload", "/l1", "/r1", "file1")
+    skip_id = q.append("upload", "/l2", "/r2", "file2")
+    fail_id = q.append("upload", "/l3", "/r3", "file3")
+    cancel_id = q.append("upload", "/l4", "/r4", "file4")
+    waiting_id = q.append("upload", "/l5", "/r5", "file5")
+
+    q.claim()
+    q.mark_completed(complete_id)
+    q.claim()
+    q.mark_skipped(skip_id)
+    q.claim()
+    q.mark_failed(fail_id, "boom")
+    q.claim()
+    q.mark_cancelled(cancel_id)
+
+    counts = q.counts()
+    assert counts[COMPLETED] == 1
+    assert counts[SKIPPED] == 1
+    assert counts[FAILED] == 1
+    assert counts[CANCELLED] == 1
+    assert counts[WAITING] == 1
+    assert counts[ACTIVE] == 0
+    assert sum(counts.values()) == 5
+    assert waiting_id in {s["id"] for s in q.snapshot()}
