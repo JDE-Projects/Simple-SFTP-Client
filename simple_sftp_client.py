@@ -376,8 +376,8 @@ def _known_hosts_readable_or_raise():
     try:
         with open(KNOWN_HOSTS_FILE, "r", encoding="utf-8") as f:
             lines = f.readlines()
-    except Exception:
-        raise KnownHostsUnreadable(KNOWN_HOSTS_FILE)
+    except Exception as e:
+        raise KnownHostsUnreadable(KNOWN_HOSTS_FILE) from e
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
