@@ -34,6 +34,7 @@ import traceback
 import webbrowser
 import socket
 import posixpath
+import ntpath
 import urllib.error
 from datetime import datetime
 from urllib.request import Request, urlopen
@@ -84,6 +85,30 @@ def exe_dir():
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def safe_local_child(parent: str, name: str, root: str) -> str:
+    """Validate a single server-supplied filename before it becomes part of a
+    local path, and confirm the result stays under root (the local folder the
+    user selected for this transfer). Rejects anything that looks like path
+    traversal, or an absolute/UNC/drive path smuggled in as a "filename" by a
+    hostile or broken server, by raising ValueError. Does not resolve
+    symlinks (abspath + commonpath only); parent must already be under root."""
+    if not name or name in (".", ".."):
+        raise ValueError(f"unsafe name {name!r}")
+    if "/" in name or "\\" in name or os.sep in name or (os.altsep and os.altsep in name):
+        raise ValueError(f"unsafe name {name!r}")
+    if os.path.isabs(name) or os.path.splitdrive(name)[0] or ntpath.splitdrive(name)[0]:
+        raise ValueError(f"unsafe name {name!r}")
+    candidate = os.path.join(parent, name)
+    root_abs = os.path.abspath(root)
+    try:
+        common = os.path.commonpath([root_abs, os.path.abspath(candidate)])
+    except ValueError:
+        raise ValueError(f"unsafe name {name!r}") from None
+    if common != root_abs:
+        raise ValueError(f"unsafe name {name!r}")
+    return candidate
 
 
 SESSIONS_FILE = os.path.join(exe_dir(), "servers.json")
@@ -1056,11 +1081,14 @@ class Api:
                     size = 0
                 yield (entry.path, rchild, size)
 
-    def _iter_remote(self, sftp, rp, lp, is_dir):
+    def _iter_remote(self, sftp, rp, lp, is_dir, root):
         """Same as _iter_local but over an sftp session for a remote file or
         folder, again without creating any directories. sftp must be a
         session owned by the caller (the scanner opens its own, never
-        self.sftp, which stays reserved for the file browser)."""
+        self.sftp, which stays reserved for the file browser). root is the
+        local folder the user selected for this download; it stays fixed
+        across the whole recursive walk so every level, however deep, is
+        checked against the same boundary rather than its immediate parent."""
         if not is_dir:
             yield (lp, rp, self._rsize(sftp, rp))
             return
@@ -1071,13 +1099,17 @@ class Api:
             return
         for a in sorted(attrs, key=lambda a: a.filename):
             rchild = posixpath.join(rp, a.filename)
-            lchild = os.path.join(lp, a.filename)
+            try:
+                lchild = safe_local_child(lp, a.filename, root)
+            except ValueError as e:
+                self._worker_log(f"skipped unsafe remote name {a.filename!r}: {e}", "error")
+                continue
             if stat.S_ISDIR(a.st_mode):
-                yield from self._iter_remote(sftp, rchild, lchild, True)
+                yield from self._iter_remote(sftp, rchild, lchild, True, root)
             else:
                 yield (lchild, rchild, a.st_size)
 
-    def _scan_and_queue(self, roots, direction, on_conflict, scan_id, stop_event):
+    def _scan_and_queue(self, roots, direction, on_conflict, scan_id, stop_event, local_root=None):
         """Runs entirely on its own daemon thread, never the pywebview bridge
         thread: walks roots (a list of (local_path, remote_path, is_dir)
         tuples) streaming file-by-file, and flushes small batches through
@@ -1086,7 +1118,10 @@ class Api:
         the queue bounded during a huge scan; batches are also capped to
         SCAN_QUEUE_HIGH_WATER so a tiny high-water (as in a test) is actually
         observable, not just the production default. Always deregisters
-        itself, and never lets an unexpected exception fail silently."""
+        itself, and never lets an unexpected exception fail silently.
+
+        local_root is the local folder the user selected for a download (the
+        confinement boundary passed to _iter_remote); unused for uploads."""
         sftp = None
         found = 0
         batch = []
@@ -1117,7 +1152,7 @@ class Api:
                     stopped_early = True
                     break
                 gen = self._iter_local(lp, rp, is_dir) if direction == "upload" \
-                    else self._iter_remote(sftp, rp, lp, is_dir)
+                    else self._iter_remote(sftp, rp, lp, is_dir, local_root)
                 for triple in gen:
                     if stop_event.is_set() or not self.connected:
                         stopped_early = True
@@ -1265,11 +1300,15 @@ class Api:
                 rp = posixpath.join(remote_dir, name)
             else:
                 rp = posixpath.join(remote_dir, name)
-                lp = os.path.join(local_dir, name)
+                try:
+                    lp = safe_local_child(local_dir, name, local_dir)
+                except ValueError as e:
+                    self._worker_log(f"skipped unsafe remote name {name!r}: {e}", "error")
+                    continue
             roots.append((lp, rp, is_dir))
         scan_id, stop_event = self._register_scan()
         t = threading.Thread(target=self._scan_and_queue,
-                              args=(roots, direction, on_conflict, scan_id, stop_event),
+                              args=(roots, direction, on_conflict, scan_id, stop_event, local_dir),
                               daemon=True)
         t.start()
         return {"ok": True, "scanning": True}
@@ -1498,9 +1537,14 @@ class Api:
                     rp = posixpath.join(remote_dir, j["name"])
                     files += self._walk_local(lp, rp) if j["is_dir"] else [(lp, rp, 0)]
                 else:
-                    rp = posixpath.join(remote_dir, j["name"])
-                    lp = os.path.join(local_dir, j["name"])
-                    files += self._walk_remote(rp, lp) if j["is_dir"] else [(lp, rp, 0)]
+                    name = j["name"]
+                    rp = posixpath.join(remote_dir, name)
+                    try:
+                        lp = safe_local_child(local_dir, name, local_dir)
+                    except ValueError as e:
+                        self._worker_log(f"skipped unsafe remote name {name!r}: {e}", "error")
+                        continue
+                    files += self._walk_remote(rp, lp, local_dir) if j["is_dir"] else [(lp, rp, 0)]
         except Exception as e:
             return {"ok": False, "error": f"Could not enumerate: {e}"}
         return self._run_transfer(files, direction, on_conflict)
@@ -1743,7 +1787,10 @@ class Api:
                 out.append((full, posixpath.join(rbase, fn), size))
         return out
 
-    def _walk_remote(self, rp, lp):
+    def _walk_remote(self, rp, lp, root):
+        """root is the local folder the user selected for this download; it
+        stays fixed across the recursive walk so every level is checked
+        against the same boundary rather than its immediate parent."""
         out = []
         try:
             attrs = self.sftp.listdir_attr(rp)
@@ -1752,9 +1799,13 @@ class Api:
         os.makedirs(lp, exist_ok=True)
         for a in attrs:
             rchild = posixpath.join(rp, a.filename)
-            lchild = os.path.join(lp, a.filename)
+            try:
+                lchild = safe_local_child(lp, a.filename, root)
+            except ValueError as e:
+                self._worker_log(f"skipped unsafe remote name {a.filename!r}: {e}", "error")
+                continue
             if stat.S_ISDIR(a.st_mode):
-                out += self._walk_remote(rchild, lchild)
+                out += self._walk_remote(rchild, lchild, root)
             else:
                 out.append((lchild, rchild, a.st_size))
         return out
