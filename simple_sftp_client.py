@@ -602,6 +602,11 @@ class Api:
         # scanner use their own sessions and are intentionally not on this lock.
         self._sftp_lock = threading.RLock()
         self._cancel = threading.Event()
+        # Watcher lifecycle. _watch_lock guards start/stop/replace of the two
+        # fields below so a stop can never null them while a restart is setting
+        # them. Each run also captures its own stop Event locally (never these
+        # shared fields), so an old thread can't observe a newer run's event.
+        self._watch_lock = threading.Lock()
         self._watch_stop = None
         self._watch_thread = None
         # transfer queue: a pool of workers drains it, each over its own SFTP
@@ -1041,14 +1046,9 @@ class Api:
         # waiting for its next loop check.
         self._stop_all_scans()
 
-        # Stop the watcher and join its thread within a bounded time, instead
-        # of just setting the stop event and moving on.
-        watch_thread = self._watch_thread
+        # Stop the watcher; stop_watch joins its thread within a bounded time
+        # and logs if it does not retire, rather than just setting the event.
         self.stop_watch()
-        if watch_thread is not None:
-            watch_thread.join(3)
-            if watch_thread.is_alive():
-                debug.log("SHUTDOWN: watcher thread still running after 3s wait")
 
         # Cancel every queued/active transfer so the worker pool drains
         # promptly instead of grinding through retries against a session
@@ -2390,16 +2390,25 @@ class Api:
 
     # ───────────── upload watcher ─────────────
     def start_watch(self, local_dir, remote_dir):
-        """Kept out of the queue this phase (roadmap Phase 2). _legacy_active is
-        set only while a watch-triggered upload is actually running (not for the
-        whole watch session), so a pane transfer can still be queued while
-        watch is merely idling between its 2-second polls."""
+        """Polls local_dir every 2 seconds and uploads files that changed since
+        it started. Uploads run on the shared browsing session, serialized with
+        listing and health checks by self._sftp_lock. _legacy_active is set only
+        while an upload is actually running (not for the whole watch session), so
+        a pane transfer can still be queued while watch idles between polls.
+
+        A file is uploaded only once its size and modification time have held
+        steady across one poll, so a file still being written is not sent as a
+        partial snapshot. A failed upload keeps its change pending and is retried
+        on a later poll instead of being forgotten."""
         self.stop_watch()
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
         if self.queue.pending() > 0:
             return {"ok": False, "error": "A transfer queue is active. Wait for it to finish."}
-        self._watch_stop = threading.Event()
+        # This run's own stop Event, captured by loop() below. Never read the
+        # shared self._watch_stop from inside the thread: a stop or a restart can
+        # replace it, and this local reference stays valid for this run alone.
+        stop = threading.Event()
 
         def snapshot():
             snap = {}
@@ -2407,25 +2416,37 @@ class Api:
                 for fn in files:
                     fp = os.path.join(root, fn)
                     try:
-                        snap[fp] = os.stat(fp).st_mtime
+                        st = os.stat(fp)
+                        snap[fp] = (st.st_mtime, st.st_size)
                     except Exception:
                         pass
             return snap
 
         def loop():
+            # last: files whose current state has been accepted (uploaded, or
+            # present unchanged since start) and must not be re-sent.
+            # seen_changed: a changed file's state at its previous sighting, used
+            # to require one stable poll before uploading.
             last = snapshot()
-            while not self._watch_stop.is_set():
+            seen_changed = {}
+            while not stop.is_set():
                 time.sleep(2)
-                if self._watch_stop.is_set():
+                if stop.is_set():
                     break
                 cur = snapshot()
-                changed = [fp for fp, m in cur.items() if last.get(fp) != m]
-                # the queue worker owns self.sftp while it runs; never upload in
-                # parallel over the same session. Hold these changes for a later
-                # idle poll by leaving `last` unadvanced.
+                changed = [fp for fp in cur if last.get(fp) != cur[fp]]
+                # A queue worker uses its own session, but this shared-session
+                # upload path is deliberately kept clear of an active batch.
+                # Leave last and seen_changed untouched so the change is retried
+                # on a later idle poll.
                 if changed and self.queue.pending() > 0:
                     continue
                 for fp in changed:
+                    # Stability gate: upload only after the file looks the same
+                    # as the previous poll, so a file mid-write waits.
+                    if seen_changed.get(fp) != cur[fp]:
+                        seen_changed[fp] = cur[fp]
+                        continue
                     rel = os.path.relpath(fp, local_dir).replace("\\", "/")
                     rp = posixpath.join(remote_dir, rel)
                     self._legacy_active.set()
@@ -2438,14 +2459,29 @@ class Api:
                             self._ensure_remote_dir(rdir)
                             self.sftp.put(fp, rp)
                         self._emit("watch", {"file": rel, "ok": True})
+                        # Accept this state so it is not re-sent.
+                        last[fp] = cur[fp]
+                        seen_changed.pop(fp, None)
                     except Exception as e:
                         self._emit("watch", {"file": rel, "ok": False, "error": friendly_error(e)})
+                        # Keep the change pending: leave last unadvanced so a
+                        # later poll retries. Reset the stability gate so a
+                        # transient failure does not skip the next steadiness
+                        # check.
+                        seen_changed.pop(fp, None)
                     finally:
                         self._legacy_active.clear()
-                last = cur
+                # Forget entries for files that no longer exist so the two maps
+                # do not grow without bound over a long session.
+                for tracked in (last, seen_changed):
+                    for gone in [k for k in tracked if k not in cur]:
+                        del tracked[gone]
 
-        self._watch_thread = threading.Thread(target=loop, daemon=True)
-        self._watch_thread.start()
+        t = threading.Thread(target=loop, daemon=True)
+        with self._watch_lock:
+            self._watch_stop = stop
+            self._watch_thread = t
+        t.start()
         debug.log("WATCH start", {"local": local_dir, "remote": remote_dir})
         return {"ok": True}
 
@@ -2467,9 +2503,21 @@ class Api:
                     pass
 
     def stop_watch(self):
-        if self._watch_stop:
-            self._watch_stop.set()
-        self._watch_stop = None
+        """Signal the current watcher to stop and wait (bounded) for its thread
+        to retire before clearing the shared state, so a following start_watch
+        never overlaps the old thread. Called by start_watch (for a restart),
+        Disconnect, and shutdown."""
+        with self._watch_lock:
+            stop = self._watch_stop
+            thread = self._watch_thread
+            self._watch_stop = None
+            self._watch_thread = None
+        if stop is not None:
+            stop.set()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(3)
+            if thread.is_alive():
+                debug.log("WATCH: thread still running 3s after stop")
         return {"ok": True}
 
     # ───────────── update check ─────────────
