@@ -2374,7 +2374,7 @@ class Api:
                     "public_path": pub_path, "existing": existing}
 
         tmp_priv = tmp_pub = None
-        backup_priv = backup_pub = None
+        backup_priv = None
         try:
             if key_type.startswith("Ed25519"):
                 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -2416,15 +2416,14 @@ class Api:
             if os.path.getsize(tmp_pub) != len(pub_bytes):
                 raise OSError("The public key file didn't write completely.")
 
-            # Back up whatever pair is already there, so a failed publish can
-            # be rolled back and the old, working pair never ends up half
-            # replaced (new private + old public, or vice versa).
+            # Back up the existing private key. The private key is published
+            # first, so the only half-replaced state to undo is a successful
+            # private swap followed by a failed public swap: restoring this
+            # backup returns the old, working pair. A failed private swap
+            # changes nothing, and the public is never swapped before it.
             if os.path.exists(out_path):
                 with open(out_path, "rb") as f:
                     backup_priv = f.read()
-            if os.path.exists(pub_path):
-                with open(pub_path, "rb") as f:
-                    backup_pub = f.read()
 
             os.replace(tmp_priv, out_path)
             tmp_priv = None

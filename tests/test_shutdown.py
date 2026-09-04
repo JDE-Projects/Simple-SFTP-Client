@@ -17,7 +17,7 @@ import threading
 import time
 
 import simple_sftp_client
-from transfer_queue import CANCELLED, FAILED, WAITING
+from transfer_queue import FAILED, WAITING
 
 from simple_sftp_client import Api, is_temp_part
 
