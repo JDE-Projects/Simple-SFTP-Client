@@ -609,6 +609,25 @@ class Api:
         self._scan_lock = threading.Lock()
         self._scans = {}   # scan_id -> {"stop": threading.Event, "found": int}
         self._scan_next_id = 1
+        # One idempotent teardown path (see shutdown()): guards Disconnect,
+        # window close, and a plain process exit from ever running the close
+        # sequence twice. Cleared again on the next successful connect() so a
+        # later disconnect runs the full sequence again.
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_done = False
+        # Last folder list_local() actually listed (never the synthetic
+        # "DRIVES" placeholder); connect() sweeps this folder for leftover
+        # .sxtpart scratch files. See _sweep_scratch_files.
+        self._local_cwd = None
+        # First worker to notice the shared transport itself is dead (as
+        # opposed to one file failing) reports it and stops the batch; this
+        # keeps that report to one console line instead of one per worker.
+        # Reset on the next successful connect().
+        self._conn_dead_lock = threading.Lock()
+        self._conn_dead_reported = False
+        # Set by confirm_quit() once the page answers yes to the "transfers
+        # are still running" quit prompt raised from main()'s closing veto.
+        self._quit_confirmed = False
 
     def set_window(self, w):
         self._window = w
@@ -764,8 +783,37 @@ class Api:
                 kwargs["passphrase"] = passphrase
         else:
             kwargs["password"] = password
-        client.connect(**kwargs)
+        try:
+            client.connect(**kwargs)
+        except Exception:
+            # Any failure here, including the host-key exceptions the TOFU
+            # policy raises back through connect(), can still leave a
+            # partially opened transport on this freshly created client.
+            # Close it before the exception reaches connect(), which never
+            # touches self.client/self.sftp on failure (see _close_partial).
+            try:
+                client.close()
+            except Exception:
+                pass
+            raise
         return client
+
+    def _close_partial(self, client, sftp):
+        """Close a client/sftp pair from a connect attempt that did not fully
+        succeed, without ever touching self.client/self.sftp. Used so a
+        failed connect (or a failed reconnect while a prior attempt's
+        resources are still being torn down) can never leak a socket or
+        clobber a still-good prior connection's state."""
+        if sftp is not None:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
     def connect(self, p):
         miss = missing_fields(p)
@@ -778,10 +826,19 @@ class Api:
         passphrase = p.get("passphrase") or ""
         self._cred_pass = password
         debug.log("CONNECT", {"host": host, "user": username, "auth": "key" if key_path else "password"})
+        new_client = None
+        new_sftp = None
         try:
-            self.client = self._open(host, p.get("port", 22), username, password, key_path, passphrase)
-            self.sftp = self.client.open_sftp()
+            new_client = self._open(host, p.get("port", 22), username, password, key_path, passphrase)
+            new_sftp = new_client.open_sftp()
+            # Commit only now that both steps have fully succeeded: an
+            # earlier failure below never reaches this point, so it can
+            # never touch (or leak) a prior good connection's client/sftp.
+            self.client = new_client
+            self.sftp = new_sftp
             self.connected = True
+            self._shutdown_done = False
+            self._conn_dead_reported = False
             ti = self._transport_info()
             if ti:
                 self._vlog(f"Negotiated: cipher {ti.get('cipher','?')} · "
@@ -793,8 +850,10 @@ class Api:
                 self.sftp.stat(start)
             except Exception:
                 start = home
+            self._sweep_scratch_files()
             return {"ok": True, "home": home, "cwd": start, "transport": self._transport_info()}
         except UnknownHostKey as e:
+            self._close_partial(new_client, new_sftp)
             # Pin under the port-aware name paramiko actually checks against
             # (bracketed for non-standard ports), not e.hostname, whose format
             # differs between the unknown-key and changed-key paths.
@@ -803,6 +862,7 @@ class Api:
             return {"ok": False, "host_key_unknown": True, "host": host,
                     "key_type": e.key.get_name(), "fingerprint": fingerprint_sha256(e.key)}
         except paramiko.BadHostKeyException as e:
+            self._close_partial(new_client, new_sftp)
             # Same port-aware name as above. The changed-key path hands back a
             # bare host in e.hostname, so pinning by that would store the new
             # key under a name the library never rechecks, and the warning would
@@ -814,8 +874,41 @@ class Api:
                     "new_fingerprint": fingerprint_sha256(e.key),
                     "old_fingerprint": fingerprint_sha256(e.expected_key)}
         except Exception as e:
+            self._close_partial(new_client, new_sftp)
             debug.log("CONNECT failed", traceback.format_exc())
             return {"ok": False, "error": friendly_error(e), "tips": error_tips(e)}
+
+    def _sweep_scratch_files(self):
+        """Remove leftover .sxtpart scratch files (task 3's is_temp_part /
+        local_temp_path) from the local folder currently browsed. Scoped to
+        that one folder, not a recursive or whole-drive sweep: it is the
+        only place this app's own scratch files are ever written (a sibling
+        of the real file mid-download), so a narrower sweep can't be right
+        and a wider one risks touching a folder the user never asked about.
+        Runs after every successful connect in case the app was killed or
+        lost power mid-transfer and never reached its own atomic-swap
+        cleanup or the delete in the download failure path."""
+        folder = self._local_cwd or os.path.expanduser("~")
+        if not folder or folder == "DRIVES" or not os.path.isdir(folder):
+            return
+        swept = []
+        try:
+            names = os.listdir(folder)
+        except Exception as e:
+            debug.log("scratch sweep: could not list folder", f"{folder}: {e}")
+            return
+        for name in names:
+            if not is_temp_part(name):
+                continue
+            full = os.path.join(folder, name)
+            try:
+                os.remove(full)
+                swept.append(name)
+            except Exception as e:
+                debug.log("scratch sweep: could not remove", f"{full}: {e}")
+        if swept:
+            self._vlog(f"Swept {len(swept)} leftover scratch file(s) from {folder}", "warn")
+            debug.log("scratch sweep removed", swept)
 
     def trust_host_key(self):
         """Pin the host key the user just confirmed, then they may reconnect."""
@@ -900,22 +993,121 @@ class Api:
                          "answering on it.")}
 
     def disconnect(self):
+        """Wired to the Disconnect button. shutdown() is the one teardown
+        path; this just runs it and gives the UI the return shape it
+        expects."""
+        self.shutdown()
+        debug.log("DISCONNECTED")
+        return {"ok": True}
+
+    def shutdown(self):
+        """One idempotent teardown path for Disconnect and window/app close
+        alike: stop scans and the watcher, cancel the transfer queue, wait
+        (bounded) for worker threads to retire, close the browsing session
+        and transport, and clear connection state. Safe to call more than
+        once; a second call is a no-op. Reset again by the next successful
+        connect() so a later disconnect runs the full sequence again."""
+        with self._shutdown_lock:
+            if self._shutdown_done:
+                return {"ok": True}
+            self._shutdown_done = True
+
         # Halt any background scan promptly: it also checks self.connected on
         # its own, but the explicit stop makes it exit immediately rather than
         # waiting for its next loop check.
         self._stop_all_scans()
+
+        # Stop the watcher and join its thread within a bounded time, instead
+        # of just setting the stop event and moving on.
+        watch_thread = self._watch_thread
         self.stop_watch()
-        try:
-            if self.sftp:
+        if watch_thread is not None:
+            watch_thread.join(3)
+            if watch_thread.is_alive():
+                debug.log("SHUTDOWN: watcher thread still running after 3s wait")
+
+        # Cancel every queued/active transfer so the worker pool drains
+        # promptly instead of grinding through retries against a session
+        # about to be closed.
+        self.queue.cancel_all()
+        self._cancel.set()
+
+        # Snapshot the worker threads under the lock, then join outside it:
+        # a retiring worker needs this same lock to remove itself from
+        # self._workers, so joining while holding it would deadlock.
+        with self._worker_lock:
+            workers_snapshot = list(self._workers)
+        deadline = time.time() + 5  # bounded total wait, not per-thread
+        still_alive = []
+        for w in workers_snapshot:
+            remaining = max(0.0, deadline - time.time())
+            w.join(remaining)
+            if w.is_alive():
+                still_alive.append(w)
+        if still_alive:
+            # No silent failure: this is not a clean shutdown if threads are
+            # still running, so say so instead of claiming otherwise.
+            msg = f"Shutdown: {len(still_alive)} transfer thread(s) did not stop in time."
+            debug.log("SHUTDOWN: worker thread(s) still running after 5s wait", str(len(still_alive)))
+            self._worker_log(msg, "warn")
+
+        # Close the browsing session and transport. Each worker already
+        # closes its own SFTP session in its own finally block once
+        # cancelled above; this closes the shared session/transport that
+        # workers open new sessions against and that the file browser uses.
+        close_errors = []
+        if self.sftp is not None:
+            try:
                 self.sftp.close()
-            if self.client:
+            except Exception as e:
+                close_errors.append(str(e))
+        if self.client is not None:
+            try:
                 self.client.close()
-        except Exception:
-            pass
+            except Exception as e:
+                close_errors.append(str(e))
+        if close_errors:
+            debug.log("SHUTDOWN: close error(s)", close_errors)
+
         self.connected = False
-        self.client = self.sftp = None
+        self.client = None
+        self.sftp = None
         self._cred_pass = ""
-        debug.log("DISCONNECTED")
+        self._pending_host_key = None
+        debug.log("SHUTDOWN complete" if not still_alive else
+                  "SHUTDOWN complete (worker thread(s) still running)")
+        return {"ok": True}
+
+    def _transfers_active(self):
+        """Single source of truth for 'a transfer batch is running', used by
+        both the window-close veto and the page's own Disconnect confirm
+        (see transfers_active()). True when the queue has waiting or active
+        items, a background scan is still walking a folder, or any worker
+        thread is alive."""
+        if self.queue.pending() > 0:
+            return True
+        if self._scan_active():
+            return True
+        with self._worker_lock:
+            return any(w.is_alive() for w in self._workers)
+
+    def transfers_active(self):
+        """JS-callable wrapper for _transfers_active(): pywebview never
+        exposes underscore-prefixed methods to the page, so this is what
+        onConn()'s Disconnect confirm actually calls."""
+        return self._transfers_active()
+
+    def confirm_quit(self):
+        """Called by the page once the user answers yes to the "transfers
+        are still running, quit anyway?" prompt raised from main()'s closing
+        veto. Marks the close as approved and re-fires the native close,
+        which this time goes through (see main()'s _on_closing)."""
+        self._quit_confirmed = True
+        if self._window is not None:
+            try:
+                self._window.destroy()
+            except Exception:
+                pass
         return {"ok": True}
 
     def ping(self):
@@ -953,6 +1145,10 @@ class Api:
             parent = os.path.dirname(path.rstrip("\\/")) or ("DRIVES" if os.name == "nt" else "/")
             if os.name == "nt" and len(path.rstrip("\\/")) <= 2:
                 parent = "DRIVES"
+            # Remembered so a later connect() knows which real folder to
+            # sweep for leftover scratch files (see _sweep_scratch_files).
+            # Never set from the DRIVES branch above, which isn't one.
+            self._local_cwd = path
             return {"ok": True, "cwd": path, "parent": parent, "entries": entries}
         except Exception as e:
             return {"ok": False, "error": friendly_error(e)}
@@ -1226,6 +1422,44 @@ class Api:
             self._deregister_scan(scan_id)
 
     # ───────────── transfers (queue + progress + resume + retry) ─────────────
+    def _connection_dead(self, sftp):
+        """True when the shared transport, or this worker's own SFTP
+        channel, is actually gone, as distinct from a single item's normal
+        error (missing file, permission denied, a bad remote path), which
+        leaves the connection perfectly fine. Used by the retry loop in
+        _worker_loop to stop a whole batch at once instead of retrying every
+        remaining item into a wall of per-file errors."""
+        try:
+            transport = self.client.get_transport() if self.client else None
+            if transport is None or not transport.is_active():
+                return True
+        except Exception:
+            return True
+        try:
+            chan = sftp.get_channel() if sftp else None
+            if chan is None or chan.closed or not chan.active:
+                return True
+        except Exception:
+            return True
+        return False
+
+    def _report_dead_connection(self):
+        """First worker to notice the connection died mid-batch logs one
+        clear console line and fails every still-WAITING queue item
+        immediately (skipping their retries), instead of letting each
+        worker's current item and every remaining item grind through three
+        retries each. Guarded so multiple workers hitting the same dead
+        transport only report this once; cleared again on the next
+        successful connect()."""
+        with self._conn_dead_lock:
+            if self._conn_dead_reported:
+                return
+            self._conn_dead_reported = True
+        self._stop_all_scans()
+        stranded = self.queue.fail_waiting("Connection lost")
+        suffix = f" ({stranded} queued item(s) failed)" if stranded else ""
+        self._worker_log(f"Connection lost — remaining transfers stopped.{suffix}", "error")
+
     def cancel(self):
         """Cancel-all, wired to the footer Cancel button: cancels every waiting
         queue item and flags every active one so each worker's byte loop stops
@@ -1520,6 +1754,14 @@ class Api:
                         last_err = str(e)
                         debug.log(f"transfer retry {attempt+1}", f"{item.name}: {e}")
                         if item.cancel_requested:
+                            break
+                        if self._connection_dead(sftp):
+                            # The session itself is gone, not just this one
+                            # file: retrying it (or any remaining item) would
+                            # only grind through the same failure. Stop the
+                            # whole batch once instead of one error per file.
+                            last_err = "Connection lost"
+                            self._report_dead_connection()
                             break
                         time.sleep(0.6)
                 if res == "cancelled" or (not ok and item.cancel_requested):
@@ -2254,17 +2496,69 @@ def _acquire_single_instance(mutex_name: str) -> bool:
     except Exception:
         return True   # fail open: never block launch over a mutex error
 
-IS_SECOND_INSTANCE = False   # set True in main() when the user chooses to run a second copy
-
-def _prompt_second_instance(app_title: str) -> bool:
-    # Native message box only: runs before pywebview/Qt exists, so no Qt dialog is available yet.
+def _focus_existing_window(title: str) -> None:
+    """Best-effort: bring an already-running instance's window to the
+    foreground when a second launch is refused. Enumerates top-level windows
+    (the mirror image of _own_window_handle: this one keeps only a window
+    NOT owned by this process), restores it if minimized, then asks Windows
+    to foreground it. SetForegroundWindow can silently no-op under Windows'
+    foreground-lock rules if this process never had focus; that is accepted
+    as-is rather than fought with input-attach hacks. Wrapped end to end so
+    any failure just means the second process exits quietly with no window."""
     try:
-        text = f"{app_title} is already running.\n\nOpen a second instance?"
-        MB_YESNO_ICONQUESTION = 0x00000024
-        result = ctypes.windll.user32.MessageBoxW(None, text, app_title, MB_YESNO_ICONQUESTION)
-        return result == 6   # IDYES
+        u = ctypes.windll.user32
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        u.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+        u.EnumWindows.restype = wintypes.BOOL
+        u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        u.GetWindowThreadProcessId.restype = wintypes.DWORD
+        u.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        u.GetWindowTextLengthW.restype = ctypes.c_int
+        u.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        u.GetWindowTextW.restype = ctypes.c_int
+        u.IsWindowVisible.argtypes = [wintypes.HWND]
+        u.IsWindowVisible.restype = wintypes.BOOL
+        # Type the handle-taking calls too: a window handle can exceed a
+        # signed 32-bit int, and ctypes' untyped default would raise on it,
+        # silently defeating the focus. Same convention as _save_geometry.
+        u.IsIconic.argtypes = [wintypes.HWND]
+        u.IsIconic.restype = wintypes.BOOL
+        u.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        u.ShowWindow.restype = wintypes.BOOL
+        u.SetForegroundWindow.argtypes = [wintypes.HWND]
+        u.SetForegroundWindow.restype = wintypes.BOOL
+
+        own_pid = os.getpid()
+        found = {"hwnd": None}
+
+        def _callback(hwnd, lparam):
+            if not u.IsWindowVisible(hwnd):
+                return True
+            pid = wintypes.DWORD()
+            u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == own_pid:
+                return True   # this process, not the already-running one
+            length = u.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            u.GetWindowTextW(hwnd, buf, length + 1)
+            if buf.value != title:
+                return True
+            found["hwnd"] = hwnd
+            return False   # stop enumerating, we found it
+
+        proc = WNDENUMPROC(_callback)   # kept alive for the duration of the call below
+        u.EnumWindows(proc, 0)
+        hwnd = found["hwnd"]
+        if not hwnd:
+            return
+        SW_RESTORE = 9
+        if u.IsIconic(hwnd):
+            u.ShowWindow(hwnd, SW_RESTORE)
+        u.SetForegroundWindow(hwnd)
     except Exception:
-        return True   # fail open: if the box can't be shown, launch proceeds
+        pass
 
 
 def main():
@@ -2280,11 +2574,11 @@ def main():
     except Exception:
         pass
 
-    global IS_SECOND_INSTANCE
     if not _acquire_single_instance("JDE_SimpleSFTPClient_SingleInstance"):
-        if not _prompt_second_instance("Simple SFTP Client"):
-            sys.exit(0)
-        IS_SECOND_INSTANCE = True
+        # Already running: never open a second window. Best-effort bring the
+        # existing one to the front, then exit quietly either way.
+        _focus_existing_window("Simple SFTP Client")
+        sys.exit(0)
 
     if sys.platform == "win32":
         try:
@@ -2311,16 +2605,30 @@ def main():
     window.events.loaded += _wire_external_drop
 
     # Geometry save/restore locates the window by enumerating this process's
-    # own windows, so the lookup itself can't cross instances. Even so, a
-    # second instance should not adopt or overwrite the first instance's
-    # saved position. Only the first instance restores or saves geometry.
-    if not IS_SECOND_INSTANCE:
-        window.events.shown += lambda: _restore_geometry(window)
+    # own windows. With exactly one instance ever running, that window
+    # always owns the saved position, so this is always wired.
+    window.events.shown += lambda: _restore_geometry(window)
 
-        def _on_closing():
-            _save_geometry(window)
-            return True
-        window.events.closing += _on_closing
+    def _on_closing():
+        # Runs synchronously on the Qt GUI thread (pywebview's "closing"
+        # event locks and calls handlers inline). Calling evaluate_js
+        # from here directly deadlocks: the async JS call needs the GUI
+        # thread's event loop to complete, and that thread is this one,
+        # blocked waiting on it. So when a batch is running and the user
+        # hasn't confirmed yet, veto the close and hand the "ask the
+        # page" step to a background thread instead of doing it inline;
+        # that thread's evaluate_js call completes normally once this
+        # handler returns and the GUI thread's event loop is free again.
+        # The page answers via confirm_quit(), which sets
+        # _quit_confirmed and calls window.destroy() to re-fire this
+        # same event, now allowed through.
+        if api._transfers_active() and not api._quit_confirmed:
+            threading.Thread(target=lambda: api._emit("quit-confirm", {}), daemon=True).start()
+            return False
+        api.shutdown()
+        _save_geometry(window)
+        return True
+    window.events.closing += _on_closing
 
     try:
         webview.start(gui="qt", icon=resource_path("simple_sftp_client.png"))
