@@ -262,6 +262,56 @@ def test_cancelled_host_key_prompt_does_not_cache_password(api, monkeypatch):
     assert api._cred_identity is None
 
 
+def test_save_session_write_failure_rolls_back_keyring_write(api, monkeypatch):
+    # A password was written to the keychain for this call, but the session
+    # file itself failed to save: the write must be rolled back so no
+    # orphaned credential is left behind for a session that doesn't exist.
+    set_calls = []
+    deleted = []
+    monkeypatch.setattr(keyring, "set_password",
+                        lambda service, key, pw: set_calls.append((service, key, pw)))
+    monkeypatch.setattr(keyring, "delete_password",
+                        lambda service, key: deleted.append((service, key)))
+    monkeypatch.setattr(app.Api, "_save_sessions", lambda self, sessions: False)
+
+    api._cred_pass = "hunter2"
+    api._cred_identity = ("example.com", 22, "alice", "password")
+    result = api.save_session(base_session())
+
+    assert result["ok"] is False
+    assert "error" in result
+    assert set_calls == [("SimpleSFTPClient", "example.com|alice", "hunter2")]
+    assert deleted == [("SimpleSFTPClient", "example.com|alice")]
+
+
+def test_save_session_write_failure_without_password_does_not_touch_keyring(api, monkeypatch):
+    deleted = []
+    monkeypatch.setattr(keyring, "delete_password",
+                        lambda service, key: deleted.append((service, key)))
+    monkeypatch.setattr(app.Api, "_save_sessions", lambda self, sessions: False)
+
+    api._cred_pass = ""
+    result = api.save_session(base_session(remember=False, auth="key"))
+
+    assert result["ok"] is False
+    assert deleted == []
+
+
+def test_delete_session_write_failure_does_not_touch_keyring(api, monkeypatch):
+    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump({"sessions": [base_session()]}, f)
+
+    deleted = []
+    monkeypatch.setattr(keyring, "delete_password",
+                        lambda service, key: deleted.append((service, key)))
+    monkeypatch.setattr(app.Api, "_save_sessions", lambda self, sessions: False)
+
+    result = api.delete_session("test-session")
+
+    assert result["ok"] is False
+    assert deleted == []
+
+
 def test_successful_password_login_stamps_identity(api, monkeypatch):
     class FakeSftp:
         def normalize(self, path):
