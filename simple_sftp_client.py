@@ -801,6 +801,14 @@ class Api:
         self._scan_lock = threading.Lock()
         self._scans = {}   # scan_id -> {"stop": threading.Event, "found": int}
         self._scan_next_id = 1
+        # Background compare/sync jobs (compare/sync_plan): a separate
+        # registry from _scans, on its own lock, so the "Comparing… N"
+        # progress channel never leaks into the download-scan "Scanning…
+        # N found" label or vice versa. See _start_compare for the entry
+        # shape.
+        self._compare_lock = threading.Lock()
+        self._compares = {}
+        self._compare_next_id = 1
         # One idempotent teardown path (see shutdown()): guards Disconnect,
         # window close, and a plain process exit from ever running the close
         # sequence twice. Cleared again on the next successful connect() so a
@@ -1291,6 +1299,13 @@ class Api:
         # waiting for its next loop check.
         self._stop_all_scans()
 
+        # Same for any background compare/sync job, and drop every stashed
+        # sync token: a plan computed against a connection that's gone is no
+        # longer safe to hand to start_sync().
+        self._stop_all_compares()
+        with self._compare_lock:
+            self._compares.clear()
+
         # Stop the watcher; stop_watch joins its thread within a bounded time
         # and logs if it does not retire, rather than just setting the event.
         self.stop_watch()
@@ -1556,38 +1571,40 @@ class Api:
             break
 
     def _iter_local(self, lp, rp, is_dir):
-        """Stream (local_path, remote_path, size) one file at a time from a
-        local file or folder, without creating any directories. A single file
-        yields one tuple; a folder is walked depth-first, one subfolder's
-        listing in memory at a time rather than the whole tree."""
+        """Stream (local_path, remote_path, size, mtime) one file at a time
+        from a local file or folder, without creating any directories. A
+        single file yields one tuple; a folder is walked depth-first, one
+        subfolder's listing in memory at a time rather than the whole tree."""
         if not is_dir:
             try:
-                size = os.path.getsize(lp)
+                st = os.stat(lp)
+                size, mtime = st.st_size, int(st.st_mtime)
             except OSError:
-                size = 0
-            yield (lp, rp, size)
+                size, mtime = 0, 0
+            yield (lp, rp, size, mtime)
             return
         try:
-            entries = sorted(os.scandir(lp), key=lambda e: e.name)
+            with os.scandir(lp) as it:
+                for entry in it:
+                    if is_temp_part(entry.name):
+                        continue
+                    rchild = posixpath.join(rp, entry.name)
+                    try:
+                        child_is_dir = entry.is_dir(follow_symlinks=False)
+                    except OSError:
+                        child_is_dir = False
+                    if child_is_dir:
+                        yield from self._iter_local(entry.path, rchild, True)
+                    else:
+                        try:
+                            st = entry.stat(follow_symlinks=False)
+                            size, mtime = st.st_size, int(st.st_mtime)
+                        except OSError:
+                            size, mtime = 0, 0
+                        yield (entry.path, rchild, size, mtime)
         except OSError as e:
             self._worker_log(f"could not list {lp}: {e}", "error")
             return
-        for entry in entries:
-            if is_temp_part(entry.name):
-                continue
-            rchild = posixpath.join(rp, entry.name)
-            try:
-                child_is_dir = entry.is_dir(follow_symlinks=False)
-            except OSError:
-                child_is_dir = False
-            if child_is_dir:
-                yield from self._iter_local(entry.path, rchild, True)
-            else:
-                try:
-                    size = entry.stat(follow_symlinks=False).st_size
-                except OSError:
-                    size = 0
-                yield (entry.path, rchild, size)
 
     def _iter_remote(self, sftp, rp, lp, is_dir, root):
         """Same as _iter_local but over an sftp session for a remote file or
@@ -1596,28 +1613,40 @@ class Api:
         self.sftp, which stays reserved for the file browser). root is the
         local folder the user selected for this download; it stays fixed
         across the whole recursive walk so every level, however deep, is
-        checked against the same boundary rather than its immediate parent."""
+        checked against the same boundary rather than its immediate parent.
+
+        listdir_iter() pipelines read-ahead READDIR requests on the sftp
+        session, so starting a second listdir_iter() on the same session
+        (recursing into a subfolder) before the current one is fully drained
+        hangs the session. So files are yielded the instant they are seen,
+        but subfolders are only buffered as (rchild, lchild) name pairs here
+        and recursed into after this level's loop finishes. That buffer holds
+        only subfolder names, not the whole level, so the giant-flat-directory
+        case (no subfolders) stays effectively unbuffered."""
         if not is_dir:
-            yield (lp, rp, self._rsize(sftp, rp))
+            size, mtime = self._rstat(sftp, rp)
+            yield (lp, rp, size, mtime)
             return
+        subdirs = []
         try:
-            attrs = sftp.listdir_attr(rp)
+            for a in sftp.listdir_iter(rp):
+                if is_temp_part(a.filename):
+                    continue
+                rchild = posixpath.join(rp, a.filename)
+                try:
+                    lchild = safe_local_child(lp, a.filename, root)
+                except ValueError as e:
+                    self._worker_log(f"skipped unsafe remote name {a.filename!r}: {e}", "error")
+                    continue
+                if stat.S_ISDIR(a.st_mode):
+                    subdirs.append((rchild, lchild))
+                else:
+                    yield (lchild, rchild, a.st_size, int(a.st_mtime or 0))
         except Exception as e:
             self._worker_log(f"could not list {rp}: {friendly_error(e)}", "error")
             return
-        for a in sorted(attrs, key=lambda a: a.filename):
-            if is_temp_part(a.filename):
-                continue
-            rchild = posixpath.join(rp, a.filename)
-            try:
-                lchild = safe_local_child(lp, a.filename, root)
-            except ValueError as e:
-                self._worker_log(f"skipped unsafe remote name {a.filename!r}: {e}", "error")
-                continue
-            if stat.S_ISDIR(a.st_mode):
-                yield from self._iter_remote(sftp, rchild, lchild, True, root)
-            else:
-                yield (lchild, rchild, a.st_size)
+        for rchild, lchild in subdirs:
+            yield from self._iter_remote(sftp, rchild, lchild, True, root)
 
     def _scan_and_queue(self, roots, direction, on_conflict, scan_id, stop_event, local_root=None):
         """Runs entirely on its own daemon thread, never the pywebview bridge
@@ -1731,6 +1760,7 @@ class Api:
                 return
             self._conn_dead_reported = True
         self._stop_all_scans()
+        self._stop_all_compares()
         stranded = self.queue.fail_waiting("Connection lost")
         suffix = f" ({stranded} queued item(s) failed)" if stranded else ""
         self._worker_log(f"Connection lost — remaining transfers stopped.{suffix}", "error")
@@ -1743,6 +1773,7 @@ class Api:
         self._cancel is still set for the legacy path (sync/watch/external-drop),
         which is not on the per-item flag."""
         self._stop_all_scans()
+        self._stop_all_compares()
         self.queue.cancel_all()
         self._cancel.set()
         return {"ok": True}
@@ -1758,6 +1789,25 @@ class Api:
         active_ids = [it["id"] for it in items if it["state"] == "active"]
         with self._progress_lock:
             progress = {str(k): v for k, v in self._progress_by_id.items()}
+        # Deliver at most one finished compare/sync payload per poll, so the
+        # page never has to reconcile two at once. One-shot for a plain
+        # compare (deregistered right after delivery); a sync job stays
+        # registered on success so its stashed transfer list survives for
+        # start_sync(), and is dropped otherwise since there is nothing left
+        # to keep.
+        compare_done = None
+        deregister_id = None
+        with self._compare_lock:
+            for cid, entry in self._compares.items():
+                if entry["done"] and not entry["delivered"]:
+                    entry["delivered"] = True
+                    compare_done = {"id": cid, "kind": entry["kind"], "ok": entry["ok"],
+                                     "error": entry["error"], "result": entry["result"]}
+                    if entry["kind"] == "compare" or not entry["ok"]:
+                        deregister_id = cid
+                    break
+        if deregister_id is not None:
+            self._deregister_compare(deregister_id)
         return {
             "items": items,
             "pending": pending,
@@ -1771,6 +1821,12 @@ class Api:
             # aged out of items/pending above.
             "scanning": self._scan_active(),
             "scan_found": self._scan_found_total(),
+            # A background compare/sync job walks the tree the same way, on
+            # its own separate registry so its progress and the scan
+            # progress above never collide.
+            "comparing": self._compare_active(),
+            "compare_found": self._compare_found_total(),
+            "compare_done": compare_done,
             "counts": self.queue.counts(),
         }
 
@@ -1862,18 +1918,20 @@ class Api:
         return {"ok": True, "scanning": True}
 
     def _enqueue_files(self, files, direction, on_conflict):
-        """Append (local_path, remote_path, size) triples to the queue as
-        per-file items and wake the worker pool. Returns the count enqueued.
-        Shared by pane transfers (enqueue) and external drops (upload_paths).
-        Sizes are carried from enumeration (real local size for uploads, real
-        remote size for downloads), never re-stat here.
+        """Append (local_path, remote_path, size, mtime) tuples to the queue
+        as per-file items and wake the worker pool. Returns the count
+        enqueued. Shared by pane transfers (enqueue) and external drops
+        (upload_paths). Sizes are carried from enumeration (real local size
+        for uploads, real remote size for downloads), never re-stat here.
+        mtime is carried for future use (Phase 3's timestamp preservation)
+        and ignored here.
 
         Also decides the worker-pool size for this batch (worker_target) and
         raises the pool's target under _worker_lock: only ever up, never torn
         down under a still-draining pool, so a mid-batch top-up never shrinks
         workers already running."""
         sizes = []
-        for lp, rp, size in files:
+        for lp, rp, size, _mtime in files:
             name = os.path.basename(lp)
             sizes.append(size)
             queue_size = size if size and size > 0 else 0
@@ -2382,6 +2440,16 @@ class Api:
         except Exception:
             return -1
 
+    def _rstat(self, sftp, rp):
+        """Same as _rsize but also returns the remote modification time, for
+        callers (the streaming scanner) that need both. -1 size / 0 mtime on
+        failure, matching _rsize's existing fallback."""
+        try:
+            a = sftp.stat(rp)
+            return a.st_size, int(a.st_mtime or 0)
+        except Exception:
+            return -1, 0
+
     def _walk_local(self, lp, rp):
         out = []
         for root, _dirs, fnames in os.walk(lp):
@@ -2428,66 +2496,332 @@ class Api:
         return out
 
     # ───────────── compare / sync plan / download-changed ─────────────
-    def _scan_pair(self, local_dir, remote_dir):
-        """Lists both sides of a folder pair into name -> (size, mtime) maps.
-        Shared by compare() and sync_plan() so the two never drift apart."""
-        loc = {}
-        for n in os.listdir(local_dir):
-            if is_temp_part(n):
-                continue
-            full = os.path.join(local_dir, n)
-            if os.path.isfile(full):
-                st = os.stat(full)
-                loc[n] = (st.st_size, int(st.st_mtime))
-        rem = {}
-        for a in self.sftp.listdir_attr(remote_dir):
-            if is_temp_part(a.filename):
-                continue
-            if not stat.S_ISDIR(a.st_mode):
-                rem[a.filename] = (a.st_size, int(a.st_mtime or 0))
-        return loc, rem
+    def _compute_pair_maps(self, sftp, local_dir, remote_dir, on_progress=None, stop_event=None):
+        """Builds rel -> (size, mtime, local_path, remote_path) maps for both
+        sides of a folder pair, by streaming the same _iter_local/_iter_remote
+        enumerators the background scanner uses, so compare/sync descend the
+        whole tree instead of one directory level. rel is a posix path
+        relative to remote_dir, shared between both maps so a file at any
+        depth lines up on both sides. on_progress, if given, is called with a
+        count of files seen since the last call (not a running total), so the
+        caller can accumulate it the same way the scan progress counter does.
+        Returns (None, None) if stop_event fires before either walk finishes,
+        the signal a caller uses to tell a cancelled compare/sync apart from
+        a genuinely empty one."""
+        local_map = {}
+        remote_map = {}
+        seen_since_report = 0
+
+        def bump():
+            nonlocal seen_since_report
+            seen_since_report += 1
+            if on_progress and seen_since_report >= 200:
+                on_progress(seen_since_report)
+                seen_since_report = 0
+
+        for lp, rp, size, mtime in self._iter_local(local_dir, remote_dir, True):
+            if stop_event is not None and stop_event.is_set():
+                return None, None
+            rel = posixpath.relpath(rp, remote_dir)
+            local_map[rel] = (size, mtime, lp, rp)
+            bump()
+        for lp, rp, size, mtime in self._iter_remote(sftp, remote_dir, local_dir, True, local_dir):
+            if stop_event is not None and stop_event.is_set():
+                return None, None
+            rel = posixpath.relpath(rp, remote_dir)
+            remote_map[rel] = (size, mtime, lp, rp)
+            bump()
+        if on_progress and seen_since_report:
+            on_progress(seen_since_report)
+        return local_map, remote_map
 
     @staticmethod
-    def _classify(name, loc, rem):
-        if name in loc and name not in rem:
+    def _classify(rel, local_map, remote_map):
+        """Same-size-only equality (today's rule; Phase 3 adds mtime to it).
+        local_map/remote_map are rel -> (size, mtime, ...) as built by
+        _compute_pair_maps."""
+        if rel in local_map and rel not in remote_map:
             return "local_only"
-        if name in rem and name not in loc:
+        if rel in remote_map and rel not in local_map:
             return "remote_only"
-        if loc[name][0] == rem[name][0]:
+        if local_map[rel][0] == remote_map[rel][0]:
             return "same"
-        return "newer_local" if loc[name][1] >= rem[name][1] else "newer_remote"
+        return "newer_local" if local_map[rel][1] >= remote_map[rel][1] else "newer_remote"
 
-    @_browsing
+    def _compute_compare(self, sftp, local_dir, remote_dir, on_progress=None, stop_event=None):
+        """Pure recursive compare core: no threading, no bridge concerns, so
+        it can be called directly from tests or from the background thread
+        _run_compare drives. Returns {"files": {rel: status}, "folders":
+        {rel: "has_changes"}} (folders holds every ancestor of a changed
+        file, so a deep change is visible without opening every level), or
+        None if stop_event fired before the walk finished."""
+        local_map, remote_map = self._compute_pair_maps(
+            sftp, local_dir, remote_dir, on_progress=on_progress, stop_event=stop_event)
+        if local_map is None:
+            return None
+        files = {rel: self._classify(rel, local_map, remote_map)
+                 for rel in set(local_map) | set(remote_map)}
+        folders = {}
+        for rel, status in files.items():
+            if status == "same":
+                continue
+            parent = posixpath.dirname(rel)
+            while parent not in ("", "."):
+                folders[parent] = "has_changes"
+                parent = posixpath.dirname(parent)
+        return {"files": files, "folders": folders}
+
+    def _compute_sync(self, sftp, local_dir, remote_dir, direction, changed_only=True,
+                       on_progress=None, stop_event=None):
+        """Pure recursive sync-plan core (see _compute_compare). Returns
+        (plan, transfers): plan is the list the UI shows (name is the rel
+        path, so a nested file's plan entry still reads as its full relative
+        name); transfers is the resolved (local_path, remote_path, size)
+        list actually handed to the queue, built from the same maps so it
+        never has to re-derive a path from a name that came back from the
+        page. Returns (None, None) if stop_event fired before the walk
+        finished."""
+        local_map, remote_map = self._compute_pair_maps(
+            sftp, local_dir, remote_dir, on_progress=on_progress, stop_event=stop_event)
+        if local_map is None:
+            return None, None
+        wanted = ("local_only", "newer_local") if direction == "upload" else ("remote_only", "newer_remote")
+        plan = []
+        transfers = []
+        for rel in set(local_map) | set(remote_map):
+            status = self._classify(rel, local_map, remote_map)
+            if status not in wanted and (changed_only or status == "same"):
+                continue
+            lentry = local_map.get(rel)
+            rentry = remote_map.get(rel)
+            local = {"size": lentry[0], "mtime": lentry[1]} if lentry else None
+            remote = {"size": rentry[0], "mtime": rentry[1]} if rentry else None
+            plan.append({"name": rel, "status": status, "local": local, "remote": remote})
+            # The transfer's source side must actually exist to send anything;
+            # changed_only=False can otherwise list a status that makes no
+            # sense for this direction (e.g. a remote_only file on an
+            # upload), which nothing can transfer.
+            source = lentry if direction == "upload" else rentry
+            if source is not None:
+                transfers.append((source[2], source[3], source[0]))
+        return plan, transfers
+
+    # ───────────── compare / sync background jobs (own thread, own session) ─────────────
+    def _start_compare(self, kind):
+        """Start tracking a new background compare/sync job, mirroring
+        _register_scan: its own stop Event and found count, keyed by its own
+        id, so a stop from an earlier job can never reach a later one. Kept
+        on a separate registry from _scans so the download-scan "Scanning…
+        N found" label and the compare/sync "Comparing… N" label never
+        leak into each other."""
+        with self._compare_lock:
+            cid = self._compare_next_id
+            self._compare_next_id += 1
+            self._compares[cid] = {
+                "stop": threading.Event(), "found": 0, "kind": kind, "direction": None,
+                "done": False, "ok": False, "error": None, "result": None,
+                "transfers": None, "delivered": False,
+            }
+            return cid, self._compares[cid]["stop"]
+
+    def _deregister_compare(self, cid):
+        with self._compare_lock:
+            self._compares.pop(cid, None)
+
+    def _stop_all_compares(self):
+        """Signal every currently-running compare/sync job to stop walking.
+        Used by Cancel, a dead connection, and disconnect, same as
+        _stop_all_scans."""
+        with self._compare_lock:
+            for c in self._compares.values():
+                c["stop"].set()
+
+    def _compare_active(self):
+        with self._compare_lock:
+            return any(not c["done"] for c in self._compares.values())
+
+    def _bump_compare_found(self, cid, n):
+        with self._compare_lock:
+            entry = self._compares.get(cid)
+            if entry is not None:
+                entry["found"] += n
+
+    def _compare_found_total(self):
+        """Sum of found-so-far across every still-running compare/sync job,
+        for poll_queue()."""
+        with self._compare_lock:
+            return sum(c["found"] for c in self._compares.values() if not c["done"])
+
+    def _run_compare(self, cid, local_dir, remote_dir, stop_event, direction=None, changed_only=True):
+        """Runs a compare or a sync-plan computation entirely on its own
+        daemon thread, never the pywebview bridge thread, over its own sftp
+        session (self.sftp stays reserved for the file browser). kind is
+        read off the registered entry: "compare" stores the recursive
+        files/folders result; "sync" stores a plan summary and stashes the
+        full transfer list on the entry for start_sync() to stream later.
+        Always marks the entry done and closes its session, and never lets
+        an unexpected exception fail silently."""
+        with self._compare_lock:
+            entry = self._compares.get(cid)
+        kind = entry["kind"] if entry else "compare"
+
+        def _finish(ok, error=None, result=None, transfers=None):
+            with self._compare_lock:
+                e = self._compares.get(cid)
+                if e is not None:
+                    e["ok"] = ok
+                    e["error"] = error
+                    e["result"] = result
+                    e["transfers"] = transfers
+                    e["done"] = True
+
+        sftp = None
+        try:
+            try:
+                sftp = self.client.open_sftp()
+            except Exception as e:
+                reason = friendly_error(e)
+                self._worker_log(f"compare: could not open a transfer session: {reason}", "error")
+                _finish(False, error=reason)
+                return
+            on_progress = lambda n: self._bump_compare_found(cid, n)  # noqa: E731
+            if kind == "sync":
+                plan, transfers = self._compute_sync(
+                    sftp, local_dir, remote_dir, direction, changed_only,
+                    on_progress=on_progress, stop_event=stop_event)
+                if plan is None:
+                    _finish(False, error="Cancelled.")
+                    return
+                with self._compare_lock:
+                    e = self._compares.get(cid)
+                    if e is not None:
+                        e["direction"] = direction
+                total_bytes = sum(t[2] for t in transfers if t[2] and t[2] > 0)
+                result = {"count": len(plan), "total_bytes": total_bytes,
+                          "sample": plan[:200], "more": max(0, len(plan) - 200), "token": cid}
+                _finish(True, result=result, transfers=transfers)
+            else:
+                data = self._compute_compare(
+                    sftp, local_dir, remote_dir, on_progress=on_progress, stop_event=stop_event)
+                if data is None:
+                    _finish(False, error="Cancelled.")
+                    return
+                data["root_local"] = local_dir
+                data["root_remote"] = remote_dir
+                _finish(True, result=data)
+        except Exception as e:
+            reason = friendly_error(e)
+            self._worker_log(f"compare failed: {reason}", "error")
+            debug.log("COMPARE failed", traceback.format_exc())
+            _finish(False, error=reason)
+        finally:
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+
     def compare(self, local_dir, remote_dir):
+        """Starts a recursive compare on its own daemon thread and returns
+        immediately; the result arrives via poll_queue()'s compare_done key.
+        Deliberately not @_browsing: it must not hold the shared browsing
+        session lock, since it walks over its own sftp session and can take
+        a long time on a big tree."""
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
-        try:
-            loc, rem = self._scan_pair(local_dir, remote_dir)
-            out = {n: self._classify(n, loc, rem) for n in set(loc) | set(rem)}
-            return {"ok": True, "result": out}
-        except Exception as e:
-            return {"ok": False, "error": friendly_error(e)}
+        if self._compare_active():
+            return {"ok": False, "error": "A compare or sync is already running."}
+        cid, stop_event = self._start_compare("compare")
+        t = threading.Thread(target=self._run_compare, args=(cid, local_dir, remote_dir, stop_event),
+                              daemon=True)
+        t.start()
+        return {"ok": True, "comparing": True}
 
-    @_browsing
     def sync_plan(self, local_dir, remote_dir, direction, changed_only=True):
-        """Computes what a sync would transfer, without transferring anything.
-        The UI shows this plan and, on confirm, enqueues it onto the normal
-        transfer queue (see enqueue())."""
+        """Starts a recursive sync-plan computation on its own daemon thread
+        and returns immediately; the summary (and a token for start_sync())
+        arrives via poll_queue()'s compare_done key. Not @_browsing, for the
+        same reason as compare()."""
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
+        if self._legacy_active.is_set():
+            return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}
+        if self._compare_active():
+            return {"ok": False, "error": "A compare or sync is already running."}
+        cid, stop_event = self._start_compare("sync")
+        t = threading.Thread(target=self._run_compare,
+                              args=(cid, local_dir, remote_dir, stop_event, direction, changed_only),
+                              daemon=True)
+        t.start()
+        return {"ok": True, "comparing": True}
+
+    def _stream_sync_transfers(self, transfers, direction, on_conflict, scan_id, stop_event, token):
+        """Streams an already-resolved sync-plan transfer list onto the
+        normal transfer queue in backpressured batches, reusing the same
+        scan registry (and so the same "Scanning… N" / drain UI and
+        backpressure) as a folder scan, since there is nothing left to walk.
+        Always deregisters both the scan and the sync job it came from."""
+        found = 0
+        batch = []
         try:
-            loc, rem = self._scan_pair(local_dir, remote_dir)
-            wanted = ("local_only", "newer_local") if direction == "upload" else ("remote_only", "newer_remote")
-            plan = []
-            for name in set(loc) | set(rem):
-                status = self._classify(name, loc, rem)
-                if status in wanted or (not changed_only and status != "same"):
-                    local = {"size": loc[name][0], "mtime": loc[name][1]} if name in loc else None
-                    remote = {"size": rem[name][0], "mtime": rem[name][1]} if name in rem else None
-                    plan.append({"name": name, "status": status, "local": local, "remote": remote})
-            return {"ok": True, "plan": plan}
+            def flush():
+                nonlocal batch, found
+                if not batch:
+                    return
+                self._scan_wait_for_room(stop_event)
+                if stop_event.is_set() or not self.connected:
+                    return
+                found += len(batch)
+                self._bump_scan_found(scan_id, len(batch))
+                self._enqueue_files(batch, direction, on_conflict)
+                batch = []
+
+            batch_cap = min(64, SCAN_QUEUE_HIGH_WATER) or 64
+            for lp, rp, size in transfers:
+                if stop_event.is_set() or not self.connected:
+                    break
+                batch.append((lp, rp, size, 0))
+                if len(batch) >= batch_cap:
+                    flush()
+                    if stop_event.is_set() or not self.connected:
+                        break
+            flush()
+            if stop_event.is_set():
+                self._worker_log(f"Sync stopped ({found} file(s) queued before stopping)", "warn")
+            elif not self.connected:
+                self._worker_log(f"Sync halted: disconnected ({found} file(s) queued)", "warn")
+            elif found:
+                self._worker_log(f"Sync: {found} file(s) queued")
+            else:
+                self._worker_log("Sync: nothing to transfer")
         except Exception as e:
-            return {"ok": False, "error": friendly_error(e)}
+            self._worker_log(f"sync failed: {friendly_error(e)}", "error")
+            debug.log("SYNC failed", traceback.format_exc())
+        finally:
+            self._deregister_scan(scan_id)
+            self._deregister_compare(token)
+
+    def start_sync(self, token, on_conflict="overwrite"):
+        """Streams the transfer list a prior sync_plan() computed (identified
+        by token, the id poll_queue() handed back in the summary) onto the
+        transfer queue. The transfer list itself never round-trips through
+        the page: it stays server-side from computation to enqueue."""
+        if not self.connected:
+            return {"ok": False, "error": "Not connected."}
+        if self._legacy_active.is_set():
+            return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}
+        with self._compare_lock:
+            entry = self._compares.get(token)
+            transfers = entry["transfers"] if entry else None
+            direction = entry["direction"] if entry else None
+        if entry is None or transfers is None:
+            return {"ok": False, "error": "That sync plan is no longer available. Run Sync again."}
+        scan_id, stop_event = self._register_scan()
+        t = threading.Thread(target=self._stream_sync_transfers,
+                              args=(transfers, direction, on_conflict, scan_id, stop_event, token),
+                              daemon=True)
+        t.start()
+        return {"ok": True, "scanning": True}
 
     @_browsing
     def calc_remote_size(self, remote_dir, name):

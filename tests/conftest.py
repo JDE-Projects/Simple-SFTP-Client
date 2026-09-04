@@ -318,6 +318,24 @@ def wait_until():
 
 
 @pytest.fixture
+def wait_for_compare():
+    """Return a helper that polls poll_queue() until a compare_done payload
+    of the given kind ("compare" or "sync", or None for either) arrives, and
+    returns that payload. Used by tests driving compare()/sync_plan()'s
+    async contract instead of a pure _compute_compare/_compute_sync call."""
+    def _wait(api, kind=None, timeout=15):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            status = api.poll_queue()
+            done = status.get("compare_done")
+            if done is not None and (kind is None or done["kind"] == kind):
+                return done
+            time.sleep(0.02)
+        pytest.fail(f"compare_done ({kind or 'any'}) not delivered within {timeout}s")
+    return _wait
+
+
+@pytest.fixture
 def state_of():
     """Return a helper that finds a queue item's snapshot entry by id."""
     def _state(api, item_id):
