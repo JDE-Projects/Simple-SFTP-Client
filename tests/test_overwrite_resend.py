@@ -9,6 +9,7 @@ new tail. That splice used to pass silently and even matched the source size.
 
 Runs against the in-process SFTP server from conftest.py.
 """
+import os
 import time
 
 from transfer_queue import COMPLETED, SKIPPED
@@ -78,8 +79,12 @@ def test_skip_leaves_same_size_file_untouched(sftp_env, wait_for_drain, state_of
     assert state_of(api, first_id)["state"] == COMPLETED
     assert (server_root / name).read_bytes() == original
 
-    # same size on both sides + skip -> the changed local file is not sent
+    # same size and same modification time as what the first upload stamped
+    # on the remote, but different bytes: skip matches on size and time, not
+    # content, so it still leaves the remote copy alone.
+    stamped_mtime = src.stat().st_mtime
     src.write_bytes(changed)
+    os.utime(src, (stamped_mtime, stamped_mtime))
     second_id = _upload_one(api, local_dir, name, "skip")
     wait_for_drain(api)
 
@@ -117,3 +122,39 @@ def test_overwrite_rewrites_larger_remote_over_smaller_local(sftp_env, wait_for_
 
     assert state_of(api, item_id)["state"] == COMPLETED
     assert dst.read_bytes() == remote_bytes
+
+
+def test_skip_reruns_folder_download_skipping_matching_files(sftp_env, wait_for_drain):
+    """A folder download that is re-run with on_conflict="skip" leaves an
+    already-matching local file alone (same size and modification time) and
+    re-sends a file whose remote copy has since changed size."""
+    api, server_root, local_dir = sftp_env
+    (server_root / "top").mkdir()
+    (server_root / "top" / "same.bin").write_bytes(b"S" * 4096)
+    (server_root / "top" / "changed.bin").write_bytes(b"C" * 4096)
+
+    result = api.enqueue([{"name": "top", "is_dir": True}], "download",
+                          str(local_dir), "/", "overwrite")
+    assert result["ok"] is True
+    wait_for_drain(api)
+
+    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    assert states["same.bin"] == COMPLETED
+    assert states["changed.bin"] == COMPLETED
+
+    # same.bin is left untouched on both sides; changed.bin's remote copy
+    # shrinks, so a partial/older-looking local copy has something real to
+    # catch up on
+    (server_root / "top" / "changed.bin").write_bytes(b"c" * 10)
+
+    before = len(api.queue.snapshot())
+    result = api.enqueue([{"name": "top", "is_dir": True}], "download",
+                          str(local_dir), "/", "skip")
+    assert result["ok"] is True
+    wait_for_drain(api)
+
+    new_states = {e["name"]: e["state"] for e in api.queue.snapshot()[before:]}
+    assert new_states["same.bin"] == SKIPPED
+    assert new_states["changed.bin"] == COMPLETED
+    assert (local_dir / "top" / "same.bin").read_bytes() == b"S" * 4096
+    assert (local_dir / "top" / "changed.bin").read_bytes() == b"c" * 10
