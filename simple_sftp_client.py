@@ -2281,17 +2281,25 @@ class Api:
                 return self._cancel.is_set()
         if progress_key is None:
             progress_key = name
-        # size-aware: skip identical when asked, otherwise resend the whole file
+        # size- and time-aware: skip identical when asked, otherwise resend
+        # the whole file
         if direction == "upload":
-            src_size = os.path.getsize(lp)
-            dst_size = self._rsize(sftp, rp)
+            src_stat = os.stat(lp)
+            src_size, src_mtime = src_stat.st_size, int(src_stat.st_mtime)
+            dst_size, dst_mtime = self._rstat(sftp, rp)
         else:
-            src_size = self._rsize(sftp, rp)
-            dst_size = os.path.getsize(lp) if os.path.exists(lp) else -1
-        if dst_size == src_size and src_size >= 0 and on_conflict == "skip":
-            # user chose skip and the other side is the same size -> leave it.
-            # overwrite deliberately falls through and resends, even on equal
-            # size, since size alone does not prove the contents match.
+            src_size, src_mtime = self._rstat(sftp, rp)
+            if os.path.exists(lp):
+                dst_stat = os.stat(lp)
+                dst_size, dst_mtime = dst_stat.st_size, int(dst_stat.st_mtime)
+            else:
+                dst_size, dst_mtime = -1, 0
+        if (on_conflict == "skip" and src_size >= 0 and dst_size == src_size
+                and abs(dst_mtime - src_mtime) <= MTIME_TOL):
+            # user chose skip and the other side matches on size and
+            # modification time (within tolerance) -> leave it. overwrite
+            # deliberately falls through and resends, even when size and
+            # time match, since neither alone proves the contents match.
             self._progress(name, idx, total, src_size, src_size, 0, progress_key)
             return "skip"
         # Always rewrite from the start. A smaller destination is not proof of

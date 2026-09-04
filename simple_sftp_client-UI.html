@@ -332,7 +332,7 @@
   <p id="cfText" style="font-size:12.5px;line-height:1.5;color:var(--text);white-space:pre-line"></p>
   <div class="modal-actions"><button id="cfCancel" class="btn-ghost">Cancel</button><button id="cfOk" class="btn-danger">OK</button></div></div></div>
 
-<div id="diffModal" class="modal"><div class="card"><h3>Overwrite existing files?</h3>
+<div id="diffModal" class="modal"><div class="card"><h3>Some items already exist at the destination</h3>
   <p id="dfText" style="font-size:12.5px;line-height:1.5;color:var(--text)"></p>
   <div style="max-height:40vh;overflow:auto;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:14px">
     <table><thead><tr><th>Name</th><th>Local</th><th>Remote</th><th>Newer</th></tr></thead><tbody id="dfBody"></tbody></table>
@@ -899,7 +899,7 @@ async function startTransfer(direction,forceIdx){
   const collide=jobs.filter(j=>destNames.has(j.name));
   let policy="overwrite";
   if(collide.length){ const srcSide=direction==="upload"?"local":"remote"; const choice=await confirmDiff(collide,srcSide,destSide);
-    if(choice===null)return; if(choice==="skip"){ jobs=jobs.filter(j=>!destNames.has(j.name)); if(!jobs.length){toast("Nothing to transfer (all skipped)");return;} } }
+    if(choice===null)return; policy=choice; }
   $("statusText").textContent="";
   const r=await API.enqueue(jobs,direction,state.local.cwd,state.remote.cwd,policy);
   if(!r.ok){ toast(r.error||"Could not queue the transfer",true); return; }
@@ -912,11 +912,12 @@ async function externalUpload(paths){
   const base=p=>p.replace(/[\\/]+$/,"").split(/[\\/]/).pop();
   const names=paths.map(base); const destNames=new Set(state.remote.entries.map(e=>e.name));
   const collide=names.filter(n=>destNames.has(n));
-  if(collide.length){ const choice=await confirm3("Overwrite?", collide.length+" item(s) already exist in the destination. Overwrite them, or skip existing?","Overwrite","Skip existing");
+  let policy="overwrite";
+  if(collide.length){ const choice=await confirm3("Overwrite existing files?", collide.length+" item(s) here already exist at the destination. Skip existing sends only files that are new or changed (by size and time), anywhere inside this selection; Overwrite re-sends every file.","Overwrite","Skip existing");
     if(choice===null)return;
-    if(choice==="skip"){ paths=paths.filter((p,i)=>!destNames.has(names[i])); if(!paths.length){ clog("Nothing to upload (all skipped)"); return; } } }
+    policy=choice; }
   clog(`Uploading ${paths.length} dropped item(s) to ${state.remote.cwd}`);
-  const r=await API.upload_paths(paths, state.remote.cwd, "overwrite");
+  const r=await API.upload_paths(paths, state.remote.cwd, policy);
   if(!r.ok){ clog(r.error||"Upload failed","error"); return; }
   startQueuePoll();
 }
@@ -1068,7 +1069,7 @@ function confirmDiff(collide,srcSide,destSide){
     return `<tr><td class="name">${esc(j.name)}</td><td class="size">${locCell}</td><td class="size">${remCell}</td><td>${newer}</td></tr>`;
   }).join("");
   $("dfBody").innerHTML=rows;
-  $("dfText").textContent=collide.length+" item(s) already exist in the destination. Review the details below, then choose Overwrite or Skip existing.";
+  $("dfText").textContent=collide.length+" item(s) here already exist at the destination. Skip existing sends only files that are new or changed (by size and time), anywhere inside this selection; Overwrite re-sends every file. The table below shows only the top-level items.";
   return new Promise(res=>{
     $("diffModal").classList.add("show");
     const done=v=>{$("diffModal").classList.remove("show");res(v);};
