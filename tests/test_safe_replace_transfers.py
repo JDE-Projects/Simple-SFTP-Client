@@ -235,7 +235,7 @@ def test_compare_hides_temp_part_files_on_both_sides(sftp_env):
     (local_dir / ".same.bin.deadbeef.sxtpart").write_bytes(b"scratch")
     (server_root / ".other.bin.cafebabe.sxtpart").write_bytes(b"scratch")
 
-    result = api.compare(str(local_dir), "/")
-    assert result["ok"] is True
-    assert not any(is_temp_part(n) for n in result["result"])
-    assert result["result"]["same.bin"] == "same"
+    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    assert data is not None
+    assert not any(is_temp_part(n) for n in data["files"])
+    assert data["files"]["same.bin"] == "same"

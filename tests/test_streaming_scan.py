@@ -15,11 +15,12 @@ from transfer_queue import COMPLETED
 
 class _FakeAttr:
     """Stand-in for paramiko.SFTPAttributes: just the fields _iter_remote
-    reads (filename, st_mode, st_size)."""
-    def __init__(self, filename, is_dir=False, size=0):
+    reads (filename, st_mode, st_size, st_mtime)."""
+    def __init__(self, filename, is_dir=False, size=0, mtime=0):
         self.filename = filename
         self.st_mode = stat.S_IFDIR if is_dir else stat.S_IFREG
         self.st_size = size
+        self.st_mtime = mtime
 
 
 class _FakeSftp:
@@ -181,14 +182,25 @@ def test_iter_local_yields_every_file_in_a_nested_tree_in_any_order(tmp_path):
     (root / "mid" / "deep" / "d.bin").write_bytes(b"d" * 40)
     # in-progress transfer scratch file must stay hidden
     (root / "e.bin.sxtpart").write_bytes(b"e" * 50)
+    # distinct, known mtimes so the 4th field can be asserted exactly, not
+    # just type-checked
+    stamps = {
+        root / "a.bin": 1_700_000_001,
+        root / "b.bin": 1_700_000_002,
+        root / "mid" / "c.bin": 1_700_000_003,
+        root / "mid" / "deep" / "d.bin": 1_700_000_004,
+    }
+    for path, ts in stamps.items():
+        os.utime(path, (ts, ts))
 
     results = set(api._iter_local(str(root), "/top", True))
 
     assert results == {
-        (str(root / "a.bin"), "/top/a.bin", 10),
-        (str(root / "b.bin"), "/top/b.bin", 20),
-        (str(root / "mid" / "c.bin"), "/top/mid/c.bin", 30),
-        (str(root / "mid" / "deep" / "d.bin"), "/top/mid/deep/d.bin", 40),
+        (str(root / "a.bin"), "/top/a.bin", 10, stamps[root / "a.bin"]),
+        (str(root / "b.bin"), "/top/b.bin", 20, stamps[root / "b.bin"]),
+        (str(root / "mid" / "c.bin"), "/top/mid/c.bin", 30, stamps[root / "mid" / "c.bin"]),
+        (str(root / "mid" / "deep" / "d.bin"), "/top/mid/deep/d.bin", 40,
+         stamps[root / "mid" / "deep" / "d.bin"]),
     }
 
 
@@ -209,26 +221,26 @@ def test_iter_remote_yields_every_file_in_a_nested_tree_in_any_order(tmp_path):
     root = str(tmp_path)
     sftp = _FakeSftp({
         "/top": [
-            _FakeAttr("a.bin", size=10),
-            _FakeAttr("b.bin", size=20),
+            _FakeAttr("a.bin", size=10, mtime=1_700_000_001),
+            _FakeAttr("b.bin", size=20, mtime=1_700_000_002),
             _FakeAttr("mid", is_dir=True),
         ],
         "/top/mid": [
-            _FakeAttr("c.bin", size=30),
+            _FakeAttr("c.bin", size=30, mtime=1_700_000_003),
             _FakeAttr("deep", is_dir=True),
         ],
         "/top/mid/deep": [
-            _FakeAttr("d.bin", size=40),
+            _FakeAttr("d.bin", size=40, mtime=1_700_000_004),
         ],
     })
 
     results = set(api._iter_remote(sftp, "/top", str(tmp_path / "top"), True, root))
 
     assert results == {
-        (str(tmp_path / "top" / "a.bin"), "/top/a.bin", 10),
-        (str(tmp_path / "top" / "b.bin"), "/top/b.bin", 20),
-        (str(tmp_path / "top" / "mid" / "c.bin"), "/top/mid/c.bin", 30),
-        (str(tmp_path / "top" / "mid" / "deep" / "d.bin"), "/top/mid/deep/d.bin", 40),
+        (str(tmp_path / "top" / "a.bin"), "/top/a.bin", 10, 1_700_000_001),
+        (str(tmp_path / "top" / "b.bin"), "/top/b.bin", 20, 1_700_000_002),
+        (str(tmp_path / "top" / "mid" / "c.bin"), "/top/mid/c.bin", 30, 1_700_000_003),
+        (str(tmp_path / "top" / "mid" / "deep" / "d.bin"), "/top/mid/deep/d.bin", 40, 1_700_000_004),
     }
 
 
@@ -237,7 +249,7 @@ def test_iter_remote_skips_temp_parts_and_confines_hostile_names(tmp_path):
     root = str(tmp_path)
     sftp = _FakeSftp({
         "/top": [
-            _FakeAttr("good.bin", size=5),
+            _FakeAttr("good.bin", size=5, mtime=1_700_000_005),
             _FakeAttr("upload.bin.sxtpart", size=5),
             _FakeAttr("../escape.bin", size=5),
         ],
@@ -245,7 +257,7 @@ def test_iter_remote_skips_temp_parts_and_confines_hostile_names(tmp_path):
 
     results = list(api._iter_remote(sftp, "/top", str(tmp_path / "top"), True, root))
 
-    assert results == [(str(tmp_path / "top" / "good.bin"), "/top/good.bin", 5)]
+    assert results == [(str(tmp_path / "top" / "good.bin"), "/top/good.bin", 5, 1_700_000_005)]
     with api._console_lock:
         messages = [line["msg"] for line in api._console_buffer]
     assert any("unsafe remote name" in m for m in messages)

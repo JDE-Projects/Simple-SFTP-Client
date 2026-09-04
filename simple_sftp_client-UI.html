@@ -112,6 +112,7 @@
   /* compare colours */
   tr.c-newer_local td.name{color:var(--green);} tr.c-newer_remote td.name{color:var(--amber);}
   tr.c-local_only td.name,tr.c-remote_only td.name{color:var(--blue);}
+  tr.c-has_changes td.name{color:var(--blue);}
   .pane.dragover{outline:2px dashed var(--accent);outline-offset:-4px;}
 
   /* queue: the footer bar always stays one row tall; the full list opens
@@ -368,7 +369,13 @@ function updatePauseBtn(){ const b=$("pauseBtn"); b.disabled=!(queuePending>0); 
 let authMode="password", rememberPw=false;
 const state={ local:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],anchor:null},
               remote:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],anchor:null} };
+// {rootLocal, rootRemote, files:{rel:status}, folders:{rel:"has_changes"}} or
+// null. rel keys are posix paths relative to the folder Compare was run
+// against, so coloring stays anchored to that folder as the user browses
+// around; renderPane() only applies it to a pane whose cwd is inside the
+// matching root.
 let compareMap=null;
+let pendingSyncResolve=null;   // resolves when queueTick sees a compare_done of kind "sync"
 const jumpBuf={local:"",remote:""}, jumpTimer={local:null,remote:null};
 
 /* console activity log (replaces the old transient toasts) */
@@ -507,7 +514,32 @@ async function queueTick(){
     const counts=p.counts||{};
     // up to two files can be active at once; roll them up into the footer.
     const activeProgress=(p.active_ids||[]).map(id=>lastProgressById[String(id)]).filter(Boolean);
-    if(p.scanning){
+    if(p.compare_done){
+      const d=p.compare_done;
+      if(d.kind==="sync"){
+        if(pendingSyncResolve){ const res=pendingSyncResolve; pendingSyncResolve=null; res(d); }
+      } else if(d.kind==="compare"){
+        if(d.ok) applyCompareResult(d.result); else toast(d.error||"Compare failed",true);
+      }
+    }
+    if(p.comparing && !p.scanning){
+      // A compare/sync computation is walking the tree. A compare and a live
+      // transfer queue don't run at once in practice, but this mirrors the
+      // scanning branch below defensively: qName says so, while qMeta still
+      // surfaces any transfer progress already moving.
+      $("qName").textContent=`Comparing… ${p.compare_found||0} found`;
+      if(activeProgress.length===1){
+        const pr=activeProgress[0];
+        $("qFill").style.width=pr.pct+"%";
+        $("qMeta").textContent=`${pr.index+1}/${pr.total}  ${pr.pct}%  ${pr.speed||""}${pr.eta?"  ETA "+pr.eta+"s":""}`;
+      } else if(activeProgress.length>=2){
+        const avgPct=Math.round(activeProgress.reduce((sum,pr)=>sum+pr.pct,0)/activeProgress.length);
+        $("qFill").style.width=avgPct+"%";
+        $("qMeta").textContent=`${activeProgress.length} transfers active`;
+      } else {
+        $("qFill").style.width="0%"; $("qMeta").textContent="";
+      }
+    } else if(p.scanning){
       // A background scan is still finding/queuing files. Say so in qName so
       // it's never mistaken for the queue being idle or finished, but still
       // surface live transfer progress in qMeta when work is already moving.
@@ -552,12 +584,23 @@ async function queueTick(){
     const footerRetry=$("qRetryFailedFooterBtn");
     // A scan queues files as it goes, so pending can briefly read 0 between
     // batches; only treat the queue as finished once the scan itself is done.
-    if(!p.scanning && p.pending===0){
+    // A running compare/sync computation must also keep the timer alive even
+    // while the queue is otherwise idle.
+    if(!p.scanning && !p.comparing && p.pending===0){
       stopQueuePoll();
+      // A Sync whose plan was dropped before delivery (a disconnect during
+      // the walk clears it) would otherwise leave onSync awaiting forever;
+      // fail it loudly here so the click never hangs silently.
+      if(pendingSyncResolve){ const res=pendingSyncResolve; pendingSyncResolve=null;
+        res({ok:false,error:"Sync stopped before it could start."}); }
       $("qName").textContent="Idle";
       const completed=counts.completed||0, failed=counts.failed||0, cancelled=counts.cancelled||0, skipped=counts.skipped||0;
-      $("qMeta").textContent=`Done: ${completed} completed`+(failed?`, ${failed} failed`:"")+
-        (cancelled?`, ${cancelled} cancelled`:"")+(skipped?`, ${skipped} skipped`:"");
+      const doneTotal=completed+failed+cancelled+skipped;
+      // A bare Compare runs through this same poll but queues nothing, so it
+      // ends with doneTotal 0: leave the transfer summary blank instead of a
+      // misleading "Done: 0 completed".
+      $("qMeta").textContent=doneTotal?(`Done: ${completed} completed`+(failed?`, ${failed} failed`:"")+
+        (cancelled?`, ${cancelled} cancelled`:"")+(skipped?`, ${skipped} skipped`:"")):"";
       // The finished line above already reports failures; drop the live
       // summary so the same count doesn't show twice in the footer.
       $("qSummary").textContent="";
@@ -671,6 +714,7 @@ async function onConn(){
     await API.disconnect(); connected=false; setConn("","Disconnected"); clog("Disconnected");
     $("connBtn").textContent="Connect"; $("connBtn").className="btn-primary";
     ["upBtn","downBtn","compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=true);
+    compareMap=null; renderPane("local");
     state.remote.entries=[]; renderPane("remote"); $("crumbsRemote").textContent="(not connected)"; $("latency").textContent=""; return; }
   setConn("busy","Connecting..."); $("connBtn").disabled=true;
   clog("Connecting to "+($("user").value.trim())+"@"+($("host").value.trim())+"...");
@@ -740,9 +784,9 @@ function pollHealth(){ clearTimeout(pollTimer); if(!connected)return;
 
 /* ───── listing/nav ───── */
 async function loadLocal(path){ const r=await API.list_local(path); if(!r.ok){toast(r.error,true);return;}
-  pushHist("local",r.cwd); state.local.cwd=r.cwd; state.local.entries=r.entries; state.local.sel=new Set(); state.local.anchor=null; compareMap=null; renderPane("local"); setCrumbs("local",r.cwd); }
+  pushHist("local",r.cwd); state.local.cwd=r.cwd; state.local.entries=r.entries; state.local.sel=new Set(); state.local.anchor=null; renderPane("local"); setCrumbs("local",r.cwd); }
 async function loadRemote(path){ if(!connected)return false; const r=await API.list_remote(path); if(!r.ok){toast(r.error,true);return false;}
-  pushHist("remote",r.cwd); state.remote.cwd=r.cwd; state.remote.entries=r.entries; state.remote.sel=new Set(); state.remote.anchor=null; compareMap=null; renderPane("remote"); setCrumbs("remote",r.cwd); return true; }
+  pushHist("remote",r.cwd); state.remote.cwd=r.cwd; state.remote.entries=r.entries; state.remote.sel=new Set(); state.remote.anchor=null; renderPane("remote"); setCrumbs("remote",r.cwd); return true; }
 function refresh(side){ side==="local"?reloadLocal():loadRemote(state.remote.cwd); }
 function reloadLocal(){ API.list_local(state.local.cwd).then(r=>{if(r.ok){state.local.entries=r.entries;renderPane("local");}}); }
 function pushHist(side,cwd){ const s=state[side]; if(s.hist[s.hi]===cwd)return; s.hist=s.hist.slice(0,s.hi+1); s.hist.push(cwd); s.hi=s.hist.length-1; }
@@ -759,6 +803,24 @@ async function nav(side,act){ const s=state[side];
 function gotoHist(side){ const s=state[side]; const cwd=s.hist[s.hi];
   (side==="local"?API.list_local(cwd):API.list_remote(cwd)).then(r=>{ if(r.ok){ s.cwd=r.cwd; s.entries=r.entries; s.sel=new Set(); s.anchor=null; renderPane(side); setCrumbs(side,r.cwd);} }); }
 
+// The rel key a pane entry would have in compareMap.files/folders: only
+// defined when this pane's cwd is inside the matching compare root, so a
+// pane that has navigated elsewhere simply gets no coloring instead of a
+// wrong one. root/cwd are both native paths for "local", posix for "remote".
+function compareRel(side,e){
+  if(!compareMap)return null;
+  const root=side==="local"?compareMap.rootLocal:compareMap.rootRemote;
+  if(root==null)return null;
+  const cwd=state[side].cwd;
+  const sep=side==="local"?/[\\/]+/g:/\/+/g;
+  const norm=p=>(p||"").replace(sep,"/").replace(/\/+$/,"");
+  const nRoot=norm(root), nCwd=norm(cwd);
+  let relDir;
+  if(nCwd===nRoot) relDir="";
+  else if(nCwd.startsWith(nRoot+"/")) relDir=nCwd.slice(nRoot.length+1);
+  else return null;   // this pane is not inside the compared tree
+  return relDir?relDir+"/"+e.name:e.name;
+}
 function renderPane(side){
   const s=state[side]; const tb=$("tbody"+cap(side)); tb.innerHTML="";
   let entries=s.entries.slice();
@@ -769,7 +831,13 @@ function renderPane(side){
   const frag=document.createDocumentFragment();
   entries.forEach((e,pos)=>{ const idx=s.view[pos]; const tr=document.createElement("tr");
     if(s.sel.has(idx))tr.className="sel";
-    if(compareMap&&!e.is_dir&&compareMap[side]&&compareMap[side][e.name])tr.classList.add("c-"+compareMap[side][e.name]);
+    if(compareMap){
+      const rel=compareRel(side,e);
+      if(rel!=null){
+        if(!e.is_dir&&compareMap.files&&compareMap.files[rel]) tr.classList.add("c-"+compareMap.files[rel]);
+        else if(e.is_dir&&compareMap.folders&&compareMap.folders[rel]) tr.classList.add("c-"+compareMap.folders[rel]);
+      }
+    }
     tr.draggable=!e.is_dir||true;
     tr.innerHTML=`<td class="name"><span class="ic ${e.is_dir?'':'file'}">${e.is_dir?'\u25B8':'\u00B7'}</span>${esc(e.name)}</td>`+
       `<td class="size">${e.is_dir?'':hsize(e.size)}</td><td class="mod">${fmod(e.mtime)}</td>`;
@@ -859,20 +927,30 @@ function setupDrop(side){ const pane=$("pane"+cap(side));
     if(from&&from!==side){ startTransfer(from==="local"?"upload":"download"); } }); }
 
 /* ───── compare / sync / watch ───── */
-async function onCompare(){ if(!connected)return; const r=await API.compare(state.local.cwd,state.remote.cwd);
-  if(!r.ok){toast(r.error,true);return;} const res=r.result; compareMap={local:{},remote:{}};
-  for(const n in res){ compareMap.local[n]=res[n]; compareMap.remote[n]=res[n]; } renderPane("local"); renderPane("remote");
-  const c={};["same","newer_local","newer_remote","local_only","remote_only"].forEach(k=>c[k]=0); for(const n in res)c[res[n]]++;
+async function onCompare(){ if(!connected)return;
+  const r=await API.compare(state.local.cwd,state.remote.cwd);
+  if(!r.ok){toast(r.error,true);return;}
+  $("statusText").textContent="Comparing…";
+  startQueuePoll(); }
+function applyCompareResult(result){
+  compareMap={rootLocal:result.root_local,rootRemote:result.root_remote,
+    files:result.files||{},folders:result.folders||{}};
+  renderPane("local"); renderPane("remote");
+  const c={};["same","newer_local","newer_remote","local_only","remote_only"].forEach(k=>c[k]=0);
+  for(const n in compareMap.files)c[compareMap.files[n]]++;
   $("statusText").innerHTML=`Compared: <b style="color:var(--green)">${c.newer_local} newer here</b>, <b style="color:var(--amber)">${c.newer_remote} newer remote</b>, ${c.local_only} local-only, ${c.remote_only} remote-only`; }
 async function onSync(direction){ if(!connected||busy)return;
   if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
   const r=await API.sync_plan(state.local.cwd,state.remote.cwd,direction,true);
   if(!r.ok){toast(r.error||"Sync failed",true);return;}
-  const plan=r.plan;
-  if(!plan.length){toast("Already in sync, nothing to transfer");return;}
-  if(!await confirmSyncPlan(plan))return;
-  const jobs=plan.map(p=>({name:p.name,is_dir:false}));
-  const rr=await API.enqueue(jobs,direction,state.local.cwd,state.remote.cwd,"overwrite");
+  $("statusText").textContent="Comparing…";
+  startQueuePoll();
+  const done=await new Promise(res=>{pendingSyncResolve=res;});
+  if(!done.ok){toast(done.error||"Sync failed",true);return;}
+  const result=done.result;
+  if(!result.count){toast("Already in sync, nothing to transfer");return;}
+  if(!await confirmSyncPlan(result))return;
+  const rr=await API.start_sync(result.token,"overwrite");
   if(!rr.ok){toast(rr.error||"Could not queue the transfer",true);return;}
   startQueuePoll(); }
 let watching=false;
@@ -999,8 +1077,9 @@ function confirmDiff(collide,srcSide,destSide){
     $("dfOk").onclick=()=>done("overwrite");
   });
 }
-function confirmSyncPlan(plan){
-  const rows=plan.map(p=>{
+function confirmSyncPlan(result){
+  const sample=result.sample||[];
+  let rows=sample.map(p=>{
     const locCell=p.local?`${hsize(p.local.size)}<br>${fmod(p.local.mtime)}`:"—";
     const remCell=p.remote?`${hsize(p.remote.size)}<br>${fmod(p.remote.mtime)}`:"—";
     let newer="—";
@@ -1011,9 +1090,10 @@ function confirmSyncPlan(plan){
     }
     return `<tr><td class="name">${esc(p.name)}</td><td class="size">${locCell}</td><td class="size">${remCell}</td><td>${newer}</td></tr>`;
   }).join("");
+  if(result.more>0) rows+=`<tr><td class="name" colspan="4">and ${result.more} more file(s)…</td></tr>`;
   $("syBody").innerHTML=rows;
-  $("syText").textContent=plan.length+" file(s) will transfer:";
-  $("syOk").textContent=`Transfer (${plan.length} file${plan.length===1?"":"s"})`;
+  $("syText").textContent=`${result.count} file(s) will transfer (${hsize(result.total_bytes)}):`;
+  $("syOk").textContent=`Transfer (${result.count} file${result.count===1?"":"s"})`;
   return new Promise(res=>{
     $("syncModal").classList.add("show");
     const done=v=>{$("syncModal").classList.remove("show");res(v);};
