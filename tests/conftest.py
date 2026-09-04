@@ -303,6 +303,21 @@ def wait_for_queue_count():
 
 
 @pytest.fixture
+def wait_until():
+    """Return a helper that polls a condition callable until it is truthy, or
+    fails loudly after timeout. Used by the watcher tests, whose uploads land a
+    couple of poll intervals after a change."""
+    def _wait(cond, timeout=5, interval=0.02):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if cond():
+                return
+            time.sleep(interval)
+        pytest.fail(f"condition not met within {timeout}s")
+    return _wait
+
+
+@pytest.fixture
 def state_of():
     """Return a helper that finds a queue item's snapshot entry by id."""
     def _state(api, item_id):
