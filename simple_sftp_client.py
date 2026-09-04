@@ -609,6 +609,7 @@ class Api:
         self._watch_lock = threading.Lock()
         self._watch_stop = None
         self._watch_thread = None
+        self._watch_interval = 2.0  # seconds between watch polls
         # transfer queue: a pool of workers drains it, each over its own SFTP
         # session (never self.sftp, that stays reserved for the file browser).
         # Pool size is WORKER_COUNT (2) by default, up to WORKER_COUNT_MAX (5)
@@ -2430,7 +2431,7 @@ class Api:
             last = snapshot()
             seen_changed = {}
             while not stop.is_set():
-                time.sleep(2)
+                time.sleep(self._watch_interval)
                 if stop.is_set():
                     break
                 cur = snapshot()
