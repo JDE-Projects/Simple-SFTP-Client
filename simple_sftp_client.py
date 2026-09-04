@@ -111,6 +111,34 @@ def safe_local_child(parent: str, name: str, root: str) -> str:
     return candidate
 
 
+TEMP_PART_SUFFIX = ".sxtpart"
+
+
+def is_temp_part(name: str) -> bool:
+    """True for one of this app's own in-progress transfer scratch files, so
+    every place that lists a folder can hide a file still being written
+    (download or upload) instead of showing it, picking it up as a transfer
+    target, or letting it skew a Compare/Sync."""
+    return bool(name) and name.endswith(TEMP_PART_SUFFIX)
+
+
+def local_temp_path(final_path: str) -> str:
+    """Build the local scratch path a download streams into before the
+    atomic swap: a sibling of final_path in the same folder (so the final
+    os.replace stays on one drive), named so is_temp_part recognizes it."""
+    folder = os.path.dirname(final_path)
+    name = os.path.basename(final_path)
+    return os.path.join(folder, f".{name}.{os.urandom(4).hex()}{TEMP_PART_SUFFIX}")
+
+
+def remote_temp_path(final_path: str) -> str:
+    """Same idea as local_temp_path, but posix-style for the remote side."""
+    folder = posixpath.dirname(final_path)
+    name = posixpath.basename(final_path)
+    temp_name = f".{name}.{os.urandom(4).hex()}{TEMP_PART_SUFFIX}"
+    return posixpath.join(folder, temp_name) if folder else temp_name
+
+
 SESSIONS_FILE = os.path.join(exe_dir(), "servers.json")
 KNOWN_HOSTS_FILE = os.path.join(exe_dir(), "known_hosts")
 
@@ -913,6 +941,8 @@ class Api:
         try:
             entries = []
             for name in os.listdir(path):
+                if is_temp_part(name):
+                    continue
                 full = os.path.join(path, name)
                 try:
                     st = os.stat(full)
@@ -934,6 +964,8 @@ class Api:
             path = self.sftp.normalize(path or ".")
             entries = []
             for a in self.sftp.listdir_attr(path):
+                if is_temp_part(a.filename):
+                    continue
                 entries.append({"name": a.filename, "is_dir": stat.S_ISDIR(a.st_mode),
                                 "size": a.st_size, "mtime": int(a.st_mtime or 0)})
             parent = posixpath.dirname(path.rstrip("/")) or "/"
@@ -983,6 +1015,9 @@ class Api:
         return {"ok": True, "errors": errs}
 
     def _rremove(self, path):
+        # Deleting a folder removes everything in it, including any leftover
+        # scratch file from an interrupted transfer: skipping those would
+        # leave the directory non-empty and make the final rmdir fail.
         for a in self.sftp.listdir_attr(path):
             child = posixpath.join(path, a.filename)
             self._rremove(child) if stat.S_ISDIR(a.st_mode) else self.sftp.remove(child)
@@ -1067,6 +1102,8 @@ class Api:
             self._worker_log(f"could not list {lp}: {e}", "error")
             return
         for entry in entries:
+            if is_temp_part(entry.name):
+                continue
             rchild = posixpath.join(rp, entry.name)
             try:
                 child_is_dir = entry.is_dir(follow_symlinks=False)
@@ -1098,6 +1135,8 @@ class Api:
             self._worker_log(f"could not list {rp}: {friendly_error(e)}", "error")
             return
         for a in sorted(attrs, key=lambda a: a.filename):
+            if is_temp_part(a.filename):
+                continue
             rchild = posixpath.join(rp, a.filename)
             try:
                 lchild = safe_local_child(lp, a.filename, root)
@@ -1701,51 +1740,108 @@ class Api:
         return "ok" if finished else "cancelled"
 
     def _put_resume(self, sftp, lp, rp, offset, cb, cancel_check):
+        # Writes into a scratch file next to the real remote destination
+        # (never rp itself), so the destination is only touched once the new
+        # copy is proven complete. On success the scratch file is confirmed
+        # to be the right size, then swapped in with posix_rename, which is
+        # atomic: a cancel, dropped connection, or exhausted retry can only
+        # ever leave the scratch file behind, never a half-written rp.
+        #
         # Check cancel_check() only once there is another chunk actually to
         # send, and only after confirming there is more file left (the read
         # came back non-empty). That way a cancel arriving in the instant
         # right after the last real chunk was already written finds nothing
         # left to abort: the next read hits EOF first and the loop exits with
         # finished=True, so a fully-sent file is never mislabeled cancelled.
+        temp = remote_temp_path(rp)
         finished = True
-        with open(lp, "rb") as src:
-            src.seek(offset)
-            with sftp.open(rp, "a" if offset else "w") as dst:
-                dst.set_pipelined(True)
-                sent = 0
-                while True:
-                    chunk = src.read(32768)
-                    if not chunk:
-                        break
-                    if cancel_check():
-                        finished = False
-                        break
-                    dst.write(chunk)
-                    sent += len(chunk)
-                    cb(sent, 0)
-        return finished
+        published = False
+        try:
+            with open(lp, "rb") as src:
+                src.seek(offset)
+                with sftp.open(temp, "w") as dst:
+                    dst.set_pipelined(True)
+                    sent = 0
+                    while True:
+                        chunk = src.read(32768)
+                        if not chunk:
+                            break
+                        if cancel_check():
+                            finished = False
+                            break
+                        dst.write(chunk)
+                        sent += len(chunk)
+                        cb(sent, 0)
+            if finished:
+                src_size = os.path.getsize(lp)
+                temp_size = sftp.stat(temp).st_size
+                if temp_size != src_size:
+                    raise IOError(
+                        f"upload incomplete: wrote {temp_size} of {src_size} bytes")
+                try:
+                    sftp.posix_rename(temp, rp)
+                except Exception as e:
+                    raise IOError(
+                        "server does not support safe atomic replace; "
+                        "file not written to protect the existing copy") from e
+                published = True
+            return finished
+        finally:
+            # Anything other than a proven, published swap leaves nothing
+            # behind: delete the scratch file (best effort) and, on an
+            # exception, let it propagate so the retry loop tries again with
+            # a brand new scratch file.
+            if not published:
+                try:
+                    sftp.remove(temp)
+                except Exception:
+                    pass
 
     def _get_resume(self, sftp, rp, lp, offset, cb, cancel_check):
+        # Same idea as _put_resume: stream into a local scratch file next to
+        # the real destination, confirm its size once the loop finishes, then
+        # publish with os.replace, which is atomic on the same drive. A
+        # cancel, dropped connection, or exhausted retry only ever leaves the
+        # scratch file behind; the real destination is never opened for
+        # writing until the new copy is proven complete.
+        #
         # Same ordering as _put_resume, for the same reason: only treat a
         # cancel as having interrupted the transfer if there was still more
         # to read when it was observed.
+        temp = local_temp_path(lp)
         finished = True
-        with sftp.open(rp, "r") as src:
-            src.prefetch()
-            src.seek(offset)
-            with open(lp, "ab" if offset else "wb") as dst:
-                got = 0
-                while True:
-                    chunk = src.read(32768)
-                    if not chunk:
-                        break
-                    if cancel_check():
-                        finished = False
-                        break
-                    dst.write(chunk)
-                    got += len(chunk)
-                    cb(got, 0)
-        return finished
+        published = False
+        try:
+            with sftp.open(rp, "r") as src:
+                src.prefetch()
+                src.seek(offset)
+                with open(temp, "wb") as dst:
+                    got = 0
+                    while True:
+                        chunk = src.read(32768)
+                        if not chunk:
+                            break
+                        if cancel_check():
+                            finished = False
+                            break
+                        dst.write(chunk)
+                        got += len(chunk)
+                        cb(got, 0)
+            if finished:
+                src_size = self._rsize(sftp, rp)
+                temp_size = os.path.getsize(temp)
+                if src_size >= 0 and temp_size != src_size:
+                    raise IOError(
+                        f"download incomplete: wrote {temp_size} of {src_size} bytes")
+                os.replace(temp, lp)
+                published = True
+            return finished
+        finally:
+            if not published:
+                try:
+                    os.remove(temp)
+                except Exception:
+                    pass
 
     def _progress(self, name, idx, total, sent, size, elapsed, progress_key=None):
         speed = (sent / elapsed) if elapsed > 0 else 0
@@ -1779,6 +1875,8 @@ class Api:
             except Exception:
                 pass
             for fn in fnames:
+                if is_temp_part(fn):
+                    continue
                 full = os.path.join(root, fn)
                 try:
                     size = os.path.getsize(full)
@@ -1798,6 +1896,8 @@ class Api:
             return out
         os.makedirs(lp, exist_ok=True)
         for a in attrs:
+            if is_temp_part(a.filename):
+                continue
             rchild = posixpath.join(rp, a.filename)
             try:
                 lchild = safe_local_child(lp, a.filename, root)
@@ -1816,12 +1916,16 @@ class Api:
         Shared by compare() and sync_plan() so the two never drift apart."""
         loc = {}
         for n in os.listdir(local_dir):
+            if is_temp_part(n):
+                continue
             full = os.path.join(local_dir, n)
             if os.path.isfile(full):
                 st = os.stat(full)
                 loc[n] = (st.st_size, int(st.st_mtime))
         rem = {}
         for a in self.sftp.listdir_attr(remote_dir):
+            if is_temp_part(a.filename):
+                continue
             if not stat.S_ISDIR(a.st_mode):
                 rem[a.filename] = (a.st_size, int(a.st_mtime or 0))
         return loc, rem
@@ -1883,6 +1987,8 @@ class Api:
             for a in attrs:
                 if self._cancel.is_set():
                     return
+                if is_temp_part(a.filename):
+                    continue
                 if stat.S_ISDIR(a.st_mode):
                     walk(posixpath.join(p, a.filename))
                 else:

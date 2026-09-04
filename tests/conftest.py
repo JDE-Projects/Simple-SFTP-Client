@@ -106,6 +106,25 @@ class FS(paramiko.SFTPServerInterface):
         except OSError as e:
             return paramiko.SFTPServer.convert_errno(e.errno)
 
+    # Set to False on a subclass to make posix_rename behave like a server
+    # without the posix-rename@openssh.com extension, for the refuse-and-keep
+    # test: the client must never fall back to a risky delete-then-rename.
+    POSIX_RENAME_SUPPORTED = True
+
+    def posix_rename(self, oldpath, newpath):
+        # Backs the posix-rename@openssh.com extension, which the client uses
+        # to publish a finished upload over its real destination. os.replace
+        # overwrites the target atomically, matching real posix-rename
+        # servers (the base SFTPServerInterface implementation just returns
+        # unsupported, which is what a server without the extension does).
+        if not self.POSIX_RENAME_SUPPORTED:
+            return paramiko.SFTP_OP_UNSUPPORTED
+        try:
+            os.replace(self._real(oldpath), self._real(newpath))
+            return paramiko.SFTP_OK
+        except OSError as e:
+            return paramiko.SFTPServer.convert_errno(e.errno)
+
     def mkdir(self, path, attr):
         try:
             os.mkdir(self._real(path))
@@ -158,16 +177,19 @@ def _serve(sock, host_key, fs_cls):
 
 
 # ───────────── fixtures ─────────────
-@pytest.fixture
-def sftp_env(tmp_path):
-    """Spin up a throwaway SFTP server rooted at tmp_path, connect an Api to
-    it, and tear everything down afterward. Yields (api, server_root, local_dir)."""
+def _start_sftp_env(tmp_path, fs_extra_attrs=None):
+    """Shared setup behind sftp_env and its variants: spin up the throwaway
+    server rooted at tmp_path, connect an Api to it, and yield (api,
+    server_root, local_dir). fs_extra_attrs overrides class attributes on the
+    per-test FS subclass, e.g. to disable posix-rename support."""
     server_root = tmp_path / "server_root"
     server_root.mkdir()
     local_dir = tmp_path / "local"
     local_dir.mkdir()
 
-    fs_cls = type("FSForTest", (FS,), {"ROOT": str(server_root)})
+    attrs = {"ROOT": str(server_root)}
+    attrs.update(fs_extra_attrs or {})
+    fs_cls = type("FSForTest", (FS,), attrs)
 
     host_key = paramiko.RSAKey.generate(2048)
     srv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -201,6 +223,20 @@ def sftp_env(tmp_path):
         except Exception:
             pass
         srv_sock.close()
+
+
+@pytest.fixture
+def sftp_env(tmp_path):
+    """Spin up a throwaway SFTP server rooted at tmp_path, connect an Api to
+    it, and tear everything down afterward. Yields (api, server_root, local_dir)."""
+    yield from _start_sftp_env(tmp_path)
+
+
+@pytest.fixture
+def sftp_env_no_posix_rename(tmp_path):
+    """Same as sftp_env, but the server reports posix-rename unsupported, the
+    way a server without the posix-rename@openssh.com extension would."""
+    yield from _start_sftp_env(tmp_path, {"POSIX_RENAME_SUPPORTED": False})
 
 
 @pytest.fixture
