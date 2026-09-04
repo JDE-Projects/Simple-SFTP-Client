@@ -159,22 +159,66 @@ def _pref_path() -> str:
 
 
 def load_prefs() -> dict:
-    """Load the full prefs dict. Tolerant of a missing or corrupt file."""
+    """Full prefs dict. Missing file: first run. Corrupt file: kept aside, logged."""
+    path = _pref_path()
     try:
-        with open(_pref_path(), "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
+        if isinstance(data, dict):
+            return data
+        raise ValueError("prefs root is not an object")
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        _preserve_corrupt(path, e)
         return {}
 
 
 def save_prefs(prefs: dict) -> bool:
+    """Write atomically. False result must surface a visible error, not silence."""
+    return _atomic_write_json(_pref_path(), prefs)
+
+
+def _atomic_write_json(path, obj, **dump_kwargs) -> bool:
+    """Write obj as JSON to path atomically: write to a temp file in the same
+    folder, fsync it, then os.replace over the real path so a reader never
+    sees a half-written file and a crash mid-write never corrupts it. False
+    result must surface a visible error, not silence."""
+    tmp = None
     try:
-        with open(_pref_path(), "w", encoding="utf-8") as f:
-            json.dump(prefs, f)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                                   prefix=".tmp_", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, **dump_kwargs)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
         return True
-    except Exception:
+    except Exception as e:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+        try:
+            debug.log(f"Could not write {os.path.basename(path)}: {e}")
+        except Exception:
+            pass
         return False
+
+
+def _preserve_corrupt(path, error) -> None:
+    """A file failed to parse: move it aside with a timestamped suffix instead
+    of silently discarding it, and log what happened. Never raises."""
+    try:
+        if os.path.exists(path):
+            aside = f"{path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+            os.replace(path, aside)
+            debug.log(f"{os.path.basename(path)} unreadable, kept as {aside}: {error}")
+        else:
+            debug.log(f"{os.path.basename(path)} unreadable: {error}")
+    except Exception:
+        pass
 
 
 # Window geometry persistence. Save and restore the ABSOLUTE window frame
@@ -320,14 +364,64 @@ def fingerprint_sha256(key):
     return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
 
 
+def _known_hosts_readable_or_raise():
+    """Paramiko silently skips lines it can't parse, so a corrupt file would
+    otherwise look empty and get treated as first contact with every host,
+    which is exactly the swapped-server case host-key pinning exists to
+    catch. Read the file ourselves line by line and raise if any non-blank,
+    non-comment line fails to parse. A missing file is clean first contact,
+    not corruption."""
+    if not os.path.exists(KNOWN_HOSTS_FILE):
+        return
+    try:
+        with open(KNOWN_HOSTS_FILE, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        raise KnownHostsUnreadable(KNOWN_HOSTS_FILE)
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        try:
+            entry = paramiko.hostkeys.HostKeyEntry.from_line(line)
+        except Exception:
+            entry = None
+        if entry is None:
+            raise KnownHostsUnreadable(KNOWN_HOSTS_FILE)
+
+
 def load_known_hosts():
+    _known_hosts_readable_or_raise()
     hk = paramiko.HostKeys()
     if os.path.exists(KNOWN_HOSTS_FILE):
+        hk.load(KNOWN_HOSTS_FILE)
+    return hk
+
+
+def _save_host_keys_atomic(hk) -> bool:
+    """Save a paramiko HostKeys object atomically: write to a temp file in
+    the same folder, then os.replace over the real known_hosts file so a
+    reader never sees a half-written file. False result must surface a
+    visible error, not silence."""
+    folder = os.path.dirname(KNOWN_HOSTS_FILE) or "."
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=folder, prefix=".tmp_", suffix=".tmp")
+        os.close(fd)
+        hk.save(tmp)
+        os.replace(tmp, KNOWN_HOSTS_FILE)
+        return True
+    except Exception as e:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
         try:
-            hk.load(KNOWN_HOSTS_FILE)
+            debug.log(f"Could not write {os.path.basename(KNOWN_HOSTS_FILE)}: {e}")
         except Exception:
             pass
-    return hk
+        return False
 
 
 class UnknownHostKey(Exception):
@@ -336,6 +430,15 @@ class UnknownHostKey(Exception):
         super().__init__("unknown host key")
         self.hostname = hostname
         self.key = key
+
+
+class KnownHostsUnreadable(Exception):
+    """The known_hosts file exists but could not be parsed. Connections are
+    refused rather than treating it as empty, since that would silently drop
+    protection against a swapped server."""
+    def __init__(self, path):
+        super().__init__(f"known_hosts file unreadable: {path}")
+        self.path = path
 
 
 class _TofuPolicy(paramiko.MissingHostKeyPolicy):
@@ -787,18 +890,16 @@ class Api:
             with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return data.get("sessions", []) if isinstance(data, dict) else []
-        except Exception:
+        except FileNotFoundError:
+            return []
+        except Exception as e:
+            _preserve_corrupt(SESSIONS_FILE, e)
             return []
 
     def _save_sessions(self, sessions):
-        try:
-            with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"_note": "Simple SFTP Client saved sessions (no passwords).",
-                           "sessions": sessions}, f, indent=2)
-            return True
-        except Exception as e:
-            debug.log("save sessions failed", str(e))
-            return False
+        return _atomic_write_json(SESSIONS_FILE,
+                                   {"_note": "Simple SFTP Client saved sessions (no passwords).",
+                                    "sessions": sessions}, indent=2)
 
     def save_session(self, s):
         sessions = self._load_sessions()
@@ -834,7 +935,20 @@ class Api:
         sessions = [x for x in sessions if x.get("name") != s["name"]]
         sessions.append(s)
         sessions.sort(key=lambda x: x.get("name", "").lower())
-        self._save_sessions(sessions)
+        saved_ok = self._save_sessions(sessions)
+        if not saved_ok:
+            if pw_saved:
+                # Don't leave a credential in the keychain for a session that
+                # was never actually saved.
+                try:
+                    import keyring
+                    keyring.delete_password(
+                        "SimpleSFTPClient",
+                        cred_key(s.get("host"), s.get("port"), s.get("username")))
+                except Exception as e:
+                    debug.log("keyring rollback failed", str(e))
+            return {"ok": False,
+                    "error": f"Could not save the session to {SESSIONS_FILE}. Nothing was changed."}
         result = {"ok": True, "sessions": sessions, "pw_saved": pw_saved}
         if pw_error:
             result["pw_error"] = pw_error
@@ -844,7 +958,12 @@ class Api:
         sessions = self._load_sessions()
         target = next((x for x in sessions if x.get("name") == name), None)
         sessions = [x for x in sessions if x.get("name") != name]
-        self._save_sessions(sessions)
+        saved_ok = self._save_sessions(sessions)
+        if not saved_ok:
+            # The session still references its keyring entry, so leave the
+            # entry alone rather than orphan it.
+            return {"ok": False,
+                    "error": f"Could not update {SESSIONS_FILE}. The session was not removed."}
         if target and target.get("remember"):
             host = target.get("host")
             port = target.get("port")
@@ -880,11 +999,9 @@ class Api:
     # ───────────── connect ─────────────
     def _open(self, host, port, username, password, key_path, passphrase):
         client = paramiko.SSHClient()
+        _known_hosts_readable_or_raise()
         if os.path.exists(KNOWN_HOSTS_FILE):
-            try:
-                client.load_host_keys(KNOWN_HOSTS_FILE)
-            except Exception:
-                pass
+            client.load_host_keys(KNOWN_HOSTS_FILE)
         # Trust on first use: unknown hosts raise UnknownHostKey (user is asked),
         # a changed key raises paramiko.BadHostKeyException (flagged, not trusted).
         client.set_missing_host_key_policy(_TofuPolicy())
@@ -1001,6 +1118,16 @@ class Api:
                     "key_type": e.key.get_name(),
                     "new_fingerprint": fingerprint_sha256(e.key),
                     "old_fingerprint": fingerprint_sha256(e.expected_key)}
+        except KnownHostsUnreadable as e:
+            self._cred_pass = ""
+            self._cred_identity = None
+            self._close_partial(new_client, new_sftp)
+            debug.log(f"known_hosts file unreadable, refusing to connect: {e}")
+            return {"ok": False,
+                    "error": f"Your saved host-key file could not be read, so the connection was "
+                             f"refused to protect against a swapped server. File: {KNOWN_HOSTS_FILE}. "
+                             "You can delete it to start fresh, which just means confirming your "
+                             "hosts again on the next connect."}
         except Exception as e:
             self._cred_pass = ""
             self._cred_identity = None
@@ -1049,10 +1176,16 @@ class Api:
         name, key = pending
         try:
             hk = load_known_hosts()
+        except KnownHostsUnreadable as e:
+            return {"ok": False,
+                    "error": f"The saved host-key file is unreadable, so it was left untouched. "
+                             f"File: {e.path}. Delete it to start fresh."}
+        try:
             if hk.lookup(name):          # replace any prior key for this host
                 del hk[name]
             hk.add(name, key.get_name(), key)
-            hk.save(KNOWN_HOSTS_FILE)
+            if not _save_host_keys_atomic(hk):
+                return {"ok": False, "error": "Could not save the host key: write failed."}
             debug.log(f"Trusted host key for {name} ({key.get_name()}).")
             return {"ok": True, "fingerprint": fingerprint_sha256(key)}
         except Exception as e:
@@ -1062,7 +1195,12 @@ class Api:
         """Return the pinned key(s) for a host so the UI can show them."""
         host = (host or "").strip()
         name = hostkey_name(host, port) if host else ""
-        sub = load_known_hosts().lookup(name) if name else None
+        try:
+            sub = load_known_hosts().lookup(name) if name else None
+        except KnownHostsUnreadable as e:
+            return {"known": False, "unreadable": True, "host": host,
+                    "error": f"The saved host-key file is unreadable, so it was left untouched. "
+                             f"File: {e.path}. Delete it to start fresh."}
         if not sub:
             return {"known": False, "host": host}
         entries = [{"key_type": kt, "fingerprint": fingerprint_sha256(k)}
@@ -1075,9 +1213,15 @@ class Api:
         name = hostkey_name(host, port) if host else ""
         try:
             hk = load_known_hosts()
+        except KnownHostsUnreadable as e:
+            return {"ok": False,
+                    "error": f"The saved host-key file is unreadable, so it was left untouched. "
+                             f"File: {e.path}. Delete it to start fresh."}
+        try:
             if name and hk.lookup(name):
                 del hk[name]
-                hk.save(KNOWN_HOSTS_FILE)
+                if not _save_host_keys_atomic(hk):
+                    return {"ok": False, "error": "Could not save the host key: write failed."}
                 debug.log(f"Forgot host key for {name}.")
             return {"ok": True}
         except Exception as e:
