@@ -58,6 +58,49 @@ def test_all_identical_nested_tree_yields_no_changes_and_no_flagged_folders(sftp
     assert data["folders"] == {}
 
 
+# ───────────── _classify: size AND mtime, with a tolerance ─────────────
+
+def test_equal_size_and_equal_mtime_is_same(sftp_env):
+    api, server_root, local_dir = sftp_env
+    mtime = 1_700_000_000
+    _put_local(local_dir, "match.txt", b"identical bytes", mtime=mtime)
+    _put_remote(api, server_root, "match.txt", b"identical bytes", mtime=mtime)
+
+    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    assert data["files"]["match.txt"] == "same"
+
+
+def test_equal_size_but_mtimes_far_apart_is_not_same(sftp_env):
+    api, server_root, local_dir = sftp_env
+    base = 1_700_000_000
+    # same size, different content, mtimes well beyond the 2s tolerance
+    _put_local(local_dir, "edited.txt", b"local edit bytes", mtime=base + 3600)
+    _put_remote(api, server_root, "edited.txt", b"remote edit bytes", mtime=base)
+
+    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    assert data["files"]["edited.txt"] == "newer_local"
+
+
+def test_equal_size_but_remote_mtime_newer_is_newer_remote(sftp_env):
+    api, server_root, local_dir = sftp_env
+    base = 1_700_000_000
+    _put_local(local_dir, "edited.txt", b"local edit bytes", mtime=base)
+    _put_remote(api, server_root, "edited.txt", b"remote edit bytes", mtime=base + 3600)
+
+    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    assert data["files"]["edited.txt"] == "newer_remote"
+
+
+def test_equal_size_and_mtimes_within_tolerance_is_same(sftp_env):
+    api, server_root, local_dir = sftp_env
+    base = 1_700_000_000
+    _put_local(local_dir, "close.txt", b"same length!", mtime=base)
+    _put_remote(api, server_root, "close.txt", b"same length!", mtime=base + 2)
+
+    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    assert data["files"]["close.txt"] == "same"
+
+
 # ───────────── async contract: compare()/sync_plan()/start_sync() over poll_queue() ─────────────
 
 def test_compare_delivers_result_via_poll_queue(sftp_env, wait_for_compare):

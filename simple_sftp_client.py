@@ -58,6 +58,12 @@ WORKER_COUNT_MAX = 5   # ceiling for a batch of many small files (channels-per-c
 # queue never grows past roughly this many items ahead of what the workers
 # can drain.
 SCAN_QUEUE_HIGH_WATER = 3000
+# Two files count as the "same" for compare/sync only when their sizes and
+# modification times both match. MTIME_TOL is the slack allowed on the time
+# match (seconds): it absorbs whole-second rounding over the wire and the
+# 2-second timestamp granularity of FAT/exFAT volumes, while staying tight
+# enough that a real edit is never mistaken for unchanged.
+MTIME_TOL = 2
 
 
 def worker_target(sizes):
@@ -1923,8 +1929,9 @@ class Api:
         enqueued. Shared by pane transfers (enqueue) and external drops
         (upload_paths). Sizes are carried from enumeration (real local size
         for uploads, real remote size for downloads), never re-stat here.
-        mtime is carried for future use (Phase 3's timestamp preservation)
-        and ignored here.
+        mtime is part of the enumeration tuple but unused here: timestamp
+        preservation re-reads the live source at publish time, not this
+        scan-time value.
 
         Also decides the worker-pool size for this batch (worker_target) and
         raises the pool's target under _worker_lock: only ever up, never torn
@@ -2360,6 +2367,7 @@ class Api:
                         "server does not support safe atomic replace; "
                         "file not written to protect the existing copy") from e
                 published = True
+                self._apply_upload_mtime(sftp, rp, lp)
             return finished
         finally:
             # Anything other than a proven, published swap leaves nothing
@@ -2403,13 +2411,14 @@ class Api:
                         got += len(chunk)
                         cb(got, 0)
             if finished:
-                src_size = self._rsize(sftp, rp)
+                src_size, src_mtime = self._rstat(sftp, rp)
                 temp_size = os.path.getsize(temp)
                 if src_size >= 0 and temp_size != src_size:
                     raise IOError(
                         f"download incomplete: wrote {temp_size} of {src_size} bytes")
                 os.replace(temp, lp)
                 published = True
+                self._apply_download_mtime(lp, src_mtime)
             return finished
         finally:
             if not published:
@@ -2449,6 +2458,35 @@ class Api:
             return a.st_size, int(a.st_mtime or 0)
         except Exception:
             return -1, 0
+
+    def _apply_download_mtime(self, lp, mtime):
+        """Stamp a freshly downloaded local file with the remote file's
+        modification time (Option B), so a later size+mtime compare reads an
+        unchanged file as 'same'. A mtime of 0 means the remote stat was
+        unavailable; leave the file's own time in that case. A failure to set
+        the time is logged, not raised: the bytes are already safely in place."""
+        if not mtime:
+            return
+        try:
+            os.utime(lp, (mtime, mtime))
+        except OSError as e:
+            self._worker_log(f"could not set modification time on {lp}: {e}; "
+                             "a later compare may show this file as changed", "warn")
+
+    def _apply_upload_mtime(self, sftp, rp, lp):
+        """Stamp an uploaded remote file with the local source's modification
+        time (Option B). If the server refuses to set the time, fall back to
+        size-only equality for this file: log it and carry on rather than
+        failing a transfer whose bytes are already safely published."""
+        try:
+            mtime = int(os.stat(lp).st_mtime)
+        except OSError:
+            return
+        try:
+            sftp.utime(rp, (mtime, mtime))
+        except Exception as e:
+            self._worker_log(f"server refused to set modification time on {rp}: "
+                             f"{friendly_error(e)}; using size-only match for this file", "warn")
 
     def _walk_local(self, lp, rp):
         out = []
@@ -2537,16 +2575,21 @@ class Api:
 
     @staticmethod
     def _classify(rel, local_map, remote_map):
-        """Same-size-only equality (today's rule; Phase 3 adds mtime to it).
-        local_map/remote_map are rel -> (size, mtime, ...) as built by
-        _compute_pair_maps."""
+        """Metadata equality, not proven byte equality: a pair is 'same' only
+        when sizes match and modification times agree within MTIME_TOL. Because
+        transfers now preserve the source mtime (Option B), a same-size edit no
+        longer hides as 'same' -- its mtime differs, so it sorts to newer_local
+        or newer_remote by time. local_map/remote_map are rel -> (size, mtime,
+        ...) as built by _compute_pair_maps."""
         if rel in local_map and rel not in remote_map:
             return "local_only"
         if rel in remote_map and rel not in local_map:
             return "remote_only"
-        if local_map[rel][0] == remote_map[rel][0]:
+        lsize, lmtime = local_map[rel][0], local_map[rel][1]
+        rsize, rmtime = remote_map[rel][0], remote_map[rel][1]
+        if lsize == rsize and abs(lmtime - rmtime) <= MTIME_TOL:
             return "same"
-        return "newer_local" if local_map[rel][1] >= remote_map[rel][1] else "newer_remote"
+        return "newer_local" if lmtime >= rmtime else "newer_remote"
 
     def _compute_compare(self, sftp, local_dir, remote_dir, on_progress=None, stop_event=None):
         """Pure recursive compare core: no threading, no bridge concerns, so

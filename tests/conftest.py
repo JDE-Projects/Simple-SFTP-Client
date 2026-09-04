@@ -139,8 +139,20 @@ class FS(paramiko.SFTPServerInterface):
         except OSError as e:
             return paramiko.SFTPServer.convert_errno(e.errno)
 
+    # Set to False on a subclass to model a server that refuses to set file
+    # times, for the mtime size-only-fallback test.
+    SET_TIME_SUPPORTED = True
+
     def chattr(self, path, attr):
-        return paramiko.SFTP_OK
+        if not self.SET_TIME_SUPPORTED:
+            return paramiko.SFTP_OP_UNSUPPORTED
+        try:
+            if getattr(attr, "st_mtime", None) is not None:
+                atime = attr.st_atime if getattr(attr, "st_atime", None) is not None else attr.st_mtime
+                os.utime(self._real(path), (atime, attr.st_mtime))
+            return paramiko.SFTP_OK
+        except OSError as e:
+            return paramiko.SFTPServer.convert_errno(e.errno)
 
     def canonicalize(self, path):
         if not path.startswith("/"):
@@ -263,6 +275,13 @@ def sftp_env_no_posix_rename(tmp_path):
     """Same as sftp_env, but the server reports posix-rename unsupported, the
     way a server without the posix-rename@openssh.com extension would."""
     yield from _start_sftp_env(tmp_path, {"POSIX_RENAME_SUPPORTED": False})
+
+
+@pytest.fixture
+def sftp_env_no_set_time(tmp_path):
+    """Same as sftp_env, but the server refuses to set file modification
+    times, the way a server without SFTP time-setting support would."""
+    yield from _start_sftp_env(tmp_path, {"SET_TIME_SUPPORTED": False})
 
 
 @pytest.fixture
