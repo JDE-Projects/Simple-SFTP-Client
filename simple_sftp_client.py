@@ -301,6 +301,19 @@ def hostkey_name(host, port):
     return host if port == 22 else "[%s]:%d" % (host, port)
 
 
+def cred_key(host, port, username):
+    """Credential Manager entry name for a saved password. Mirrors
+    hostkey_name: bare host|username on port 22, host|port|username on any
+    other port, so existing default-port entries keep working unchanged and
+    two services on the same host/user but different ports never collide."""
+    port = int(port or 22)
+    host = (host or "").strip()
+    username = (username or "").strip()
+    if port == 22:
+        return f"{host}|{username}"
+    return f"{host}|{port}|{username}"
+
+
 def fingerprint_sha256(key):
     """OpenSSH-style SHA256 fingerprint, e.g. 'SHA256:abc...' (no padding)."""
     digest = hashlib.sha256(key.asbytes()).digest()
@@ -635,6 +648,12 @@ class Api:
         self.client = None
         self.sftp = None
         self._cred_pass = ""
+        # Set only after a successful PASSWORD login: (host, port, username,
+        # "password"), all stripped. save_session may write the remembered
+        # password to Credential Manager only when the settings on screen
+        # match this exactly, so an edited-fields or wrong-server save is
+        # refused rather than misfiled.
+        self._cred_identity = None
         self._pending_host_key = None  # (hostname, offered_key) awaiting user trust
         self._lock = threading.Lock()
         # Serializes every operation on the shared browsing session (self.sftp)
@@ -788,17 +807,28 @@ class Api:
         # optional remembered password -> OS keychain. The session may only
         # claim a saved password when one was actually written, so a failed
         # write, or "remember" ticked with no password to save (key auth, or
-        # saving before connecting), both leave remember off.
+        # saving before connecting), both leave remember off. A password is
+        # only ever written when it was cached from a successful login
+        # against these exact settings (see self._cred_identity), so saving
+        # after editing a field or against the wrong server is refused
+        # rather than misfiled under the new name.
         pw_saved = False
         pw_error = None
-        if s.get("remember") and self._cred_pass:
-            try:
-                import keyring
-                keyring.set_password("SimpleSFTPClient", f"{s['host']}|{s['username']}", self._cred_pass)
-                pw_saved = True
-            except Exception as e:
-                debug.log("keyring set failed", str(e))
-                pw_error = f"Could not save the password to Windows Credential Manager: {e}"
+        proposed = (s.get("host", "").strip(), int(s.get("port") or 22),
+                    s.get("username", "").strip(), s.get("auth"))
+        if s.get("remember") and s.get("auth") == "password":
+            if self._cred_pass and self._cred_identity == proposed:
+                try:
+                    import keyring
+                    keyring.set_password("SimpleSFTPClient",
+                                          cred_key(s.get("host"), s.get("port"), s.get("username")),
+                                          self._cred_pass)
+                    pw_saved = True
+                except Exception as e:
+                    debug.log("keyring set failed", str(e))
+                    pw_error = f"Could not save the password to Windows Credential Manager: {e}"
+            else:
+                pw_error = "Password not saved. Connect successfully with these exact settings first, then save."
         if s.get("remember") and not pw_saved:
             s["remember"] = False
         sessions = [x for x in sessions if x.get("name") != s["name"]]
@@ -816,22 +846,36 @@ class Api:
         sessions = [x for x in sessions if x.get("name") != name]
         self._save_sessions(sessions)
         if target and target.get("remember"):
-            try:
-                import keyring
-                keyring.delete_password("SimpleSFTPClient", f"{target.get('host')}|{target.get('username')}")
-            except Exception as e:
-                debug.log("keyring delete failed", str(e))
+            host = target.get("host")
+            port = target.get("port")
+            username = target.get("username")
+            names = [cred_key(host, port, username)]
+            if int(port or 22) != 22:
+                names.append(f"{(host or '').strip()}|{(username or '').strip()}")
+            for name in names:
+                try:
+                    import keyring
+                    keyring.delete_password("SimpleSFTPClient", name)
+                except Exception as e:
+                    debug.log("keyring delete failed", str(e))
         return {"ok": True, "sessions": sessions}
 
-    def _remembered_password(self, host, username):
+    def _remembered_password(self, host, username, port=22):
         try:
             import keyring
-            return keyring.get_password("SimpleSFTPClient", f"{host}|{username}") or ""
+            pw = keyring.get_password("SimpleSFTPClient", cred_key(host, port, username))
+            if not pw and int(port or 22) != 22:
+                # Legacy entries were saved port-less; read them so a saved
+                # password from before port-aware keys still loads.
+                pw = keyring.get_password(
+                    "SimpleSFTPClient",
+                    f"{(host or '').strip()}|{(username or '').strip()}")
+            return pw or ""
         except Exception:
             return ""
 
-    def get_remembered(self, host, username):
-        return {"password": self._remembered_password(host, username)}
+    def get_remembered(self, host, username, port=22):
+        return {"password": self._remembered_password(host, username, port)}
 
     # ───────────── connect ─────────────
     def _open(self, host, port, username, password, key_path, passphrase):
@@ -894,7 +938,6 @@ class Api:
         password = p.get("password") or ""
         key_path = (p.get("key_path") or "").strip()
         passphrase = p.get("passphrase") or ""
-        self._cred_pass = password
         debug.log("CONNECT", {"host": host, "user": username, "auth": "key" if key_path else "password"})
         new_client = None
         new_sftp = None
@@ -909,6 +952,16 @@ class Api:
             self.connected = True
             self._shutdown_done = False
             self._conn_dead_reported = False
+            # Cache the password only now that the login has fully succeeded,
+            # and only for password auth (key auth has no password to remember).
+            # Stamp the identity it authenticated against so save_session can
+            # confirm a later save matches this exact server.
+            if key_path:
+                self._cred_pass = ""
+                self._cred_identity = None
+            else:
+                self._cred_pass = password
+                self._cred_identity = (host, int(p.get("port") or 22), username, "password")
             ti = self._transport_info()
             if ti:
                 self._vlog(f"Negotiated: cipher {ti.get('cipher','?')} · "
@@ -924,6 +977,8 @@ class Api:
             self._sweep_scratch_files()
             return {"ok": True, "home": home, "cwd": start, "transport": self._transport_info()}
         except UnknownHostKey as e:
+            self._cred_pass = ""
+            self._cred_identity = None
             self._close_partial(new_client, new_sftp)
             # Pin under the port-aware name paramiko actually checks against
             # (bracketed for non-standard ports), not e.hostname, whose format
@@ -933,6 +988,8 @@ class Api:
             return {"ok": False, "host_key_unknown": True, "host": host,
                     "key_type": e.key.get_name(), "fingerprint": fingerprint_sha256(e.key)}
         except paramiko.BadHostKeyException as e:
+            self._cred_pass = ""
+            self._cred_identity = None
             self._close_partial(new_client, new_sftp)
             # Same port-aware name as above. The changed-key path hands back a
             # bare host in e.hostname, so pinning by that would store the new
@@ -945,6 +1002,8 @@ class Api:
                     "new_fingerprint": fingerprint_sha256(e.key),
                     "old_fingerprint": fingerprint_sha256(e.expected_key)}
         except Exception as e:
+            self._cred_pass = ""
+            self._cred_identity = None
             self._close_partial(new_client, new_sftp)
             debug.log("CONNECT failed", traceback.format_exc())
             return {"ok": False, "error": friendly_error(e), "tips": error_tips(e)}
@@ -1139,6 +1198,7 @@ class Api:
         self.client = None
         self.sftp = None
         self._cred_pass = ""
+        self._cred_identity = None
         self._pending_host_key = None
         debug.log("SHUTDOWN complete" if not still_alive else
                   "SHUTDOWN complete (worker thread(s) still running)")

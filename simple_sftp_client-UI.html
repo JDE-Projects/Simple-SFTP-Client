@@ -656,7 +656,7 @@ async function onPickSession(){ const name=$("sessions").value; const x=($("sess
   $("host").value=x.host||""; $("port").value=x.port||"22"; $("user").value=x.username||""; $("startpath").value=x.start_path||"";
   if(x.auth==="key"){ document.querySelector('#authSeg button[data-v="key"]').click(); $("keypath").value=x.key_path||""; }
   else { document.querySelector('#authSeg button[data-v="password"]').click(); }
-  if(x.remember){ const r=await API.get_remembered(x.host,x.username); if(r.password){$("pass").value=r.password;} } }
+  if(x.remember){ const r=await API.get_remembered(x.host,x.username,x.port); if(r.password){$("pass").value=r.password;} } }
 
 function connParams(){ return { host:$("host").value, port:$("port").value, username:$("user").value,
   password:authMode==="password"?$("pass").value:"", key_path:authMode==="key"?$("keypath").value:"",
