@@ -29,6 +29,9 @@ import hashlib
 import ssl
 import time
 import shutil
+import subprocess
+import tempfile
+import getpass
 import threading
 import functools
 import traceback
@@ -485,6 +488,44 @@ def error_tips(e):
     return ("The connection could not be completed.\n"
             "Check the host, port, username, and credentials. Turn on the debug log (bottom-left) "
             "for more detail.")
+
+
+_PROTECT_WARNING = ("Saved, but the private key's file permissions couldn't be locked down on "
+                     "this location. Store it somewhere only you can read, such as your user "
+                     "profile's .ssh folder.")
+
+
+def _protect_private_key(path) -> str | None:
+    """Lock a private key file down to the current user only.
+
+    On Windows this disables inherited permissions and grants the current
+    user full control via icacls, so other accounts on the machine can't
+    read the file. Returns None on success, or a plain-language warning
+    string if the lockdown couldn't be applied (never raises)."""
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    if sys.platform != "win32":
+        return _PROTECT_WARNING
+    try:
+        user = os.environ.get("USERNAME") or getpass.getuser()
+        if not user:
+            return _PROTECT_WARNING
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        for cmd in (["icacls", path, "/inheritance:r"],
+                    ["icacls", path, "/grant:r", f"{user}:(F)"]):
+            res = subprocess.run(cmd, capture_output=True, shell=False,
+                                  startupinfo=startupinfo, creationflags=creationflags)
+            if res.returncode != 0:
+                debug.log("KEYGEN protect failed", res.stderr.decode(errors="replace") if res.stderr else str(res.returncode))
+                return _PROTECT_WARNING
+        return None
+    except Exception as e:
+        debug.log("KEYGEN protect failed", str(e))
+        return _PROTECT_WARNING
 
 
 def missing_fields(p):
@@ -2309,7 +2350,7 @@ class Api:
             return ""
         return res if isinstance(res, str) else res[0]
 
-    def generate_key(self, key_type, out_path, passphrase):
+    def generate_key(self, key_type, out_path, passphrase, overwrite=False):
         out_path = (out_path or "").strip().strip('"')
         if not out_path:
             return {"ok": False, "error": "Enter a save location for the key."}
@@ -2325,6 +2366,15 @@ class Api:
                 created_dir = parent
             except OSError:
                 return {"ok": False, "error": f"Couldn't create the folder {parent} \u2014 choose a location you can write to."}
+
+        pub_path = out_path + ".pub"
+        existing = [p for p in (out_path, pub_path) if os.path.exists(p)]
+        if existing and not overwrite:
+            return {"ok": False, "needs_overwrite": True, "private_path": out_path,
+                    "public_path": pub_path, "existing": existing}
+
+        tmp_priv = tmp_pub = None
+        backup_priv = backup_pub = None
         try:
             if key_type.startswith("Ed25519"):
                 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -2342,24 +2392,78 @@ class Api:
                 key.write_private_key(buf, password=passphrase or None)
                 priv = buf.getvalue().encode()
                 pub = f"ssh-rsa {key.get_base64()}".encode()
-            with open(out_path, "wb") as f:
-                f.write(priv)
-            try:
-                os.chmod(out_path, 0o600)
-            except OSError:
-                pass
             pubtext = pub.decode().strip() + " simple-sftp-client"
-            with open(out_path + ".pub", "w", encoding="utf-8") as f:
-                f.write(pubtext + "\n")
+            pub_bytes = (pubtext + "\n").encode("utf-8")
+
+            # Write both files to temp files in the same folder first, so the
+            # final publish below is an atomic rename and a crash mid-write
+            # can never leave a truncated key on disk.
+            fd, tmp_priv = tempfile.mkstemp(dir=parent, prefix=".sftpkey_priv_")
+            with os.fdopen(fd, "wb") as f:
+                f.write(priv)
+                f.flush()
+                os.fsync(f.fileno())
+            if os.path.getsize(tmp_priv) != len(priv):
+                raise OSError("The private key file didn't write completely.")
+
+            protection_warning = _protect_private_key(tmp_priv)
+
+            fd, tmp_pub = tempfile.mkstemp(dir=parent, prefix=".sftpkey_pub_")
+            with os.fdopen(fd, "wb") as f:
+                f.write(pub_bytes)
+                f.flush()
+                os.fsync(f.fileno())
+            if os.path.getsize(tmp_pub) != len(pub_bytes):
+                raise OSError("The public key file didn't write completely.")
+
+            # Back up whatever pair is already there, so a failed publish can
+            # be rolled back and the old, working pair never ends up half
+            # replaced (new private + old public, or vice versa).
+            if os.path.exists(out_path):
+                with open(out_path, "rb") as f:
+                    backup_priv = f.read()
+            if os.path.exists(pub_path):
+                with open(pub_path, "rb") as f:
+                    backup_pub = f.read()
+
+            os.replace(tmp_priv, out_path)
+            tmp_priv = None
+            try:
+                os.replace(tmp_pub, pub_path)
+                tmp_pub = None
+            except Exception:
+                # Public key publish failed after the private key was already
+                # replaced: put the old private key back so the pair stays
+                # consistent, then report the failure.
+                if backup_priv is not None:
+                    with open(out_path, "wb") as f:
+                        f.write(backup_priv)
+                else:
+                    try:
+                        os.remove(out_path)
+                    except OSError:
+                        pass
+                raise
+
             debug.log("KEYGEN", {"type": key_type, "path": out_path})
-            return {"ok": True, "public": pubtext, "private_path": out_path,
-                    "public_path": out_path + ".pub", "created_dir": created_dir}
+            result = {"ok": True, "public": pubtext, "private_path": out_path,
+                      "public_path": pub_path, "created_dir": created_dir}
+            if protection_warning:
+                result["protection_warning"] = protection_warning
+            return result
         except PermissionError:
             return {"ok": False, "error": "Couldn't write there (permission denied). Choose a folder you can write to, such as your user's .ssh folder."}
         except OSError as e:
-            return {"ok": False, "error": f"Couldn't save the key: {e.strerror or 'write failed'}. Try a different location."}
+            return {"ok": False, "error": f"Couldn't save the key: {e.strerror or str(e) or 'write failed'}. Try a different location."}
         except Exception:
             return {"ok": False, "error": "Key generation failed. Check the type and passphrase and try again."}
+        finally:
+            for t in (tmp_priv, tmp_pub):
+                if t and os.path.exists(t):
+                    try:
+                        os.remove(t)
+                    except OSError:
+                        pass
 
     @_browsing
     def install_pubkey(self, pubtext):

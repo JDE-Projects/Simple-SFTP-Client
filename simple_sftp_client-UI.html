@@ -914,12 +914,19 @@ let lastPub="";
 async function openKeygen(){ $("keygenModal").classList.add("show"); $("kgResult").style.display="none";
   if(!$("kgPath").value.trim()){ try{ $("kgPath").value=await API.default_key_path($("kgType").value); }catch(e){} } }
 async function onKeygen(){ const path=$("kgPath").value.trim(); if(!path){toast("Enter a save path",true);return;}
-  $("kgGo").disabled=true; const r=await API.generate_key($("kgType").value,path,$("kgPass").value); $("kgGo").disabled=false;
+  $("kgGo").disabled=true; let r=await API.generate_key($("kgType").value,path,$("kgPass").value); $("kgGo").disabled=false;
+  if(r.needs_overwrite){
+    const okReplace=await confirm2("Replace existing key?",
+      `This will replace an existing key pair:\n\n${(r.existing||[]).join("\n")}\n\nThe old key will be permanently replaced. Continue?`);
+    if(!okReplace) return;
+    $("kgGo").disabled=true; r=await API.generate_key($("kgType").value,path,$("kgPass").value,true); $("kgGo").disabled=false;
+  }
   if(!r.ok){toast(r.error,true);return;} lastPub=r.public; $("kgPub").textContent=r.public;
   if(r.created_dir) toast("Created folder: "+r.created_dir);
   $("kgSaved").textContent="Saved: "+r.private_path+"  +  "+r.public_path;
   $("kgResult").style.display="block";
-  $("kgInstall").disabled=!connected; toast("Key pair created"); }
+  $("kgInstall").disabled=!connected; toast("Key pair created");
+  if(r.protection_warning) toast(r.protection_warning,true); }
 async function onInstallKey(){ if(!connected||!lastPub)return; const r=await API.install_pubkey(lastPub);
   toast(r.ok?(r.already?"Key already present on server":"Public key installed on server"):("Failed: "+r.error),!r.ok); }
 
