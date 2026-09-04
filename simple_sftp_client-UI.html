@@ -408,6 +408,7 @@ window.appEvent=function(ev,p){
   else if(ev==="watch"){ clog(p.ok?("Watch: uploaded "+p.file):("Watch error: "+p.file+" — "+(p.error||"")), p.ok?"ok":"error"); }
   else if(ev==="console"){ clog(p.msg, p.level); }
   else if(ev==="external_drop"){ externalUpload(p.paths); }
+  else if(ev==="quit-confirm"){ confirm2("Transfers running","Transfers are still running, quit anyway?").then(ok=>{ if(ok)API.confirm_quit(); }); }
 };
 
 /* ───── Phase 2 queue: worker never pushes, the window pulls on a timer ───── */
@@ -662,7 +663,12 @@ function connParams(){ return { host:$("host").value, port:$("port").value, user
   passphrase:authMode==="key"?$("pass").value:"", start_path:$("startpath").value }; }
 
 async function onConn(){
-  if(connected){ await API.disconnect(); connected=false; setConn("","Disconnected"); clog("Disconnected");
+  if(connected){
+    if(await API.transfers_active()){
+      const ok=await confirm2("Transfers running","Transfers are still running, disconnect anyway?");
+      if(!ok)return;
+    }
+    await API.disconnect(); connected=false; setConn("","Disconnected"); clog("Disconnected");
     $("connBtn").textContent="Connect"; $("connBtn").className="btn-primary";
     ["upBtn","downBtn","compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=true);
     state.remote.entries=[]; renderPane("remote"); $("crumbsRemote").textContent="(not connected)"; $("latency").textContent=""; return; }

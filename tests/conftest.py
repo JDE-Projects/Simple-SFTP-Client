@@ -177,11 +177,12 @@ def _serve(sock, host_key, fs_cls):
 
 
 # ───────────── fixtures ─────────────
-def _start_sftp_env(tmp_path, fs_extra_attrs=None):
-    """Shared setup behind sftp_env and its variants: spin up the throwaway
-    server rooted at tmp_path, connect an Api to it, and yield (api,
-    server_root, local_dir). fs_extra_attrs overrides class attributes on the
-    per-test FS subclass, e.g. to disable posix-rename support."""
+def _bring_up_server(tmp_path, fs_extra_attrs=None):
+    """Spin up the throwaway SFTP server rooted at tmp_path and return
+    (port, server_root, local_dir, srv_sock). The caller owns closing
+    srv_sock. Shared by the pre-connected sftp_env fixtures and the
+    sftp_server fixture, which hands back connection params so a test can
+    drive the real Api.connect() (trust-on-first-use and all)."""
     server_root = tmp_path / "server_root"
     server_root.mkdir()
     local_dir = tmp_path / "local"
@@ -199,6 +200,15 @@ def _start_sftp_env(tmp_path, fs_extra_attrs=None):
     srv_sock.listen(16)
     thread = threading.Thread(target=_serve, args=(srv_sock, host_key, fs_cls), daemon=True)
     thread.start()
+    return port, server_root, local_dir, srv_sock
+
+
+def _start_sftp_env(tmp_path, fs_extra_attrs=None):
+    """Shared setup behind sftp_env and its variants: spin up the throwaway
+    server rooted at tmp_path, connect an Api to it, and yield (api,
+    server_root, local_dir). fs_extra_attrs overrides class attributes on the
+    per-test FS subclass, e.g. to disable posix-rename support."""
+    port, server_root, local_dir, srv_sock = _bring_up_server(tmp_path, fs_extra_attrs)
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -230,6 +240,22 @@ def sftp_env(tmp_path):
     """Spin up a throwaway SFTP server rooted at tmp_path, connect an Api to
     it, and tear everything down afterward. Yields (api, server_root, local_dir)."""
     yield from _start_sftp_env(tmp_path)
+
+
+@pytest.fixture
+def sftp_server(tmp_path):
+    """Start a throwaway SFTP server but do NOT connect an Api to it. Yields
+    (params, server_root, local_dir) where params is a dict ready for the
+    real Api.connect(), so a test can exercise the actual connect path
+    (trust-on-first-use, partial-failure cleanup, the on-connect scratch
+    sweep) end to end rather than injecting a pre-made client."""
+    port, server_root, local_dir, srv_sock = _bring_up_server(tmp_path)
+    params = {"host": "127.0.0.1", "port": port, "username": USER,
+              "password": PASSWORD}
+    try:
+        yield params, server_root, local_dir
+    finally:
+        srv_sock.close()
 
 
 @pytest.fixture
