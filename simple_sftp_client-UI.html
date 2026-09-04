@@ -684,7 +684,10 @@ async function doConnect(){
     connected=true; setConn("live","Connected"); $("connBtn").textContent="Disconnect"; $("connBtn").className="btn-danger";
     ["compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=false);
     $("filterRemote").disabled=false; clog("Connected to "+($("user").value.trim())+"@"+($("host").value.trim()),"ok");
-    await loadRemote(r.cwd); pollHealth(); return true;
+    const listed=await loadRemote(r.cwd);
+    if(!listed){ $("crumbsRemote").textContent="(couldn't list folder — use Refresh)";
+      clog("Connected, but the first folder listing failed. Use Refresh to retry.","warn"); }
+    pollHealth(); return true;
   }
   if(r.host_key_unknown){
     const okTrust=await confirm2("Unknown host key",
@@ -738,8 +741,8 @@ function pollHealth(){ clearTimeout(pollTimer); if(!connected)return;
 /* ───── listing/nav ───── */
 async function loadLocal(path){ const r=await API.list_local(path); if(!r.ok){toast(r.error,true);return;}
   pushHist("local",r.cwd); state.local.cwd=r.cwd; state.local.entries=r.entries; state.local.sel=new Set(); state.local.anchor=null; compareMap=null; renderPane("local"); setCrumbs("local",r.cwd); }
-async function loadRemote(path){ if(!connected)return; const r=await API.list_remote(path); if(!r.ok){toast(r.error,true);return;}
-  pushHist("remote",r.cwd); state.remote.cwd=r.cwd; state.remote.entries=r.entries; state.remote.sel=new Set(); state.remote.anchor=null; compareMap=null; renderPane("remote"); setCrumbs("remote",r.cwd); }
+async function loadRemote(path){ if(!connected)return false; const r=await API.list_remote(path); if(!r.ok){toast(r.error,true);return false;}
+  pushHist("remote",r.cwd); state.remote.cwd=r.cwd; state.remote.entries=r.entries; state.remote.sel=new Set(); state.remote.anchor=null; compareMap=null; renderPane("remote"); setCrumbs("remote",r.cwd); return true; }
 function refresh(side){ side==="local"?reloadLocal():loadRemote(state.remote.cwd); }
 function reloadLocal(){ API.list_local(state.local.cwd).then(r=>{if(r.ok){state.local.entries=r.entries;renderPane("local");}}); }
 function pushHist(side,cwd){ const s=state[side]; if(s.hist[s.hi]===cwd)return; s.hist=s.hist.slice(0,s.hi+1); s.hist.push(cwd); s.hi=s.hist.length-1; }
