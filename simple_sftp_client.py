@@ -1568,26 +1568,26 @@ class Api:
             yield (lp, rp, size)
             return
         try:
-            entries = sorted(os.scandir(lp), key=lambda e: e.name)
+            with os.scandir(lp) as it:
+                for entry in it:
+                    if is_temp_part(entry.name):
+                        continue
+                    rchild = posixpath.join(rp, entry.name)
+                    try:
+                        child_is_dir = entry.is_dir(follow_symlinks=False)
+                    except OSError:
+                        child_is_dir = False
+                    if child_is_dir:
+                        yield from self._iter_local(entry.path, rchild, True)
+                    else:
+                        try:
+                            size = entry.stat(follow_symlinks=False).st_size
+                        except OSError:
+                            size = 0
+                        yield (entry.path, rchild, size)
         except OSError as e:
             self._worker_log(f"could not list {lp}: {e}", "error")
             return
-        for entry in entries:
-            if is_temp_part(entry.name):
-                continue
-            rchild = posixpath.join(rp, entry.name)
-            try:
-                child_is_dir = entry.is_dir(follow_symlinks=False)
-            except OSError:
-                child_is_dir = False
-            if child_is_dir:
-                yield from self._iter_local(entry.path, rchild, True)
-            else:
-                try:
-                    size = entry.stat(follow_symlinks=False).st_size
-                except OSError:
-                    size = 0
-                yield (entry.path, rchild, size)
 
     def _iter_remote(self, sftp, rp, lp, is_dir, root):
         """Same as _iter_local but over an sftp session for a remote file or
@@ -1596,28 +1596,39 @@ class Api:
         self.sftp, which stays reserved for the file browser). root is the
         local folder the user selected for this download; it stays fixed
         across the whole recursive walk so every level, however deep, is
-        checked against the same boundary rather than its immediate parent."""
+        checked against the same boundary rather than its immediate parent.
+
+        listdir_iter() pipelines read-ahead READDIR requests on the sftp
+        session, so starting a second listdir_iter() on the same session
+        (recursing into a subfolder) before the current one is fully drained
+        hangs the session. So files are yielded the instant they are seen,
+        but subfolders are only buffered as (rchild, lchild) name pairs here
+        and recursed into after this level's loop finishes. That buffer holds
+        only subfolder names, not the whole level, so the giant-flat-directory
+        case (no subfolders) stays effectively unbuffered."""
         if not is_dir:
             yield (lp, rp, self._rsize(sftp, rp))
             return
+        subdirs = []
         try:
-            attrs = sftp.listdir_attr(rp)
+            for a in sftp.listdir_iter(rp):
+                if is_temp_part(a.filename):
+                    continue
+                rchild = posixpath.join(rp, a.filename)
+                try:
+                    lchild = safe_local_child(lp, a.filename, root)
+                except ValueError as e:
+                    self._worker_log(f"skipped unsafe remote name {a.filename!r}: {e}", "error")
+                    continue
+                if stat.S_ISDIR(a.st_mode):
+                    subdirs.append((rchild, lchild))
+                else:
+                    yield (lchild, rchild, a.st_size)
         except Exception as e:
             self._worker_log(f"could not list {rp}: {friendly_error(e)}", "error")
             return
-        for a in sorted(attrs, key=lambda a: a.filename):
-            if is_temp_part(a.filename):
-                continue
-            rchild = posixpath.join(rp, a.filename)
-            try:
-                lchild = safe_local_child(lp, a.filename, root)
-            except ValueError as e:
-                self._worker_log(f"skipped unsafe remote name {a.filename!r}: {e}", "error")
-                continue
-            if stat.S_ISDIR(a.st_mode):
-                yield from self._iter_remote(sftp, rchild, lchild, True, root)
-            else:
-                yield (lchild, rchild, a.st_size)
+        for rchild, lchild in subdirs:
+            yield from self._iter_remote(sftp, rchild, lchild, True, root)
 
     def _scan_and_queue(self, roots, direction, on_conflict, scan_id, stop_event, local_root=None):
         """Runs entirely on its own daemon thread, never the pywebview bridge

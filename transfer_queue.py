@@ -49,6 +49,7 @@ class TransferQueue:
     def __init__(self):
         self._lock = threading.Lock()
         self._items = []  # FIFO order, append order preserved
+        self._by_id = {}  # item.id -> item, kept in sync with self._items for O(1) _find
         self._next_id = 1
         self._paused = False
         # Once more than RETAIN_FINISHED items have completed/skipped, the
@@ -57,6 +58,11 @@ class TransferQueue:
         # copied on every UI poll. These tallies keep counts() accurate for
         # the ones that aged out and no longer exist as objects.
         self._pruned = {COMPLETED: 0, SKIPPED: 0}
+        # Running count of live (not yet pruned) COMPLETED+SKIPPED items in
+        # self._items, kept in sync in _finish and clear_finished so _finish
+        # never has to re-scan self._items to know whether it is over
+        # RETAIN_FINISHED.
+        self._finished_live = 0
 
     def pause(self):
         """Stop claim() from handing out new items. Items already ACTIVE are
@@ -86,6 +92,7 @@ class TransferQueue:
             )
             self._next_id += 1
             self._items.append(item)
+            self._by_id[item.id] = item
             return item.id
 
     def claim(self):
@@ -119,14 +126,14 @@ class TransferQueue:
                 # Only one item can cross into COMPLETED/SKIPPED per call, so
                 # the count can be at most one over the cap: drop the single
                 # oldest finished item (FIFO, scan from the front) if so.
-                finished_count = sum(
-                    1 for i in self._items if i.state in (COMPLETED, SKIPPED)
-                )
-                if finished_count > RETAIN_FINISHED:
+                self._finished_live += 1
+                if self._finished_live > RETAIN_FINISHED:
                     for i in self._items:
                         if i.state in (COMPLETED, SKIPPED):
                             self._pruned[i.state] += 1
                             self._items.remove(i)
+                            del self._by_id[i.id]
+                            self._finished_live -= 1
                             break
             return True
 
@@ -277,13 +284,17 @@ class TransferQueue:
         is not counted)."""
         with self._lock:
             before = len(self._items)
-            self._items = [item for item in self._items if item.state not in TERMINAL_STATES]
+            kept = []
+            for item in self._items:
+                if item.state in TERMINAL_STATES:
+                    del self._by_id[item.id]
+                else:
+                    kept.append(item)
+            self._items = kept
             self._pruned = {COMPLETED: 0, SKIPPED: 0}
+            self._finished_live = 0
             return before - len(self._items)
 
     def _find(self, item_id):
         """Caller must hold self._lock."""
-        for item in self._items:
-            if item.id == item_id:
-                return item
-        return None
+        return self._by_id.get(item_id)

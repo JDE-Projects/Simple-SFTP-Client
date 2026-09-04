@@ -459,6 +459,137 @@ def test_clear_finished_zeroes_pruned_tallies_for_a_clean_summary(q):
     assert q.snapshot() == []
 
 
+def test_find_by_id_works_after_appends_and_survives_pruning(q, monkeypatch):
+    # _find is exercised indirectly through every other method that takes an
+    # id, so this checks it directly: an id must resolve to the right item
+    # right after append, and still resolve for items that never got pruned.
+    monkeypatch.setattr(transfer_queue, "RETAIN_FINISHED", 2)
+
+    ids = [q.append("upload", f"/l{i}", f"/r{i}", f"file{i}") for i in range(4)]
+    for item_id in ids:
+        q.claim()
+        q.mark_completed(item_id)
+
+    # oldest two aged out past the cap of 2
+    snap_ids = {s["id"] for s in q.snapshot()}
+    assert snap_ids == set(ids[-2:])
+
+    # a still-live item resolves through claim()/mark_* (which use _find
+    # internally) and via requeue on a fresh failed item
+    fresh_id = q.append("upload", "/lf", "/rf", "filef")
+    q.claim()
+    q.mark_failed(fresh_id, "boom")
+    assert q.requeue(fresh_id) is True
+    assert {s["id"]: s["state"] for s in q.snapshot()}[fresh_id] == WAITING
+
+    # a pruned item's id is simply gone: no crash, no stale match
+    assert q.mark_completed(ids[0]) is False
+    assert q.cancel(ids[0]) is False
+
+
+def test_counts_stay_accurate_across_a_batch_exceeding_retain_finished(q, monkeypatch):
+    monkeypatch.setattr(transfer_queue, "RETAIN_FINISHED", 3)
+
+    ids = [q.append("upload", f"/l{i}", f"/r{i}", f"file{i}") for i in range(10)]
+    for item_id in ids:
+        q.claim()
+        q.mark_completed(item_id)
+
+    # live (still objects) + pruned (collapsed into the tally) must add up to
+    # the true total, whether counted via counts() or by hand
+    live = sum(1 for s in q.snapshot() if s["state"] == COMPLETED)
+    assert live == 3
+    assert q.counts()[COMPLETED] == 10
+    assert live + 7 == q.counts()[COMPLETED]
+
+
+def test_failed_and_cancelled_items_are_never_pruned_and_stay_retryable(q, monkeypatch):
+    monkeypatch.setattr(transfer_queue, "RETAIN_FINISHED", 1)
+
+    failed_id = q.append("upload", "/l1", "/r1", "file1")
+    cancelled_id = q.append("upload", "/l2", "/r2", "file2")
+    q.claim()
+    q.mark_failed(failed_id, "boom")
+    q.claim()
+    q.mark_cancelled(cancelled_id)
+
+    # push a wave of completions well past the tiny cap; FAILED/CANCELLED
+    # items must never be swept up by the completed/skipped prune
+    completed_ids = [q.append("upload", f"/lc{i}", f"/rc{i}", f"filec{i}") for i in range(5)]
+    for item_id in completed_ids:
+        q.claim()
+        q.mark_completed(item_id)
+
+    states = {s["id"]: s["state"] for s in q.snapshot()}
+    assert states[failed_id] == FAILED
+    assert states[cancelled_id] == CANCELLED
+
+    assert q.requeue(failed_id) is True
+    assert q.requeue(cancelled_id) is True
+    states = {s["id"]: s["state"] for s in q.snapshot()}
+    assert states[failed_id] == WAITING
+    assert states[cancelled_id] == WAITING
+
+
+def test_clear_finished_resets_index_and_counter_so_finds_and_counts_stay_correct(q, monkeypatch):
+    monkeypatch.setattr(transfer_queue, "RETAIN_FINISHED", 2)
+
+    ids = [q.append("upload", f"/l{i}", f"/r{i}", f"file{i}") for i in range(5)]
+    for item_id in ids:
+        q.claim()
+        q.mark_completed(item_id)
+    # this batch pruned some already, exercising the pruned _by_id/_finished_live path
+    assert q.counts()[COMPLETED] == 5
+
+    waiting_id = q.append("upload", "/lw", "/rw", "filew")
+
+    removed = q.clear_finished()
+    assert removed == 2  # only the still-live completed objects
+    assert q.counts()[COMPLETED] == 0
+    assert q.snapshot() == [{"id": waiting_id, "direction": "upload", "name": "filew",
+                              "state": WAITING, "error": ""}]
+
+    # cleared ids are gone from the index (unknown to every id-based method)
+    assert q.mark_completed(ids[-1]) is False
+    assert q.requeue(ids[-1]) is False
+
+    # a fresh completion after clearing starts the running counter clean,
+    # i.e. it does not prune prematurely because of stale state. waiting_id
+    # is still WAITING and ahead of fresh_id in FIFO order, so claim it out
+    # of the way first before claiming and completing fresh_id.
+    fresh_id = q.append("upload", "/lf", "/rf", "filef")
+    q.claim()  # claims waiting_id, left ACTIVE
+    item = q.claim()
+    assert item.id == fresh_id
+    q.mark_completed(fresh_id)
+    assert q.counts()[COMPLETED] == 1
+    assert fresh_id in {s["id"] for s in q.snapshot()}
+
+
+def test_requeue_still_works_after_a_prune(q, monkeypatch):
+    monkeypatch.setattr(transfer_queue, "RETAIN_FINISHED", 1)
+
+    id1 = q.append("upload", "/l1", "/r1", "file1")
+    id2 = q.append("upload", "/l2", "/r2", "file2")
+    q.claim()
+    q.mark_completed(id1)  # still live, at the cap
+    q.claim()
+    q.mark_completed(id2)  # pushes id1 out past the cap and prunes it
+
+    assert id1 not in {s["id"] for s in q.snapshot()}
+
+    failed_id = q.append("upload", "/l3", "/r3", "file3")
+    q.claim()
+    q.mark_failed(failed_id, "boom")
+
+    assert q.requeue(failed_id) is True
+    snap = {s["id"]: s for s in q.snapshot()}
+    assert snap[failed_id]["state"] == WAITING
+    assert snap[failed_id]["error"] == ""
+    # the earlier prune did not corrupt the still-live item
+    assert snap[id2]["state"] == COMPLETED
+
+
 def test_counts_totals_stay_correct_across_a_mix_of_outcomes(q):
     complete_id = q.append("upload", "/l1", "/r1", "file1")
     skip_id = q.append("upload", "/l2", "/r2", "file2")
