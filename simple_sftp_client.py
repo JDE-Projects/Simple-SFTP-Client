@@ -30,6 +30,7 @@ import ssl
 import time
 import shutil
 import threading
+import functools
 import traceback
 import webbrowser
 import socket
@@ -569,6 +570,23 @@ def _update_error_reason(exc: BaseException) -> str:
     return text
 
 
+def _browsing(method):
+    """Serialize a bridge call that uses the shared browsing SFTP session
+    (self.sftp). Paramiko's synchronous SFTP is not safe for two callers on one
+    session at once, and pywebview runs each bridge call on its own thread, so
+    without this the health ping and a listing (or any two browsing operations)
+    can overlap and consume each other's replies, leaving a listing blocked with
+    no error. Uses the re-entrant self._sftp_lock so a guarded method may call
+    another guarded helper on the same thread (delete -> _rremove). Transfer
+    workers and the background scanner each own a separate session, so they are
+    deliberately not guarded here and keep running in parallel."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._sftp_lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class Api:
     def __init__(self):
         self._window = None
@@ -578,6 +596,11 @@ class Api:
         self._cred_pass = ""
         self._pending_host_key = None  # (hostname, offered_key) awaiting user trust
         self._lock = threading.Lock()
+        # Serializes every operation on the shared browsing session (self.sftp)
+        # so two bridge threads never use it at once. Re-entrant so a guarded
+        # call can nest another (see _browsing). Transfer workers and the
+        # scanner use their own sessions and are intentionally not on this lock.
+        self._sftp_lock = threading.RLock()
         self._cancel = threading.Event()
         self._watch_stop = None
         self._watch_thread = None
@@ -843,13 +866,14 @@ class Api:
             if ti:
                 self._vlog(f"Negotiated: cipher {ti.get('cipher','?')} · "
                            f"kex {ti.get('kex','?')} · mac {ti.get('mac','?')}")
-            home = self.sftp.normalize(".")
-            self._vlog(f"SFTP session opened — home {home}", "ok")
-            start = (p.get("start_path") or "").strip() or home
-            try:
-                self.sftp.stat(start)
-            except Exception:
-                start = home
+            with self._sftp_lock:
+                home = self.sftp.normalize(".")
+                self._vlog(f"SFTP session opened — home {home}", "ok")
+                start = (p.get("start_path") or "").strip() or home
+                try:
+                    self.sftp.stat(start)
+                except Exception:
+                    start = home
             self._sweep_scratch_files()
             return {"ok": True, "home": home, "cwd": start, "transport": self._transport_info()}
         except UnknownHostKey as e:
@@ -1110,6 +1134,7 @@ class Api:
                 pass
         return {"ok": True}
 
+    @_browsing
     def ping(self):
         # latency for the health indicator
         if not self.connected:
@@ -1153,6 +1178,7 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": friendly_error(e)}
 
+    @_browsing
     def list_remote(self, path):
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
@@ -1171,6 +1197,7 @@ class Api:
             return {"ok": False, "error": friendly_error(e)}
 
     # ───────────── file ops ─────────────
+    @_browsing
     def make_dir(self, side, path, name):
         try:
             if side == "local":
@@ -1183,6 +1210,7 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": friendly_error(e)}
 
+    @_browsing
     def rename(self, side, path, old, new):
         try:
             if side == "local":
@@ -1194,6 +1222,7 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": friendly_error(e)}
 
+    @_browsing
     def delete(self, side, path, items):
         errs = []
         for it in items:
@@ -2182,6 +2211,7 @@ class Api:
             return "same"
         return "newer_local" if loc[name][1] >= rem[name][1] else "newer_remote"
 
+    @_browsing
     def compare(self, local_dir, remote_dir):
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
@@ -2192,6 +2222,7 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": friendly_error(e)}
 
+    @_browsing
     def sync_plan(self, local_dir, remote_dir, direction, changed_only=True):
         """Computes what a sync would transfer, without transferring anything.
         The UI shows this plan and, on confirm, enqueues it onto the normal
@@ -2212,6 +2243,7 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": friendly_error(e)}
 
+    @_browsing
     def calc_remote_size(self, remote_dir, name):
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
@@ -2328,6 +2360,7 @@ class Api:
         except Exception:
             return {"ok": False, "error": "Key generation failed. Check the type and passphrase and try again."}
 
+    @_browsing
     def install_pubkey(self, pubtext):
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
@@ -2398,8 +2431,12 @@ class Api:
                     self._legacy_active.set()
                     try:
                         rdir = posixpath.dirname(rp)
-                        self._ensure_remote_dir(rdir)
-                        self.sftp.put(fp, rp)
+                        # Serialize against the browsing session: this upload runs
+                        # on the watcher thread and shares self.sftp with listing
+                        # and health-ping bridge calls (see _browsing).
+                        with self._sftp_lock:
+                            self._ensure_remote_dir(rdir)
+                            self.sftp.put(fp, rp)
                         self._emit("watch", {"file": rel, "ok": True})
                     except Exception as e:
                         self._emit("watch", {"file": rel, "ok": False, "error": friendly_error(e)})

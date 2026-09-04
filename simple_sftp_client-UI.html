@@ -684,7 +684,7 @@ async function doConnect(){
     connected=true; setConn("live","Connected"); $("connBtn").textContent="Disconnect"; $("connBtn").className="btn-danger";
     ["compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=false);
     $("filterRemote").disabled=false; clog("Connected to "+($("user").value.trim())+"@"+($("host").value.trim()),"ok");
-    loadRemote(r.cwd); pollHealth(); return true;
+    await loadRemote(r.cwd); pollHealth(); return true;
   }
   if(r.host_key_unknown){
     const okTrust=await confirm2("Unknown host key",
