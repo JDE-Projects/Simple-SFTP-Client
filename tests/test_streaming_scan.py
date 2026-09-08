@@ -181,7 +181,7 @@ def test_iter_local_yields_every_file_in_a_nested_tree_in_any_order(tmp_path):
     (root / "mid" / "deep").mkdir()
     (root / "mid" / "deep" / "d.bin").write_bytes(b"d" * 40)
     # in-progress transfer scratch file must stay hidden
-    (root / "e.bin.sxtpart").write_bytes(b"e" * 50)
+    (root / ".e.bin.deadbeef.sxtpart").write_bytes(b"e" * 50)
     # distinct, known mtimes so the 4th field can be asserted exactly, not
     # just type-checked
     stamps = {
@@ -250,7 +250,7 @@ def test_iter_remote_skips_temp_parts_and_confines_hostile_names(tmp_path):
     sftp = _FakeSftp({
         "/top": [
             _FakeAttr("good.bin", size=5, mtime=1_700_000_005),
-            _FakeAttr("upload.bin.sxtpart", size=5),
+            _FakeAttr(".upload.bin.deadbeef.sxtpart", size=5),
             _FakeAttr("../escape.bin", size=5),
         ],
     })
