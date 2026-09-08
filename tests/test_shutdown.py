@@ -214,6 +214,15 @@ def test_scratch_sweep_on_connect_removes_only_matching_files(monkeypatch, tmp_p
     local_dir.mkdir()
     (local_dir / "real.bin").write_bytes(b"data")
     (local_dir / ".not_scratch.txt").write_bytes(b"x")
+    # Ordinary files that merely share the .sxtpart suffix must survive: a bare
+    # suffix, a leading-dot file with no random token, and a wrong-length token.
+    (local_dir / "notes.sxtpart").write_bytes(b"user")
+    (local_dir / ".notes.sxtpart").write_bytes(b"user")
+    (local_dir / ".short.bin.dead.sxtpart").write_bytes(b"user")
+    # A directory whose name matches the full scratch shape must also survive:
+    # the app only ever writes scratch files, never folders.
+    (local_dir / ".dir.bin.deadbeef.sxtpart").mkdir()
+    # Genuine scratch files in the exact generated shape get swept.
     (local_dir / ".foo.bin.deadbeef.sxtpart").write_bytes(b"partial")
     (local_dir / ".bar.bin.cafebabe.sxtpart").write_bytes(b"partial2")
 
@@ -226,7 +235,14 @@ def test_scratch_sweep_on_connect_removes_only_matching_files(monkeypatch, tmp_p
     assert result["ok"] is True
 
     remaining = {p.name for p in local_dir.iterdir()}
-    assert remaining == {"real.bin", ".not_scratch.txt"}
+    assert remaining == {
+        "real.bin",
+        ".not_scratch.txt",
+        "notes.sxtpart",
+        ".notes.sxtpart",
+        ".short.bin.dead.sxtpart",
+        ".dir.bin.deadbeef.sxtpart",
+    }
 
 
 # ───────────── real connect() end to end ─────────────

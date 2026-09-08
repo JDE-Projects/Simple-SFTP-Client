@@ -23,6 +23,7 @@ import ctypes
 from ctypes import wintypes
 import errno
 import json
+import re
 import logging
 import base64
 import hashlib
@@ -123,13 +124,23 @@ def safe_local_child(parent: str, name: str, root: str) -> str:
 
 TEMP_PART_SUFFIX = ".sxtpart"
 
+# Match only the exact shape local_temp_path / remote_temp_path build:
+# a leading dot, the original name, a dot, 8 lowercase hex characters from
+# os.urandom(4).hex(), then the suffix. Matching a bare ".sxtpart" suffix
+# would hide and later delete an ordinary user file that happened to end
+# that way; the full convention is what marks a file as ours to remove.
+# fullmatch (not match + "$") so a name ending in a literal newline before
+# the suffix cannot slip through: "$" would anchor before that newline.
+_TEMP_PART_RE = re.compile(r"\..+\.[0-9a-f]{8}" + re.escape(TEMP_PART_SUFFIX))
+
 
 def is_temp_part(name: str) -> bool:
     """True for one of this app's own in-progress transfer scratch files, so
     every place that lists a folder can hide a file still being written
     (download or upload) instead of showing it, picking it up as a transfer
-    target, or letting it skew a Compare/Sync."""
-    return bool(name) and name.endswith(TEMP_PART_SUFFIX)
+    target, or letting it skew a Compare/Sync. Recognizing our own reserved
+    name shape is not a claim of ownership over any file matching it."""
+    return bool(name) and _TEMP_PART_RE.fullmatch(name) is not None
 
 
 def local_temp_path(final_path: str) -> str:
