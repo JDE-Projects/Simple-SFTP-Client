@@ -158,3 +158,32 @@ def test_skip_reruns_folder_download_skipping_matching_files(sftp_env, wait_for_
     assert new_states["changed.bin"] == COMPLETED
     assert (local_dir / "top" / "same.bin").read_bytes() == b"S" * 4096
     assert (local_dir / "top" / "changed.bin").read_bytes() == b"c" * 10
+
+
+def test_skip_transfers_everything_into_a_fresh_empty_local_folder(sftp_env, wait_for_drain):
+    """A folder download into an EMPTY local directory with on_conflict="skip"
+    must still transfer every file, since nothing exists locally yet to
+    skip. This is distinct from the re-run case above, which starts from an
+    already-downloaded folder: it guards against skip regressing to the old
+    whole-folder drop, which used to transfer nothing at all whenever
+    anything but overwrite was selected."""
+    api, server_root, local_dir = sftp_env
+    (server_root / "top").mkdir()
+    (server_root / "top" / "a.bin").write_bytes(b"A" * 4096)
+    (server_root / "top" / "mid").mkdir()
+    (server_root / "top" / "mid" / "b.bin").write_bytes(b"B" * 2048)
+    (server_root / "top" / "mid" / "deep").mkdir()
+    (server_root / "top" / "mid" / "deep" / "c.bin").write_bytes(b"C" * 1024)
+
+    result = api.enqueue([{"name": "top", "is_dir": True}], "download",
+                          str(local_dir), "/", "skip")
+    assert result["ok"] is True
+    wait_for_drain(api)
+
+    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    assert states["a.bin"] == COMPLETED
+    assert states["b.bin"] == COMPLETED
+    assert states["c.bin"] == COMPLETED
+    assert (local_dir / "top" / "a.bin").read_bytes() == b"A" * 4096
+    assert (local_dir / "top" / "mid" / "b.bin").read_bytes() == b"B" * 2048
+    assert (local_dir / "top" / "mid" / "deep" / "c.bin").read_bytes() == b"C" * 1024
