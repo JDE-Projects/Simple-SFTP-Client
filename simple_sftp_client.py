@@ -345,9 +345,48 @@ def _restore_geometry(win) -> None:
         pass
 
 
+class InvalidPort(ValueError):
+    """A non-blank port value that is not a whole number from 1 to 65535."""
+    def __init__(self, value):
+        self.value = value
+        super().__init__(f"Invalid port: {value!r}")
+
+
+def parse_port(port):
+    """The one strict port parser, used everywhere a port is interpreted.
+    Blank (empty string or None) means the default SFTP port, 22. Anything
+    else must be a plain whole number from 1 to 65535, with no surrounding
+    whitespace and no sign or decimal point, or it raises InvalidPort - it
+    never silently falls back to 22 for a non-blank value."""
+    if port is None:
+        return 22
+    if isinstance(port, bool):
+        raise InvalidPort(port)
+    if isinstance(port, int):
+        value = port
+    elif isinstance(port, str):
+        stripped = port.strip()
+        if not stripped:
+            return 22
+        # isdigit() alone accepts Unicode digits like superscripts that int()
+        # then rejects, which would leak a raw ValueError past every caller's
+        # InvalidPort guard; require plain ASCII 0-9 so int() below can't fail.
+        if stripped != port or not (stripped.isascii() and stripped.isdigit()):
+            raise InvalidPort(port)
+        value = int(stripped)
+    else:
+        raise InvalidPort(port)
+    if not (1 <= value <= 65535):
+        raise InvalidPort(port)
+    return value
+
+
+INVALID_PORT_ERROR = "Enter a valid port (1-65535), or leave it blank for the default (22)."
+
+
 def hostkey_name(host, port):
     """The name paramiko stores a host key under (bracketed when not port 22)."""
-    port = int(port or 22)
+    port = parse_port(port)
     return host if port == 22 else "[%s]:%d" % (host, port)
 
 
@@ -356,12 +395,41 @@ def cred_key(host, port, username):
     hostkey_name: bare host|username on port 22, host|port|username on any
     other port, so existing default-port entries keep working unchanged and
     two services on the same host/user but different ports never collide."""
-    port = int(port or 22)
+    port = parse_port(port)
     host = (host or "").strip()
     username = (username or "").strip()
     if port == 22:
         return f"{host}|{username}"
     return f"{host}|{port}|{username}"
+
+
+_SESSION_STR_FIELDS = ("host", "username", "key_path", "start_path")
+_SESSION_AUTH_VALUES = ("password", "key")
+
+
+def _valid_session_entry(x):
+    """A saved session entry is safe to hand to the UI (or a connect
+    attempt) only once every field is the type the UI expects: this is what
+    keeps a hand-edited or corrupted servers.json from injecting markup or
+    an unsupported auth mode into the session manager. Anything that fails
+    here gets dropped by the caller, not repaired."""
+    if not isinstance(x, dict):
+        return False
+    name = x.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return False
+    for key in _SESSION_STR_FIELDS:
+        if key in x and not isinstance(x[key], str):
+            return False
+    if x.get("auth") not in _SESSION_AUTH_VALUES:
+        return False
+    if "remember" in x and not isinstance(x["remember"], bool):
+        return False
+    try:
+        parse_port(x.get("port"))
+    except InvalidPort:
+        return False
+    return True
 
 
 def fingerprint_sha256(key):
@@ -900,15 +968,45 @@ class Api:
 
     # ───────────── sessions (servers.json, never passwords) ─────────────
     def _load_sessions(self):
+        """Load saved sessions and validate every entry before it can reach
+        the UI or a connect attempt. The file itself failing to parse is
+        handled exactly as before (kept aside via _preserve_corrupt); this
+        additionally drops individual entries that parsed fine as JSON but
+        have the wrong shape, so nothing malformed or hostile (e.g. a bad
+        port or an unsupported auth value) ever gets that far. Dropped
+        entries are never rewritten back to servers.json - the file is left
+        untouched either way."""
         try:
             with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return data.get("sessions", []) if isinstance(data, dict) else []
         except FileNotFoundError:
             return []
         except Exception as e:
             _preserve_corrupt(SESSIONS_FILE, e)
             return []
+        if not isinstance(data, dict):
+            self._sessions_notice("Saved sessions file has an unexpected format and was ignored.")
+            return []
+        raw = data.get("sessions", [])
+        if not isinstance(raw, list):
+            self._sessions_notice("Saved sessions file has an unexpected format and was ignored.")
+            return []
+        valid = [x for x in raw if _valid_session_entry(x)]
+        dropped = len(raw) - len(valid)
+        if dropped:
+            word = "entry" if dropped == 1 else "entries"
+            self._sessions_notice(
+                f"Skipped {dropped} saved session {word} that could not be read. "
+                f"{SESSIONS_FILE} was left unchanged.")
+        return valid
+
+    def _sessions_notice(self, msg):
+        """One-line visible notice plus a debug-log trace for a saved-session
+        problem noticed at load time, without silently dropping data unseen."""
+        try:
+            self._vlog(msg, "warn")
+        except Exception:
+            debug.log(msg)
 
     def _save_sessions(self, sessions):
         return _atomic_write_json(SESSIONS_FILE,
@@ -916,9 +1014,14 @@ class Api:
                                     "sessions": sessions}, indent=2)
 
     def save_session(self, s):
-        sessions = self._load_sessions()
         s = {k: s.get(k, "") for k in ("name", "host", "port", "username",
                                        "auth", "key_path", "start_path", "remember")}
+        try:
+            port = parse_port(s.get("port"))
+        except InvalidPort:
+            return {"ok": False,
+                    "error": INVALID_PORT_ERROR}
+        sessions = self._load_sessions()
         # optional remembered password -> OS keychain. The session may only
         # claim a saved password when one was actually written, so a failed
         # write, or "remember" ticked with no password to save (key auth, or
@@ -929,7 +1032,7 @@ class Api:
         # rather than misfiled under the new name.
         pw_saved = False
         pw_error = None
-        proposed = (s.get("host", "").strip(), int(s.get("port") or 22),
+        proposed = (s.get("host", "").strip(), port,
                     s.get("username", "").strip(), s.get("auth"))
         if s.get("remember") and s.get("auth") == "password":
             if self._cred_pass and self._cred_identity == proposed:
@@ -983,7 +1086,7 @@ class Api:
             port = target.get("port")
             username = target.get("username")
             names = [cred_key(host, port, username)]
-            if int(port or 22) != 22:
+            if parse_port(port) != 22:
                 names.append(f"{(host or '').strip()}|{(username or '').strip()}")
             for name in names:
                 try:
@@ -997,7 +1100,7 @@ class Api:
         try:
             import keyring
             pw = keyring.get_password("SimpleSFTPClient", cred_key(host, port, username))
-            if not pw and int(port or 22) != 22:
+            if not pw and parse_port(port) != 22:
                 # Legacy entries were saved port-less; read them so a saved
                 # password from before port-aware keys still loads.
                 pw = keyring.get_password(
@@ -1019,7 +1122,7 @@ class Api:
         # Trust on first use: unknown hosts raise UnknownHostKey (user is asked),
         # a changed key raises paramiko.BadHostKeyException (flagged, not trusted).
         client.set_missing_host_key_policy(_TofuPolicy())
-        kwargs = dict(hostname=host, port=int(port or 22), username=username,
+        kwargs = dict(hostname=host, port=parse_port(port), username=username,
                       timeout=15, allow_agent=False, look_for_keys=False,
                       disabled_algorithms=DISABLED_ALGORITHMS)
         if key_path:
@@ -1064,6 +1167,11 @@ class Api:
         miss = missing_fields(p)
         if miss:
             return {"ok": False, "error": miss}
+        try:
+            port = parse_port(p.get("port"))
+        except InvalidPort:
+            return {"ok": False,
+                    "error": INVALID_PORT_ERROR}
         host = (p.get("host") or "").strip()
         username = (p.get("username") or "").strip()
         password = p.get("password") or ""
@@ -1073,7 +1181,7 @@ class Api:
         new_client = None
         new_sftp = None
         try:
-            new_client = self._open(host, p.get("port", 22), username, password, key_path, passphrase)
+            new_client = self._open(host, port, username, password, key_path, passphrase)
             new_sftp = new_client.open_sftp()
             # Commit only now that both steps have fully succeeded: an
             # earlier failure below never reaches this point, so it can
@@ -1092,7 +1200,7 @@ class Api:
                 self._cred_identity = None
             else:
                 self._cred_pass = password
-                self._cred_identity = (host, int(p.get("port") or 22), username, "password")
+                self._cred_identity = (host, port, username, "password")
             ti = self._transport_info()
             if ti:
                 self._vlog(f"Negotiated: cipher {ti.get('cipher','?')} · "
@@ -1114,7 +1222,7 @@ class Api:
             # Pin under the port-aware name paramiko actually checks against
             # (bracketed for non-standard ports), not e.hostname, whose format
             # differs between the unknown-key and changed-key paths.
-            self._pending_host_key = (hostkey_name(host, p.get("port", 22)), e.key)
+            self._pending_host_key = (hostkey_name(host, port), e.key)
             debug.log(f"Unknown host key for {host} ({e.key.get_name()}).")
             return {"ok": False, "host_key_unknown": True, "host": host,
                     "key_type": e.key.get_name(), "fingerprint": fingerprint_sha256(e.key)}
@@ -1126,7 +1234,7 @@ class Api:
             # bare host in e.hostname, so pinning by that would store the new
             # key under a name the library never rechecks, and the warning would
             # loop forever on non-standard ports.
-            self._pending_host_key = (hostkey_name(host, p.get("port", 22)), e.key)
+            self._pending_host_key = (hostkey_name(host, port), e.key)
             debug.log(f"HOST KEY CHANGED for {host} - refused.")
             return {"ok": False, "host_key_changed": True, "host": host,
                     "key_type": e.key.get_name(),
@@ -1208,7 +1316,11 @@ class Api:
     def get_host_key(self, host, port=22):
         """Return the pinned key(s) for a host so the UI can show them."""
         host = (host or "").strip()
-        name = hostkey_name(host, port) if host else ""
+        try:
+            name = hostkey_name(host, port) if host else ""
+        except InvalidPort:
+            return {"known": False, "host": host,
+                    "error": INVALID_PORT_ERROR}
         try:
             sub = load_known_hosts().lookup(name) if name else None
         except KnownHostsUnreadable as e:
@@ -1224,7 +1336,11 @@ class Api:
     def forget_host_key(self, host, port=22):
         """Remove a pinned host key (e.g. before deliberately re-trusting)."""
         host = (host or "").strip()
-        name = hostkey_name(host, port) if host else ""
+        try:
+            name = hostkey_name(host, port) if host else ""
+        except InvalidPort:
+            return {"ok": False,
+                    "error": INVALID_PORT_ERROR}
         try:
             hk = load_known_hosts()
         except KnownHostsUnreadable as e:
@@ -1257,9 +1373,10 @@ class Api:
         if not host:
             return {"ok": False, "error": "Enter a host to test."}
         try:
-            port = int(p.get("port") or 22)
-        except (TypeError, ValueError):
-            port = 22
+            port = parse_port(p.get("port"))
+        except InvalidPort:
+            return {"ok": False,
+                    "error": INVALID_PORT_ERROR}
         debug.log("TEST", {"host": host, "port": port})
         try:
             with socket.create_connection((host, port), timeout=10) as sock:
