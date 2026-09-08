@@ -773,6 +773,7 @@ function setConn(s,t){ $("connDot").className="dot"+(s?" "+s:""); $("connText").
 async function onSave(){ const name=await prompt2("Save session as","Name"); if(!name)return;
   const p=connParams(); const r=await API.save_session({name, host:p.host, port:p.port, username:p.username,
     auth:authMode, key_path:p.key_path, start_path:p.start_path, remember:rememberPw});
+  if(!r.ok){ infoBox("Could not save session", r.error||"Save failed."); return; }
   fillSessions(r.sessions); $("sessions").value=name;
   if(r.pw_error){ infoBox("Password not saved", r.pw_error); }
   else toast("Saved"); }
@@ -1013,7 +1014,10 @@ async function onInstallKey(){ if(!connected||!lastPub)return; const r=await API
 function openSessions(){ const list=$("sessions")._list||[]; const box=$("sessList"); box.innerHTML="";
   if(!list.length)box.innerHTML='<div class="meta" style="color:var(--text-dim)">No saved sessions yet.</div>';
   list.forEach(x=>{ const d=document.createElement("div"); d.className="sess-item";
-    d.innerHTML=`<div class="nm">${esc(x.name)}<div class="meta">${esc(x.username)}@${esc(x.host)}:${x.port||22} \u00b7 ${x.auth}${x.remember?" \u00b7 pw saved":""}</div></div>`;
+    const nm=document.createElement("div"); nm.className="nm"; nm.appendChild(document.createTextNode(x.name));
+    const meta=document.createElement("div"); meta.className="meta";
+    meta.textContent=`${x.username}@${x.host}:${x.port||22} \u00b7 ${x.auth}${x.remember?" \u00b7 pw saved":""}`;
+    nm.appendChild(meta); d.appendChild(nm);
     const del=document.createElement("button"); del.className="btn-ghost btn-sm"; del.textContent="Delete";
     del.onclick=async()=>{
       if(x.remember){
