@@ -147,6 +147,19 @@ class FS(paramiko.SFTPServerInterface):
         except OSError as e:
             return paramiko.SFTPServer.convert_errno(e.errno)
 
+    def posix_rename(self, oldpath, newpath):
+        # Backs the posix-rename@openssh.com extension the app uses to publish
+        # a finished upload over its real destination. os.replace overwrites
+        # the target atomically, matching real posix-rename servers. Without
+        # this the base implementation returns unsupported and the app refuses
+        # every upload to protect the existing copy, so the served folder must
+        # provide it to smoke-test transfers and the folder watcher.
+        try:
+            os.replace(self._real(oldpath), self._real(newpath))
+            return paramiko.SFTP_OK
+        except OSError as e:
+            return paramiko.SFTPServer.convert_errno(e.errno)
+
     def mkdir(self, path, attr):
         try:
             os.mkdir(self._real(path))

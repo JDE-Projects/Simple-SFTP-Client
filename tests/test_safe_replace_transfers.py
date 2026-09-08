@@ -10,6 +10,8 @@ posix-rename-unsupported variant, sftp_env_no_posix_rename).
 import os
 import time
 
+import paramiko
+
 from transfer_queue import COMPLETED, CANCELLED, FAILED, WAITING
 
 from simple_sftp_client import is_temp_part
@@ -226,6 +228,93 @@ def test_delete_remote_folder_removes_leftover_scratch_file(sftp_env):
     assert result["ok"] is True
     assert result["errors"] == []
     assert not folder.exists()
+
+
+# ───────────── watch upload: same safe-replace guarantees ─────────────
+
+def test_watch_upload_interrupted_leaves_prior_copy_and_cleans_scratch(sftp_env, wait_until):
+    """A watch upload that dies partway through must never touch the existing
+    remote copy, and must never leave its scratch file behind: it uses the
+    same write-to-temp-then-atomic-swap publish as the transfer queue."""
+    api, server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    name = "keep.bin"
+    original = b"ORIGINAL SERVER COPY"
+    (server_root / name).write_bytes(original)
+
+    calls = {"n": 0}
+    real_write = paramiko.SFTPFile.write
+
+    def flaky_write(self, data):
+        # Let the first chunk of the first attempt through so the scratch
+        # file actually exists, then fail every write after that so no
+        # attempt or retry ever completes.
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise OSError("simulated dropped connection")
+        return real_write(self, data)
+
+    paramiko.SFTPFile.write = flaky_write
+    try:
+        assert api.start_watch(str(local_dir), "/")["ok"] is True
+        (local_dir / name).write_bytes(os.urandom(64 * 1024))
+
+        wait_until(lambda: calls["n"] >= 2, timeout=6)
+        time.sleep(0.2)  # let any in-flight scratch cleanup finish
+        api.stop_watch()
+    finally:
+        paramiko.SFTPFile.write = real_write
+
+    assert (server_root / name).read_bytes() == original
+    assert _remote_temp_files(server_root) == []
+
+
+def test_watch_upload_preserves_source_modification_time(sftp_env, wait_until):
+    """A successful watch upload must stamp the remote file with the local
+    source's modification time, the same as a queued upload."""
+    api, server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    name = "stamped.txt"
+
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    f = local_dir / name
+    f.write_bytes(b"content")
+    os.utime(f, (time.time() - 86400, time.time() - 86400))  # a day old
+
+    wait_until(lambda: (server_root / name).exists())
+    time.sleep(0.2)
+    api.stop_watch()
+
+    src_mtime = int(os.stat(f).st_mtime)
+    dst_mtime = int(api.sftp.stat(f"/{name}").st_mtime)
+    assert abs(dst_mtime - src_mtime) <= 1
+
+
+def test_watch_upload_refuses_and_keeps_original_when_posix_rename_unsupported(
+        sftp_env_no_posix_rename, wait_until):
+    """A watch upload against a server without the posix-rename extension must
+    be refused rather than risking an unsafe replace: the prior remote copy
+    stays intact and the change is left pending so it is retried."""
+    api, server_root, local_dir = sftp_env_no_posix_rename
+    api._watch_interval = 0.05
+    name = "up.bin"
+    original = b"ORIGINAL SERVER COPY"
+    (server_root / name).write_bytes(original)
+
+    events = []
+    api._emit = lambda ev, payload: events.append((ev, payload))
+
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    (local_dir / name).write_bytes(b"new local content that must never land")
+
+    wait_until(lambda: any(ev == "watch" and not p["ok"] for ev, p in events), timeout=6)
+    time.sleep(0.2)
+    api.stop_watch()
+
+    watch_events = [p for ev, p in events if ev == "watch"]
+    assert all(not p["ok"] for p in watch_events)  # never reported success
+    assert (server_root / name).read_bytes() == original
+    assert _remote_temp_files(server_root) == []
 
 
 def test_compare_hides_temp_part_files_on_both_sides(sftp_env):
