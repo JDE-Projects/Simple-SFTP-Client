@@ -26,10 +26,13 @@ If you enjoyed this project and would like to buy me a coffee, check out my [Ko-
 - Background transfer queue with progress and ETA: pause and resume it, retry a
   failed item in one click, and it speeds up automatically for big batches of
   small files.
-- Compare local vs remote, folder sync with a preview of what will transfer, and
-  download-changed-only.
+- Compare local vs remote and sync folders in either direction, across
+  subfolders too, with a preview of what will transfer and a
+  download-changed-only option.
 - Before overwriting, a per-file comparison shows each file's size, date, and
   which side is newer, so you can overwrite, skip existing, or cancel.
+- Transfers keep each file's original modification date, so a repeat
+  download-changed-only run fetches just what actually changed.
 - Upload watcher: keep a remote folder up to date from a local one.
 - Remote directory size calculation (on demand) and a connection health
   indicator.
