@@ -8,6 +8,7 @@ set-time-unsupported variant, sftp_env_no_set_time).
 """
 import os
 
+import simple_sftp_client
 from transfer_queue import COMPLETED
 
 from simple_sftp_client import MTIME_TOL
@@ -69,3 +70,40 @@ def test_upload_completes_when_server_refuses_to_set_time(
     entry = state_of(api, item_id)
     assert entry["state"] == COMPLETED
     assert (server_root / name).read_bytes() == data
+
+
+def test_download_completes_when_local_stamp_fails(
+        sftp_env, monkeypatch, wait_for_queue_count, wait_for_drain, state_of):
+    """The download-side mirror of the upload fallback above: if stamping the
+    freshly downloaded local file's modification time fails (a locked file,
+    a filesystem that rejects utime), the transfer must still complete, since
+    the bytes are already safely in place. Falls back to size-only equality
+    for this file on a later compare, and that fallback must be logged."""
+    api, server_root, local_dir = sftp_env
+    name = "down.bin"
+    data = os.urandom(4096)
+    remote_path = server_root / name
+    remote_path.write_bytes(data)
+
+    target_local_path = os.path.abspath(str(local_dir / name))
+    real_utime = os.utime
+
+    def _raise_only_for_target(path, *args, **kwargs):
+        if os.path.abspath(path) == target_local_path:
+            raise OSError("simulated: cannot set local file time")
+        return real_utime(path, *args, **kwargs)
+
+    # Patch narrowly on the module simple_sftp_client actually uses (its own
+    # `import os`), and only for the one path being downloaded, so nothing
+    # else in the test (fixture teardown, etc.) is affected.
+    monkeypatch.setattr(simple_sftp_client.os, "utime", _raise_only_for_target)
+
+    item_id = _enqueue_one(api, "download", local_dir, "/", name, "overwrite", wait_for_queue_count)
+    wait_for_drain(api)
+
+    entry = state_of(api, item_id)
+    assert entry["state"] == COMPLETED
+    assert (local_dir / name).read_bytes() == data
+    with api._console_lock:
+        messages = [line["msg"] for line in api._console_buffer]
+    assert any("could not set modification time" in m for m in messages)
