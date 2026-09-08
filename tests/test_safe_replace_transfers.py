@@ -106,6 +106,108 @@ def test_download_success_writes_correct_bytes_and_no_temp_left(
     assert _local_temp_files(local_dir) == []
 
 
+# ───────────── download: unverified size must not publish ─────────────
+
+def test_download_final_stat_failure_leaves_destination_unchanged_and_no_temp_left(
+        sftp_env, wait_for_queue_count, wait_for_drain, state_of):
+    """If the remote size cannot be read after the byte loop finishes, the
+    download is unverified and must not be published: the existing local file
+    stays and the transfer fails, even though every byte arrived. The old code
+    swallowed the failed lookup as -1, skipped the size check, and published."""
+    api, server_root, local_dir = sftp_env
+    name = "down.bin"
+    original = b"O" * 4096
+    (local_dir / name).write_bytes(original)
+    (server_root / name).write_bytes(os.urandom(64 * 1024))
+
+    real_stat = paramiko.SFTPClient.stat
+    calls = {"n": 0}
+
+    def flaky_stat(self, path):
+        # The pre-transfer stat (first call) succeeds so the download runs;
+        # every stat after that fails, like a connection dropped right at the
+        # verification step.
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise OSError("simulated dropped connection")
+        return real_stat(self, path)
+
+    paramiko.SFTPClient.stat = flaky_stat
+    try:
+        item_id = _enqueue_one(api, "download", local_dir, "/", name, "overwrite", wait_for_queue_count)
+        wait_for_drain(api)
+    finally:
+        paramiko.SFTPClient.stat = real_stat
+
+    assert state_of(api, item_id)["state"] == FAILED
+    assert (local_dir / name).read_bytes() == original
+    assert _local_temp_files(local_dir) == []
+
+
+def test_download_size_mismatch_leaves_destination_unchanged_and_no_temp_left(
+        sftp_env, wait_for_queue_count, wait_for_drain, state_of):
+    """If the verified remote size does not match the bytes written, the
+    download is treated as incomplete and must not be published."""
+    api, server_root, local_dir = sftp_env
+    name = "down.bin"
+    original = b"O" * 4096
+    (local_dir / name).write_bytes(original)
+    (server_root / name).write_bytes(os.urandom(64 * 1024))
+
+    real_stat = paramiko.SFTPClient.stat
+
+    def oversize_stat(self, path):
+        st = real_stat(self, path)
+        st.st_size = st.st_size + 100  # claim more bytes than the file has
+        return st
+
+    paramiko.SFTPClient.stat = oversize_stat
+    try:
+        item_id = _enqueue_one(api, "download", local_dir, "/", name, "overwrite", wait_for_queue_count)
+        wait_for_drain(api)
+    finally:
+        paramiko.SFTPClient.stat = real_stat
+
+    assert state_of(api, item_id)["state"] == FAILED
+    assert (local_dir / name).read_bytes() == original
+    assert _local_temp_files(local_dir) == []
+
+
+def test_download_zero_byte_over_existing_publishes(
+        sftp_env, wait_for_queue_count, wait_for_drain, state_of):
+    """A real zero-byte remote file must still publish over an existing local
+    file: the size lookup succeeds and returns 0, so verification passes."""
+    api, server_root, local_dir = sftp_env
+    name = "empty.bin"
+    (local_dir / name).write_bytes(b"old content")
+    (server_root / name).write_bytes(b"")
+
+    item_id = _enqueue_one(api, "download", local_dir, "/", name, "overwrite", wait_for_queue_count)
+    wait_for_drain(api)
+
+    assert state_of(api, item_id)["state"] == COMPLETED
+    assert (local_dir / name).read_bytes() == b""
+    assert _local_temp_files(local_dir) == []
+
+
+def test_download_normal_over_existing_publishes(
+        sftp_env, wait_for_queue_count, wait_for_drain, state_of):
+    """A normal download over an existing local file publishes the new bytes
+    once the verified size matches."""
+    api, server_root, local_dir = sftp_env
+    name = "down.bin"
+    (local_dir / name).write_bytes(b"old content")
+    data = os.urandom(48 * 1024 + 11)
+    (server_root / name).write_bytes(data)
+
+    item_id = _enqueue_one(api, "download", local_dir, "/", name, "overwrite", wait_for_queue_count)
+    wait_for_drain(api)
+
+    assert state_of(api, item_id)["state"] == COMPLETED
+    assert (local_dir / name).read_bytes() == data
+    assert _local_temp_files(local_dir) == []
+
+
 # ───────────── upload: cancel keeps the original ─────────────
 
 def test_upload_cancel_leaves_existing_destination_unchanged_and_no_temp_left(

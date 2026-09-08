@@ -2547,9 +2547,23 @@ class Api:
                         got += len(chunk)
                         cb(got, 0)
             if finished:
-                src_size, src_mtime = self._rstat(sftp, rp)
+                # Confirm the remote size directly rather than through _rstat,
+                # which hides a failed lookup as -1. A -1 there would skip the
+                # size check entirely and publish an unverified download. Any
+                # failure to read the size (source gone, permission denied,
+                # connection dropped) must raise so the retry loop retries and,
+                # if it keeps failing, leaves the existing local file untouched.
+                # A genuine zero-byte file still stats fine and publishes.
+                try:
+                    src_stat = sftp.stat(rp)
+                except Exception as e:
+                    raise IOError(
+                        f"download not verified: could not read the remote "
+                        f"file size ({e}); existing file left in place") from e
+                src_size = src_stat.st_size
+                src_mtime = int(src_stat.st_mtime or 0)
                 temp_size = os.path.getsize(temp)
-                if src_size >= 0 and temp_size != src_size:
+                if temp_size != src_size:
                     raise IOError(
                         f"download incomplete: wrote {temp_size} of {src_size} bytes")
                 os.replace(temp, lp)
