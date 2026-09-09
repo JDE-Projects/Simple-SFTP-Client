@@ -1024,7 +1024,9 @@ function openSessions(){ const list=$("sessions")._list||[]; const box=$("sessLi
         const ok=await confirm2("Delete session","Deleting this session will also remove its saved password from Windows Credential Manager.\n\nContinue?");
         if(!ok)return;
       }
-      const r=await API.delete_session(x.name); fillSessions(r.sessions); openSessions(); }; d.appendChild(del); box.appendChild(d); });
+      const r=await API.delete_session(x.name);
+      if(!r.ok){ infoBox("Could not delete session", r.error||"Delete failed."); return; }
+      fillSessions(r.sessions); openSessions(); }; d.appendChild(del); box.appendChild(d); });
   $("sessModal").classList.add("show"); }
 
 /* ───── update check ───── */

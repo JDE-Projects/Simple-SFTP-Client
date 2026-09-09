@@ -264,10 +264,12 @@ def test_cancelled_host_key_prompt_does_not_cache_password(api, monkeypatch):
 
 def test_save_session_write_failure_rolls_back_keyring_write(api, monkeypatch):
     # A password was written to the keychain for this call, but the session
-    # file itself failed to save: the write must be rolled back so no
+    # file itself failed to save: with no prior password on record, the
+    # write must be rolled back by deleting the newly created entry so no
     # orphaned credential is left behind for a session that doesn't exist.
     set_calls = []
     deleted = []
+    monkeypatch.setattr(keyring, "get_password", lambda service, key: None)
     monkeypatch.setattr(keyring, "set_password",
                         lambda service, key, pw: set_calls.append((service, key, pw)))
     monkeypatch.setattr(keyring, "delete_password",
@@ -282,6 +284,59 @@ def test_save_session_write_failure_rolls_back_keyring_write(api, monkeypatch):
     assert "error" in result
     assert set_calls == [("SimpleSFTPClient", "example.com|alice", "hunter2")]
     assert deleted == [("SimpleSFTPClient", "example.com|alice")]
+
+
+def test_save_session_write_failure_restores_prior_password(api, monkeypatch):
+    # There was already a saved password for this session before this call
+    # overwrote it. When _save_sessions then fails, the rollback must
+    # restore the old password rather than delete the entry outright.
+    #
+    # Confirmed this test fails against the pre-fix code: the old rollback
+    # unconditionally called keyring.delete_password, so it erased "oldpw"
+    # instead of restoring it, and delete_password was called (not skipped).
+    set_calls = []
+    deleted = []
+    monkeypatch.setattr(keyring, "get_password", lambda service, key: "oldpw")
+    monkeypatch.setattr(keyring, "set_password",
+                        lambda service, key, pw: set_calls.append((service, key, pw)))
+    monkeypatch.setattr(keyring, "delete_password",
+                        lambda service, key: deleted.append((service, key)))
+    monkeypatch.setattr(app.Api, "_save_sessions", lambda self, sessions: False)
+
+    api._cred_pass = "newpw"
+    api._cred_identity = ("example.com", 22, "alice", "password")
+    result = api.save_session(base_session())
+
+    assert result["ok"] is False
+    assert set_calls == [
+        ("SimpleSFTPClient", "example.com|alice", "newpw"),
+        ("SimpleSFTPClient", "example.com|alice", "oldpw"),
+    ]
+    assert deleted == []
+
+
+def test_save_session_write_failure_restore_failure_reports_uncertain_state(api, monkeypatch):
+    # If restoring the prior password during rollback itself fails, the
+    # returned error must say so rather than the normal "Nothing was
+    # changed" message, since the keychain may now be left in an unknown
+    # state.
+    set_calls = []
+
+    def flaky_set_password(service, key, pw):
+        set_calls.append((service, key, pw))
+        if len(set_calls) == 2:
+            raise RuntimeError("backend unavailable")
+
+    monkeypatch.setattr(keyring, "get_password", lambda service, key: "oldpw")
+    monkeypatch.setattr(keyring, "set_password", flaky_set_password)
+    monkeypatch.setattr(app.Api, "_save_sessions", lambda self, sessions: False)
+
+    api._cred_pass = "newpw"
+    api._cred_identity = ("example.com", 22, "alice", "password")
+    result = api.save_session(base_session())
+
+    assert result["ok"] is False
+    assert "Check the saved password for this server" in result["error"]
 
 
 def test_save_session_write_failure_without_password_does_not_touch_keyring(api, monkeypatch):

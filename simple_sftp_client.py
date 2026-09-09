@@ -1052,15 +1052,18 @@ class Api:
         # rather than misfiled under the new name.
         pw_saved = False
         pw_error = None
+        had_prior = False
+        prior = None
         proposed = (s.get("host", "").strip(), port,
                     s.get("username", "").strip(), s.get("auth"))
         if s.get("remember") and s.get("auth") == "password":
             if self._cred_pass and self._cred_identity == proposed:
                 try:
                     import keyring
-                    keyring.set_password("SimpleSFTPClient",
-                                          cred_key(s.get("host"), s.get("port"), s.get("username")),
-                                          self._cred_pass)
+                    cred_name = cred_key(s.get("host"), s.get("port"), s.get("username"))
+                    prior = keyring.get_password("SimpleSFTPClient", cred_name)
+                    had_prior = prior is not None
+                    keyring.set_password("SimpleSFTPClient", cred_name, self._cred_pass)
                     pw_saved = True
                 except Exception as e:
                     debug.log("keyring set failed", str(e))
@@ -1074,16 +1077,25 @@ class Api:
         sessions.sort(key=lambda x: x.get("name", "").lower())
         saved_ok = self._save_sessions(sessions)
         if not saved_ok:
+            rollback_failed = False
             if pw_saved:
-                # Don't leave a credential in the keychain for a session that
-                # was never actually saved.
+                # The session file write failed, so undo the keychain write:
+                # restore whatever was there before rather than erasing it,
+                # or delete the newly created entry if nothing was there.
                 try:
                     import keyring
-                    keyring.delete_password(
-                        "SimpleSFTPClient",
-                        cred_key(s.get("host"), s.get("port"), s.get("username")))
+                    cred_name = cred_key(s.get("host"), s.get("port"), s.get("username"))
+                    if had_prior:
+                        keyring.set_password("SimpleSFTPClient", cred_name, prior)
+                    else:
+                        keyring.delete_password("SimpleSFTPClient", cred_name)
                 except Exception as e:
                     debug.log("keyring rollback failed", str(e))
+                    rollback_failed = True
+            if rollback_failed:
+                return {"ok": False,
+                        "error": "Could not save the session, and restoring the previous saved "
+                                 "password may have failed. Check the saved password for this server."}
             return {"ok": False,
                     "error": f"Could not save the session to {SESSIONS_FILE}. Nothing was changed."}
         result = {"ok": True, "sessions": sessions, "pw_saved": pw_saved}
