@@ -542,6 +542,20 @@ class _TofuPolicy(paramiko.MissingHostKeyPolicy):
 
 
 # ───────────── debug log (off by default) ─────────────
+_URL_CREDS_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:/@]+:)[^\s@]+(@)")
+_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
+    re.DOTALL,
+)
+
+
+def _scrub(text):
+    """Mask URL-embedded passwords and private-key blocks before they hit the log."""
+    text = _URL_CREDS_RE.sub(r"\1[redacted]\2", text)
+    text = _PRIVATE_KEY_RE.sub("[redacted]", text)
+    return text
+
+
 class _ParamikoBridge(logging.Handler):
     """Feed paramiko's protocol-level logging into the debug file when enabled."""
     def __init__(self, dbg):
@@ -603,11 +617,11 @@ class DebugLog:
         try:
             with self._lock, open(self._path, "a", encoding="utf-8") as f:
                 ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] {label}\n")
+                f.write(f"[{ts}] {_scrub(str(label))}\n")
                 if content:
                     if isinstance(content, (dict, list)):
                         content = json.dumps(content, indent=2, default=str)
-                    f.write(f"{content}\n")
+                    f.write(f"{_scrub(str(content))}\n")
                 f.write("\n")
         except Exception:
             pass
