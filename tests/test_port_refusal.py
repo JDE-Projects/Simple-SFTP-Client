@@ -103,7 +103,7 @@ def test_connect_blank_port_defaults_to_22(api, monkeypatch):
         return FakeClient()
 
     monkeypatch.setattr(app.Api, "_open", fake_open)
-    monkeypatch.setattr(app.Api, "_transport_info", lambda self: {})
+    monkeypatch.setattr(app.Api, "_transport_info", lambda self, client=None: {})
     monkeypatch.setattr(app.Api, "_sweep_scratch_files", lambda self: None)
 
     result = api.connect({"host": "example.com", "username": "u", "password": "pw", "port": ""})
