@@ -893,6 +893,16 @@ class Api:
         self._target_workers = WORKER_COUNT
         # set while sync/watch/external-drop run, so the queue worker knows to wait
         self._legacy_active = threading.Event()
+        # Per-connection memory of files whose modification time could not be
+        # stamped after a transfer (server refused on upload, or os.utime
+        # failed on download). Maps a normalized (local_path, remote_path)
+        # key (see _mtime_fallback_key) to the file size recorded at transfer
+        # time, so a later same-size compare on this connection still reads
+        # the file as unchanged instead of newer_local/newer_remote forever.
+        # Cleared on disconnect (see shutdown()): it does not survive a
+        # reconnect.
+        self._mtime_fallback = {}
+        self._mtime_fallback_lock = threading.Lock()
         # Poll model: workers never touch evaluate_js. They write plain state
         # here, the window pulls it on a timer via poll_queue(). Progress is
         # keyed by queue item id since up to WORKER_COUNT_MAX items can be
@@ -1531,6 +1541,10 @@ class Api:
         self._cred_pass = ""
         self._cred_identity = None
         self._pending_host_key = None
+        # This connection's memory of unstamped files does not survive a
+        # disconnect: a reconnect starts clean.
+        with self._mtime_fallback_lock:
+            self._mtime_fallback.clear()
         debug.log("SHUTDOWN complete" if not still_alive else
                   "SHUTDOWN complete (worker thread(s) still running)")
         return {"ok": True}
@@ -2485,12 +2499,17 @@ class Api:
                 dst_size, dst_mtime = dst_stat.st_size, int(dst_stat.st_mtime)
             else:
                 dst_size, dst_mtime = -1, 0
-        if (on_conflict == "skip" and src_size >= 0 and dst_size == src_size
-                and abs(dst_mtime - src_mtime) <= MTIME_TOL):
-            # user chose skip and the other side matches on size and
-            # modification time (within tolerance) -> leave it. overwrite
-            # deliberately falls through and resends, even when size and
-            # time match, since neither alone proves the contents match.
+        sizes_match = src_size >= 0 and dst_size == src_size
+        if on_conflict == "skip" and sizes_match and (
+                abs(dst_mtime - src_mtime) <= MTIME_TOL
+                or self._mtime_fallback_matches(lp, rp, src_size)):
+            # user chose skip and the other side matches on size, and either
+            # the modification time also matches (within tolerance) or this
+            # connection remembers this pair as having failed its time stamp
+            # at transfer time with the same size (see _mtime_fallback_matches)
+            # -> leave it. overwrite deliberately falls through and resends,
+            # even when size and time match, since neither alone proves the
+            # contents match.
             self._progress(name, idx, total, src_size, src_size, 0, progress_key)
             return "skip"
         # Always rewrite from the start. A smaller destination is not proof of
@@ -2666,7 +2685,7 @@ class Api:
                         f"download incomplete: wrote {temp_size} of {src_size} bytes")
                 os.replace(temp, lp)
                 published = True
-                self._apply_download_mtime(lp, src_mtime)
+                self._apply_download_mtime(lp, rp, src_mtime, src_size)
             return finished
         finally:
             if not published:
@@ -2707,34 +2726,85 @@ class Api:
         except Exception:
             return -1, 0
 
-    def _apply_download_mtime(self, lp, mtime):
+    def _mtime_fallback_key(self, lp, rp):
+        """Build the one normalized key every record/lookup/clear of
+        self._mtime_fallback must use, so the two sides never drift apart and
+        silently stop matching. Local paths are normalized for case and made
+        absolute; remote paths are normalized as posix paths."""
+        return (os.path.normcase(os.path.abspath(lp)), posixpath.normpath(rp))
+
+    def _record_mtime_fallback(self, lp, rp, size):
+        key = self._mtime_fallback_key(lp, rp)
+        with self._mtime_fallback_lock:
+            self._mtime_fallback[key] = size
+
+    def _clear_mtime_fallback(self, lp, rp):
+        key = self._mtime_fallback_key(lp, rp)
+        with self._mtime_fallback_lock:
+            self._mtime_fallback.pop(key, None)
+
+    def _mtime_fallback_matches(self, lp, rp, size):
+        """True only if this (local, remote) pair was remembered as having
+        failed its time stamp on this connection, and the size given (the
+        caller has already confirmed both sides' current sizes are equal)
+        still matches the size recorded at transfer time. A size mismatch
+        means the file has genuinely changed since, so the stale entry is
+        dropped rather than kept around to answer False forever."""
+        key = self._mtime_fallback_key(lp, rp)
+        with self._mtime_fallback_lock:
+            recorded = self._mtime_fallback.get(key)
+            if recorded is None:
+                return False
+            if recorded == size:
+                return True
+            del self._mtime_fallback[key]
+            return False
+
+    def _apply_download_mtime(self, lp, rp, mtime, size):
         """Stamp a freshly downloaded local file with the remote file's
         modification time (Option B), so a later size+mtime compare reads an
         unchanged file as 'same'. A mtime of 0 means the remote stat was
-        unavailable; leave the file's own time in that case. A failure to set
-        the time is logged, not raised: the bytes are already safely in place."""
+        unavailable; leave the file's own time in that case (this file is
+        not remembered as a fallback either; that is a separate, unrelated
+        condition). If setting the time fails, the file is remembered for
+        the rest of this connection: a later compare or skip check that
+        finds a matching size will still treat it as unchanged, even though
+        its time does not match. This memory does not survive a
+        disconnect/reconnect."""
         if not mtime:
             return
         try:
             os.utime(lp, (mtime, mtime))
         except OSError as e:
             self._worker_log(f"could not set modification time on {lp}: {e}; "
-                             "a later compare may show this file as changed", "warn")
+                             "this file will be treated as unchanged by size "
+                             "for the rest of this connection", "warn")
+            self._record_mtime_fallback(lp, rp, size)
+        else:
+            self._clear_mtime_fallback(lp, rp)
 
     def _apply_upload_mtime(self, sftp, rp, lp):
         """Stamp an uploaded remote file with the local source's modification
-        time (Option B). If the server refuses to set the time, fall back to
-        size-only equality for this file: log it and carry on rather than
-        failing a transfer whose bytes are already safely published."""
+        time (Option B). If the server refuses to set the time, the file is
+        remembered for the rest of this connection: a later compare or skip
+        check that finds a matching size will still treat it as unchanged,
+        even though its time does not match. This memory does not survive a
+        disconnect/reconnect."""
         try:
-            mtime = int(os.stat(lp).st_mtime)
+            local_stat = os.stat(lp)
+            mtime = int(local_stat.st_mtime)
         except OSError:
             return
         try:
             sftp.utime(rp, (mtime, mtime))
         except Exception as e:
             self._worker_log(f"server refused to set modification time on {rp}: "
-                             f"{friendly_error(e)}; using size-only match for this file", "warn")
+                             f"{friendly_error(e)}; this file will be treated "
+                             "as unchanged by size for the rest of this "
+                             "connection", "warn")
+            self._record_mtime_fallback(lp, rp, local_stat.st_size)
+        else:
+            self._clear_mtime_fallback(lp, rp)
 
     def _walk_local(self, lp, rp):
         out = []
@@ -2841,22 +2911,28 @@ class Api:
             _raise_incomplete()
         return local_map, remote_map
 
-    @staticmethod
-    def _classify(rel, local_map, remote_map):
-        """Metadata equality, not proven byte equality: a pair is 'same' only
-        when sizes match and modification times agree within MTIME_TOL. Because
+    def _classify(self, rel, local_map, remote_map):
+        """Metadata equality, not proven byte equality: a pair is 'same' when
+        sizes match and modification times agree within MTIME_TOL. Because
         transfers now preserve the source mtime (Option B), a same-size edit no
         longer hides as 'same' -- its mtime differs, so it sorts to newer_local
-        or newer_remote by time. local_map/remote_map are rel -> (size, mtime,
-        ...) as built by _compute_pair_maps."""
+        or newer_remote by time, UNLESS this connection remembers this pair as
+        having failed its time stamp at transfer time (see
+        _mtime_fallback_matches), in which case a matching size alone still
+        counts as 'same'. local_map/remote_map are rel -> (size, mtime, lp,
+        rp) as built by _compute_pair_maps."""
         if rel in local_map and rel not in remote_map:
             return "local_only"
         if rel in remote_map and rel not in local_map:
             return "remote_only"
         lsize, lmtime = local_map[rel][0], local_map[rel][1]
         rsize, rmtime = remote_map[rel][0], remote_map[rel][1]
-        if lsize == rsize and abs(lmtime - rmtime) <= MTIME_TOL:
-            return "same"
+        if lsize == rsize:
+            if abs(lmtime - rmtime) <= MTIME_TOL:
+                return "same"
+            lp, rp = local_map[rel][2], remote_map[rel][3]
+            if self._mtime_fallback_matches(lp, rp, lsize):
+                return "same"
         return "newer_local" if lmtime >= rmtime else "newer_remote"
 
     def _compute_compare(self, sftp, local_dir, remote_dir, on_progress=None, stop_event=None):
