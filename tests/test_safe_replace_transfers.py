@@ -7,7 +7,9 @@ while a transfer is actually in flight.
 Runs against the in-process SFTP server from conftest.py (sftp_env and the
 posix-rename-unsupported variant, sftp_env_no_posix_rename).
 """
+import errno
 import os
+import stat
 import time
 
 import paramiko
@@ -285,6 +287,221 @@ def test_upload_refuses_and_keeps_original_when_posix_rename_unsupported(
     assert entry["state"] == FAILED
     assert "server does not support safe atomic replace" in entry["error"]
     assert "file not written to protect the existing copy" in entry["error"]
+    assert (server_root / name).read_bytes() == original
+    assert _remote_temp_files(server_root) == []
+
+
+# ───────────── upload: preserve the existing target's permissions ─────────────
+
+# These patch paramiko.SFTPClient at the class level rather than on
+# api.sftp, because each queue worker opens its own SFTP session
+# (self.client.open_sftp()) instead of reusing the browsing session; api.sftp
+# is never touched by a transfer. This is the same approach the existing
+# flaky_stat/oversize_stat download tests above use.
+
+def test_upload_overwrite_chmods_scratch_to_target_mode_before_rename(
+        sftp_env, wait_for_queue_count, wait_for_drain, state_of):
+    """When an upload overwrites an existing remote file, the scratch file
+    must be given that file's standard permission bits before the atomic
+    swap, so the published file keeps the same permissions instead of
+    picking up the server's default for a brand new file. Windows does not
+    store real Unix permission bits, so the existing file's mode is faked by
+    stubbing stat, and the chmod call is recorded rather than checked by
+    reading real bits back off disk."""
+    api, server_root, local_dir = sftp_env
+    name = "script.sh"
+    (server_root / name).write_bytes(b"OLD CONTENT")
+    (local_dir / name).write_bytes(b"NEW CONTENT")
+    target_mode = 0o100755  # regular file, rwxr-xr-x
+    expected_mode = stat.S_IMODE(target_mode) & 0o777
+    rp = f"/{name}"
+
+    real_stat = paramiko.SFTPClient.stat
+    real_chmod = paramiko.SFTPClient.chmod
+    real_rename = paramiko.SFTPClient.posix_rename
+    chmod_calls = []
+    rename_calls = []
+
+    def stubbed_stat(self, path):
+        if path == rp:
+            attr = paramiko.SFTPAttributes()
+            attr.st_mode = target_mode
+            attr.st_size = 11
+            return attr
+        return real_stat(self, path)
+
+    def recording_chmod(self, path, mode):
+        chmod_calls.append((path, mode))
+        return real_chmod(self, path, mode)
+
+    def recording_rename(self, oldpath, newpath):
+        rename_calls.append((oldpath, newpath))
+        return real_rename(self, oldpath, newpath)
+
+    paramiko.SFTPClient.stat = stubbed_stat
+    paramiko.SFTPClient.chmod = recording_chmod
+    paramiko.SFTPClient.posix_rename = recording_rename
+    try:
+        item_id = _enqueue_one(api, "upload", local_dir, "/", name, "overwrite", wait_for_queue_count)
+        wait_for_drain(api)
+    finally:
+        paramiko.SFTPClient.stat = real_stat
+        paramiko.SFTPClient.chmod = real_chmod
+        paramiko.SFTPClient.posix_rename = real_rename
+
+    assert state_of(api, item_id)["state"] == COMPLETED
+    assert (server_root / name).read_bytes() == b"NEW CONTENT"
+    assert len(chmod_calls) == 1
+    chmod_path, chmod_mode = chmod_calls[0]
+    assert is_temp_part(os.path.basename(chmod_path))
+    assert chmod_mode == expected_mode
+    # the chmod on the scratch file must land before it is swapped in
+    assert chmod_path == rename_calls[0][0]
+
+
+def test_upload_new_file_skips_chmod_and_still_publishes(
+        sftp_env, wait_for_queue_count, wait_for_drain, state_of):
+    """A brand new destination has nothing to preserve: the target stat comes
+    back ENOENT, so no chmod is issued and the file keeps the server's
+    default permissions for a new file, without failing the upload."""
+    api, server_root, local_dir = sftp_env
+    name = "brand-new.txt"
+    (local_dir / name).write_bytes(b"NEW CONTENT")
+    rp = f"/{name}"
+
+    real_stat = paramiko.SFTPClient.stat
+    real_chmod = paramiko.SFTPClient.chmod
+    chmod_calls = []
+
+    def stubbed_stat(self, path):
+        if path == rp:
+            raise IOError(errno.ENOENT, "no such file")
+        return real_stat(self, path)
+
+    def recording_chmod(self, path, mode):
+        chmod_calls.append((path, mode))
+        return real_chmod(self, path, mode)
+
+    paramiko.SFTPClient.stat = stubbed_stat
+    paramiko.SFTPClient.chmod = recording_chmod
+    try:
+        item_id = _enqueue_one(api, "upload", local_dir, "/", name, "overwrite", wait_for_queue_count)
+        wait_for_drain(api)
+    finally:
+        paramiko.SFTPClient.stat = real_stat
+        paramiko.SFTPClient.chmod = real_chmod
+
+    assert state_of(api, item_id)["state"] == COMPLETED
+    assert (server_root / name).read_bytes() == b"NEW CONTENT"
+    assert chmod_calls == []
+
+
+def test_upload_refuses_when_target_permissions_unreadable(
+        sftp_env, wait_for_queue_count, wait_for_drain, state_of):
+    """If the existing target's metadata cannot be read for a reason other
+    than the file being absent, the upload must not guess: it is refused
+    rather than risk publishing over a file whose permissions are unknown.
+    Without the guard this stat failure would either propagate as a generic
+    error, or (if the read failure were mistaken for "file absent") the
+    upload would silently publish over a file whose real permissions were
+    never checked; this asserts the file is refused up front and the
+    original is left untouched."""
+    api, server_root, local_dir = sftp_env
+    name = "secret.conf"
+    original = b"ORIGINAL SERVER COPY"
+    (server_root / name).write_bytes(original)
+    (local_dir / name).write_bytes(b"new content that must never land")
+    rp = f"/{name}"
+
+    real_stat = paramiko.SFTPClient.stat
+
+    def stubbed_stat(self, path):
+        if path == rp:
+            raise IOError(errno.EACCES, "denied")
+        return real_stat(self, path)
+
+    paramiko.SFTPClient.stat = stubbed_stat
+    try:
+        item_id = _enqueue_one(api, "upload", local_dir, "/", name, "overwrite", wait_for_queue_count)
+        wait_for_drain(api)
+    finally:
+        paramiko.SFTPClient.stat = real_stat
+
+    entry = state_of(api, item_id)
+    assert entry["state"] == FAILED
+    assert "could not read the remote file's current permissions" in entry["error"]
+    assert (server_root / name).read_bytes() == original
+    assert _remote_temp_files(server_root) == []
+
+
+def test_upload_refuses_when_server_refuses_chmod(
+        sftp_env, wait_for_queue_count, wait_for_drain, state_of):
+    """If the target's permissions can be read but the server refuses to set
+    them on the scratch file, the upload must not publish a file with the
+    wrong permissions: it is refused and the original stays in place.
+    Without the guard the old code path would rename the scratch file into
+    place regardless of the failed chmod, silently dropping the target's
+    permissions; this asserts the fixed behavior refuses instead."""
+    api, server_root, local_dir = sftp_env
+    name = "locked.bin"
+    original = b"ORIGINAL SERVER COPY"
+    (server_root / name).write_bytes(original)
+    (local_dir / name).write_bytes(b"new content that must never land")
+
+    real_chmod = paramiko.SFTPClient.chmod
+
+    def failing_chmod(self, path, mode):
+        raise IOError("server refused chmod")
+
+    paramiko.SFTPClient.chmod = failing_chmod
+    try:
+        item_id = _enqueue_one(api, "upload", local_dir, "/", name, "overwrite", wait_for_queue_count)
+        wait_for_drain(api)
+    finally:
+        paramiko.SFTPClient.chmod = real_chmod
+
+    entry = state_of(api, item_id)
+    assert entry["state"] == FAILED
+    assert "server refused to set the target's permissions" in entry["error"]
+    assert (server_root / name).read_bytes() == original
+    assert _remote_temp_files(server_root) == []
+
+
+def test_upload_refuses_when_target_reports_no_permissions(
+        sftp_env, wait_for_queue_count, wait_for_drain, state_of):
+    """A nonstandard server can answer a stat without a permissions field, so
+    the target's mode comes back as None. There is nothing to preserve and
+    guessing a default could widen a private file, so the upload is refused
+    with the same clear message as an unreadable target, and the original
+    stays in place. Without the guard the None mode would blow up S_IMODE with
+    a bare TypeError instead of this clear refusal."""
+    api, server_root, local_dir = sftp_env
+    name = "no-perms.conf"
+    original = b"ORIGINAL SERVER COPY"
+    (server_root / name).write_bytes(original)
+    (local_dir / name).write_bytes(b"new content that must never land")
+    rp = f"/{name}"
+
+    real_stat = paramiko.SFTPClient.stat
+
+    def stubbed_stat(self, path):
+        if path == rp:
+            attr = paramiko.SFTPAttributes()
+            attr.st_size = len(original)
+            attr.st_mode = None  # server omitted the permissions field
+            return attr
+        return real_stat(self, path)
+
+    paramiko.SFTPClient.stat = stubbed_stat
+    try:
+        item_id = _enqueue_one(api, "upload", local_dir, "/", name, "overwrite", wait_for_queue_count)
+        wait_for_drain(api)
+    finally:
+        paramiko.SFTPClient.stat = real_stat
+
+    entry = state_of(api, item_id)
+    assert entry["state"] == FAILED
+    assert "could not read the remote file's current permissions" in entry["error"]
     assert (server_root / name).read_bytes() == original
     assert _remote_temp_files(server_root) == []
 
