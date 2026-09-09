@@ -2495,9 +2495,19 @@ class Api:
         # Writes into a scratch file next to the real remote destination
         # (never rp itself), so the destination is only touched once the new
         # copy is proven complete. On success the scratch file is confirmed
-        # to be the right size, then swapped in with posix_rename, which is
-        # atomic: a cancel, dropped connection, or exhausted retry can only
-        # ever leave the scratch file behind, never a half-written rp.
+        # to be the right size. If this upload is overwriting an existing
+        # file, the scratch file is given that file's standard permission
+        # bits before the swap, so the published file keeps the same
+        # permissions instead of picking up the server's default for a new
+        # file. A brand new destination (nothing to overwrite) just keeps
+        # the server default. If the existing file's permissions cannot be
+        # read, or the server refuses to set them on the scratch file, the
+        # upload is refused rather than publishing a file with the wrong
+        # permissions; the existing file is left in place. Once the
+        # permissions are settled the scratch file is swapped in with
+        # posix_rename, which is atomic: a cancel, dropped connection, or
+        # exhausted retry can only ever leave the scratch file behind, never
+        # a half-written rp.
         #
         # Check cancel_check() only once there is another chunk actually to
         # send, and only after confirming there is more file left (the read
@@ -2530,6 +2540,31 @@ class Api:
                 if temp_size != src_size:
                     raise IOError(
                         f"upload incomplete: wrote {temp_size} of {src_size} bytes")
+                try:
+                    existing_attr = sftp.stat(rp)
+                except Exception as e:
+                    if getattr(e, "errno", None) == errno.ENOENT:
+                        existing_attr = None
+                    else:
+                        raise IOError(
+                            "could not read the remote file's current "
+                            f"permissions ({e}); existing file left in "
+                            "place to protect its permissions") from e
+                if existing_attr is not None:
+                    if existing_attr.st_mode is None:
+                        raise IOError(
+                            "could not read the remote file's current "
+                            "permissions (the server did not report them); "
+                            "existing file left in place to protect its "
+                            "permissions")
+                    mode = stat.S_IMODE(existing_attr.st_mode) & 0o777
+                    try:
+                        sftp.chmod(temp, mode)
+                    except Exception as e:
+                        raise IOError(
+                            "server refused to set the target's permissions "
+                            "on the new file; upload refused to protect the "
+                            "existing copy") from e
                 try:
                     sftp.posix_rename(temp, rp)
                 except Exception as e:
