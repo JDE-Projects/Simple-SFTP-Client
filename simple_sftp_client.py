@@ -526,6 +526,15 @@ class KnownHostsUnreadable(Exception):
         self.path = path
 
 
+class ScanIncomplete(Exception):
+    """Raised by _compute_pair_maps when part of the tree could not be read
+    during the walk (an unreadable folder, an unreadable file's metadata, or a
+    lost connection mid-listing), so compare/sync refuse to report a result
+    built on a tree that was not fully seen. An unsafe remote name is not one
+    of these: it is skipped and logged, since it can never be represented
+    locally and refusing would block a whole folder over one such name."""
+
+
 class _TofuPolicy(paramiko.MissingHostKeyPolicy):
     """Do not auto-add. Surface the offered key so the UI can ask the user."""
     def missing_host_key(self, client, hostname, key):
@@ -1704,17 +1713,25 @@ class Api:
                 continue
             break
 
-    def _iter_local(self, lp, rp, is_dir):
+    def _iter_local(self, lp, rp, is_dir, problems=None):
         """Stream (local_path, remote_path, size, mtime) one file at a time
         from a local file or folder, without creating any directories. A
         single file yields one tuple; a folder is walked depth-first, one
-        subfolder's listing in memory at a time rather than the whole tree."""
+        subfolder's listing in memory at a time rather than the whole tree.
+
+        problems, if given, is a list that a listing failure or an unreadable
+        file's metadata appends a short descriptor to (in addition to the usual
+        log), so a caller that needs to know the walk was incomplete
+        (compare/sync) can tell; the default of None keeps the ordinary
+        transfer scan's current behavior (log and continue) unchanged."""
         if not is_dir:
             try:
                 st = os.stat(lp)
                 size, mtime = st.st_size, int(st.st_mtime)
-            except OSError:
+            except OSError as e:
                 size, mtime = 0, 0
+                if problems is not None:
+                    problems.append(f"could not read {lp}: {e}")
             yield (lp, rp, size, mtime)
             return
         try:
@@ -1728,19 +1745,23 @@ class Api:
                     except OSError:
                         child_is_dir = False
                     if child_is_dir:
-                        yield from self._iter_local(entry.path, rchild, True)
+                        yield from self._iter_local(entry.path, rchild, True, problems=problems)
                     else:
                         try:
                             st = entry.stat(follow_symlinks=False)
                             size, mtime = st.st_size, int(st.st_mtime)
-                        except OSError:
+                        except OSError as e:
                             size, mtime = 0, 0
+                            if problems is not None:
+                                problems.append(f"could not read {entry.path}: {e}")
                         yield (entry.path, rchild, size, mtime)
         except OSError as e:
             self._worker_log(f"could not list {lp}: {e}", "error")
+            if problems is not None:
+                problems.append(f"could not list {lp}: {e}")
             return
 
-    def _iter_remote(self, sftp, rp, lp, is_dir, root):
+    def _iter_remote(self, sftp, rp, lp, is_dir, root, problems=None):
         """Same as _iter_local but over an sftp session for a remote file or
         folder, again without creating any directories. sftp must be a
         session owned by the caller (the scanner opens its own, never
@@ -1748,6 +1769,11 @@ class Api:
         local folder the user selected for this download; it stays fixed
         across the whole recursive walk so every level, however deep, is
         checked against the same boundary rather than its immediate parent.
+
+        problems, if given, is a list that a listing failure appends a short
+        descriptor to (in addition to the usual log); see _iter_local for why
+        the default is None. An unsafe remote name is skipped and logged only,
+        never recorded as a problem (see the ValueError branch below).
 
         listdir_iter() pipelines read-ahead READDIR requests on the sftp
         session, so starting a second listdir_iter() on the same session
@@ -1770,6 +1796,12 @@ class Api:
                 try:
                     lchild = safe_local_child(lp, a.filename, root)
                 except ValueError as e:
+                    # An unsafe remote name is skipped and logged, not treated
+                    # as an incomplete-scan problem: it can never be represented
+                    # locally, so it would block compare/sync on a whole folder
+                    # over one untransferable name (e.g. a legitimate Linux name
+                    # that is illegal on Windows). This matches the transfer
+                    # scan's skip-and-report behavior.
                     self._worker_log(f"skipped unsafe remote name {a.filename!r}: {e}", "error")
                     continue
                 if stat.S_ISDIR(a.st_mode):
@@ -1778,9 +1810,11 @@ class Api:
                     yield (lchild, rchild, a.st_size, int(a.st_mtime or 0))
         except Exception as e:
             self._worker_log(f"could not list {rp}: {friendly_error(e)}", "error")
+            if problems is not None:
+                problems.append(f"could not list {rp}: {friendly_error(e)}")
             return
         for rchild, lchild in subdirs:
-            yield from self._iter_remote(sftp, rchild, lchild, True, root)
+            yield from self._iter_remote(sftp, rchild, lchild, True, root, problems=problems)
 
     def _scan_and_queue(self, roots, direction, on_conflict, scan_id, stop_event, local_root=None):
         """Runs entirely on its own daemon thread, never the pywebview bridge
@@ -2695,10 +2729,16 @@ class Api:
         caller can accumulate it the same way the scan progress counter does.
         Returns (None, None) if stop_event fires before either walk finishes,
         the signal a caller uses to tell a cancelled compare/sync apart from
-        a genuinely empty one."""
+        a genuinely empty one. Raises ScanIncomplete if a folder could not be
+        listed or a file's metadata could not be read during either walk, since
+        a compare/sync result built on a tree that was not fully seen can
+        misclassify files as one-sided or in-sync (unlike the ordinary
+        transfer scan, which reports partial progress instead). An unsafe
+        remote name is skipped and logged, not treated as incomplete."""
         local_map = {}
         remote_map = {}
         seen_since_report = 0
+        problems = []
 
         def bump():
             nonlocal seen_since_report
@@ -2707,13 +2747,23 @@ class Api:
                 on_progress(seen_since_report)
                 seen_since_report = 0
 
-        for lp, rp, size, mtime in self._iter_local(local_dir, remote_dir, True):
+        def _raise_incomplete():
+            raise ScanIncomplete(
+                f"Some folders could not be read ({problems[0]}) "
+                f"[{len(problems)} problem(s)]; compare/sync was not run.")
+
+        for lp, rp, size, mtime in self._iter_local(local_dir, remote_dir, True, problems=problems):
             if stop_event is not None and stop_event.is_set():
                 return None, None
             rel = posixpath.relpath(rp, remote_dir)
             local_map[rel] = (size, mtime, lp, rp)
             bump()
-        for lp, rp, size, mtime in self._iter_remote(sftp, remote_dir, local_dir, True, local_dir):
+        # Fail fast: if the local walk already found a problem, refuse now
+        # rather than running the whole remote (network) walk just to discard it.
+        if problems:
+            _raise_incomplete()
+        for lp, rp, size, mtime in self._iter_remote(
+                sftp, remote_dir, local_dir, True, local_dir, problems=problems):
             if stop_event is not None and stop_event.is_set():
                 return None, None
             rel = posixpath.relpath(rp, remote_dir)
@@ -2721,6 +2771,10 @@ class Api:
             bump()
         if on_progress and seen_since_report:
             on_progress(seen_since_report)
+        if stop_event is not None and stop_event.is_set():
+            return None, None
+        if problems:
+            _raise_incomplete()
         return local_map, remote_map
 
     @staticmethod
@@ -2902,6 +2956,8 @@ class Api:
                 data["root_local"] = local_dir
                 data["root_remote"] = remote_dir
                 _finish(True, result=data)
+        except ScanIncomplete as e:
+            _finish(False, error=str(e))
         except Exception as e:
             reason = friendly_error(e)
             self._worker_log(f"compare failed: {reason}", "error")
