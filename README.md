@@ -37,7 +37,9 @@ If you enjoyed this project and would like to buy me a coffee, check out my [Ko-
 - Remote directory size calculation (on demand) and a connection health
   indicator.
 - Built-in check for updates against GitHub Releases.
-- Optional debug log, off by default, with credentials redacted.
+- Optional debug log, off by default. The app never logs passwords or
+  passphrases, and the log scrubs credentials embedded in URLs and any
+  private-key material as a backstop.
 - Secure transport only: weak or vulnerable algorithms are disabled, so the
   app connects securely or fails with a clear message (no unsafe fallback).
 
@@ -126,7 +128,9 @@ pipeline from this repo. You can also check the file against the published
 - Deleting a remote file or folder is permanent and cannot be undone; the app
   confirms first.
 - The optional debug log is off by default; when on it writes
-  `Debug_Log_MMDDYYYY_HHMMSS.txt` next to the app with credentials redacted.
+  `Debug_Log_MMDDYYYY_HHMMSS.txt` next to the app. The app never logs
+  passwords or passphrases; as a backstop, the log also scrubs any
+  credentials embedded in URLs and any private-key material before writing.
 - **Network use.** Other than the job you ask of it, this app makes one automatic network call: a check to GitHub for a newer release (at startup and when you press **Check for updates**), which sends only a version request. It collects and sends no personal data, usage data, or analytics.
 
 ## A note on how this was built
