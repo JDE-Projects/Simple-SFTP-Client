@@ -222,6 +222,7 @@
       <div id="authSeg" class="seg"><button data-v="password" class="on">Password</button><button data-v="key">Key</button></div></div>
     <div class="f secret" id="passWrap"><label class="field-label">Password</label><input id="pass" type="password" autocomplete="off"></div>
     <div class="f secret" id="keyWrap" style="display:none"><label class="field-label">Private key path</label><input id="keypath" type="text" class="mono" spellcheck="false"></div>
+    <div class="f secret" id="keypassWrap" style="display:none"><label class="field-label">Key passphrase</label><input id="keypass" type="password" autocomplete="off" placeholder="Only if the key is encrypted"></div>
     <div class="f start"><label class="field-label">Start path</label><input id="startpath" type="text" class="mono" placeholder="(home)" spellcheck="false"></div>
     <label class="toggle" id="rememberWrap" style="margin-bottom:8px"><span class="switch"></span><span>Remember pw</span></label>
     <button id="testBtn" class="btn-ghost btn-sm" style="margin-bottom:0">Test</button>
@@ -624,7 +625,11 @@ async function init(){
   // auth seg
   document.querySelectorAll("#authSeg button").forEach(b=>b.onclick=()=>{
     document.querySelectorAll("#authSeg button").forEach(x=>x.classList.remove("on")); b.classList.add("on");
-    authMode=b.dataset.v; $("passWrap").style.display=authMode==="password"?"flex":"none"; $("keyWrap").style.display=authMode==="key"?"flex":"none";});
+    authMode=b.dataset.v; $("passWrap").style.display=authMode==="password"?"flex":"none"; $("keyWrap").style.display=authMode==="key"?"flex":"none";
+    $("keypassWrap").style.display=authMode==="key"?"flex":"none";
+    if(authMode==="key"){ $("pass").value=""; } else { $("keypass").value=""; }
+    $("rememberWrap").style.display=authMode==="password"?"flex":"none";
+    if(authMode==="key"){ rememberPw=false; $("rememberWrap").classList.remove("on"); } });
   $("rememberWrap").onclick=()=>{rememberPw=!rememberPw;$("rememberWrap").classList.toggle("on",rememberPw);};
   $("connBtn").onclick=onConn; $("testBtn").onclick=onTest; $("saveBtn").onclick=onSave; $("manageBtn").onclick=openSessions;
   $("sessions").onchange=onPickSession;
@@ -697,13 +702,15 @@ function fillSessions(list){ const s=$("sessions"); s.innerHTML='<option value="
   (list||[]).forEach(x=>{const o=document.createElement("option");o.value=x.name;o.textContent=x.name;o._d=x;s.appendChild(o);}); s._list=list||[]; }
 async function onPickSession(){ const name=$("sessions").value; const x=($("sessions")._list||[]).find(s=>s.name===name); if(!x)return;
   $("host").value=x.host||""; $("port").value=x.port||"22"; $("user").value=x.username||""; $("startpath").value=x.start_path||"";
+  $("pass").value=""; $("keypass").value="";
   if(x.auth==="key"){ document.querySelector('#authSeg button[data-v="key"]').click(); $("keypath").value=x.key_path||""; }
   else { document.querySelector('#authSeg button[data-v="password"]').click(); }
-  if(x.remember){ const r=await API.get_remembered(x.host,x.username,x.port); if(r.password){$("pass").value=r.password;} } }
+  rememberPw=(x.auth!=="key"&&!!x.remember); $("rememberWrap").classList.toggle("on",rememberPw);
+  if(rememberPw){ const r=await API.get_remembered(x.host,x.username,x.port); if(r.password){$("pass").value=r.password;} } }
 
 function connParams(){ return { host:$("host").value, port:$("port").value, username:$("user").value,
   password:authMode==="password"?$("pass").value:"", key_path:authMode==="key"?$("keypath").value:"",
-  passphrase:authMode==="key"?$("pass").value:"", start_path:$("startpath").value }; }
+  passphrase:authMode==="key"?$("keypass").value:"", start_path:$("startpath").value }; }
 
 async function onConn(){
   if(connected){
@@ -712,6 +719,7 @@ async function onConn(){
       if(!ok)return;
     }
     await API.disconnect(); connected=false; setConn("","Disconnected"); clog("Disconnected");
+    $("pass").value=""; $("keypass").value=""; $("kgPass").value="";
     $("connBtn").textContent="Connect"; $("connBtn").className="btn-primary";
     ["upBtn","downBtn","compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=true);
     compareMap=null; renderPane("local");

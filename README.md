@@ -111,8 +111,11 @@ pipeline from this repo. You can also check the file against the published
    to switch a host to key auth.
 
 ## Security and privacy
-- Passwords and key passphrases live in memory only and are wiped on
-  disconnect.
+- Passwords and key passphrases are held in memory only and are never written
+  to a file, except an opted-in remembered password (see below). On
+  disconnect, the app clears its own copies from the connection fields. This
+  does not guarantee the operating system has erased the value from physical
+  memory.
 - `servers.json` holds your saved sessions, never passwords. Treat it as
   sensitive: it maps your internal hosts and accounts, so don't share it
   publicly (in a bug report, forum post, or public repo).
