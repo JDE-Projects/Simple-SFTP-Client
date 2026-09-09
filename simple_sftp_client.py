@@ -3161,7 +3161,7 @@ class Api:
                     "public_path": pub_path, "existing": existing}
 
         tmp_priv = tmp_pub = None
-        backup_priv = None
+        backup_path = None
         try:
             if key_type.startswith("Ed25519"):
                 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -3203,14 +3203,28 @@ class Api:
             if os.path.getsize(tmp_pub) != len(pub_bytes):
                 raise OSError("The public key file didn't write completely.")
 
-            # Back up the existing private key. The private key is published
-            # first, so the only half-replaced state to undo is a successful
-            # private swap followed by a failed public swap: restoring this
-            # backup returns the old, working pair. A failed private swap
-            # changes nothing, and the public is never swapped before it.
+            # Back up the existing private key to a durable file on disk (not
+            # just in memory) before touching anything. The private key is
+            # published first, so the only half-replaced state to undo is a
+            # successful private swap followed by a failed public swap:
+            # restoring this backup returns the old, working pair. A failed
+            # private swap changes nothing, and the public is never swapped
+            # before it. Keeping the backup on disk (rather than in a
+            # variable) means that even a hard exit between the two swaps
+            # leaves a recoverable copy of the old private key behind.
             if os.path.exists(out_path):
                 with open(out_path, "rb") as f:
-                    backup_priv = f.read()
+                    old_priv = f.read()
+                bfd, backup_path = tempfile.mkstemp(dir=parent, prefix=".sftpkey_bak_")
+                with os.fdopen(bfd, "wb") as f:
+                    f.write(old_priv)
+                    f.flush()
+                    os.fsync(f.fileno())
+                if os.path.getsize(backup_path) != len(old_priv):
+                    raise OSError("The private key backup didn't write completely.")
+                # This is a backup of the old key, not the user's active key,
+                # so its own protection warning (if any) isn't surfaced.
+                _protect_private_key(backup_path)
 
             os.replace(tmp_priv, out_path)
             tmp_priv = None
@@ -3220,10 +3234,21 @@ class Api:
             except Exception:
                 # Public key publish failed after the private key was already
                 # replaced: put the old private key back so the pair stays
-                # consistent, then report the failure.
-                if backup_priv is not None:
-                    with open(out_path, "wb") as f:
-                        f.write(backup_priv)
+                # consistent, then report the failure. The restore is an
+                # atomic rename (never an open(..., "wb") rewrite), so a
+                # failure partway through the restore can't truncate the
+                # only remaining copy of the private key.
+                if backup_path is not None:
+                    try:
+                        os.replace(backup_path, out_path)
+                    except OSError:
+                        # Restore rename failed. Leave the durable backup on
+                        # disk as the recovery artifact instead of letting
+                        # `finally` delete it; out_path still holds a
+                        # complete (if mismatched) new key, never a
+                        # truncated one.
+                        pass
+                    backup_path = None
                 else:
                     try:
                         os.remove(out_path)
@@ -3232,6 +3257,12 @@ class Api:
                 raise
 
             debug.log("KEYGEN", {"type": key_type, "path": out_path})
+            if backup_path is not None:
+                try:
+                    os.remove(backup_path)
+                    backup_path = None
+                except OSError:
+                    pass
             result = {"ok": True, "public": pubtext, "private_path": out_path,
                       "public_path": pub_path, "created_dir": created_dir}
             if protection_warning:
@@ -3244,7 +3275,13 @@ class Api:
         except Exception:
             return {"ok": False, "error": "Key generation failed. Check the type and passphrase and try again."}
         finally:
-            for t in (tmp_priv, tmp_pub):
+            # A leftover backup_path here means a pre-swap exception hit
+            # before either os.replace ran, so the old files are untouched
+            # and the backup is unneeded. Success and the rollback both
+            # already consumed the backup and reset it to None, so this
+            # never removes a backup a hard exit still needs for manual
+            # recovery (finally doesn't run on a hard exit anyway).
+            for t in (tmp_priv, tmp_pub, backup_path):
                 if t and os.path.exists(t):
                     try:
                         os.remove(t)
