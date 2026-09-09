@@ -9,7 +9,7 @@ set-time-unsupported variant, sftp_env_no_set_time).
 import os
 
 import simple_sftp_client
-from transfer_queue import COMPLETED
+from transfer_queue import COMPLETED, SKIPPED
 
 from simple_sftp_client import MTIME_TOL
 
@@ -77,8 +77,11 @@ def test_download_completes_when_local_stamp_fails(
     """The download-side mirror of the upload fallback above: if stamping the
     freshly downloaded local file's modification time fails (a locked file,
     a filesystem that rejects utime), the transfer must still complete, since
-    the bytes are already safely in place. Falls back to size-only equality
-    for this file on a later compare, and that fallback must be logged."""
+    the bytes are already safely in place. This test proves the transfer
+    completes, the bytes are correct, the failure is logged, and the pair is
+    recorded in the in-memory fallback store (api._mtime_fallback) so a later
+    compare can use it; it does not itself check that later compare (see the
+    fallback-usage tests below)."""
     api, server_root, local_dir = sftp_env
     name = "down.bin"
     data = os.urandom(4096)
@@ -107,3 +110,109 @@ def test_download_completes_when_local_stamp_fails(
     with api._console_lock:
         messages = [line["msg"] for line in api._console_buffer]
     assert any("could not set modification time" in m for m in messages)
+    assert api._mtime_fallback
+
+
+def test_upload_fallback_makes_compare_read_same(
+        sftp_env_no_set_time, wait_for_queue_count, wait_for_drain, state_of):
+    """When the server refuses to set the upload's remote time, the file's
+    mtimes now disagree, but the fallback remembers the size at transfer
+    time, so a Compare right after still classifies the file as 'same'
+    rather than newer_local/newer_remote."""
+    api, _server_root, local_dir = sftp_env_no_set_time
+    name = "up.bin"
+    data = os.urandom(4096)
+    (local_dir / name).write_bytes(data)
+
+    item_id = _enqueue_one(api, "upload", local_dir, "/", name, "overwrite", wait_for_queue_count)
+    wait_for_drain(api)
+    assert state_of(api, item_id)["state"] == COMPLETED
+
+    result = api._compute_compare(api.sftp, str(local_dir), "/")
+    assert result["files"][name] == "same"
+
+
+def test_upload_fallback_makes_skip_take_effect(
+        sftp_env_no_set_time, wait_for_queue_count, wait_for_drain, state_of):
+    """The Skip path in _one() must also consult the fallback: re-enqueueing
+    the same unchanged file with on_conflict='skip' should be skipped rather
+    than re-sent, even though the destination's mtime does not match."""
+    api, _server_root, local_dir = sftp_env_no_set_time
+    name = "up.bin"
+    data = os.urandom(4096)
+    (local_dir / name).write_bytes(data)
+
+    item_id = _enqueue_one(api, "upload", local_dir, "/", name, "overwrite", wait_for_queue_count)
+    wait_for_drain(api)
+    assert state_of(api, item_id)["state"] == COMPLETED
+
+    item_id2 = _enqueue_one(api, "upload", local_dir, "/", name, "skip", wait_for_queue_count)
+    wait_for_drain(api)
+    entry2 = state_of(api, item_id2)
+    assert entry2["state"] == SKIPPED
+
+
+def test_upload_fallback_invalidated_by_real_size_change(
+        sftp_env_no_set_time, wait_for_queue_count, wait_for_drain, state_of):
+    """A genuine later edit that changes the file's size must not be hidden
+    by a stale fallback entry: Compare should classify it as newer_local
+    once the local file's size no longer matches what was recorded."""
+    api, _server_root, local_dir = sftp_env_no_set_time
+    name = "up.bin"
+    data = os.urandom(4096)
+    local_path = local_dir / name
+    local_path.write_bytes(data)
+
+    item_id = _enqueue_one(api, "upload", local_dir, "/", name, "overwrite", wait_for_queue_count)
+    wait_for_drain(api)
+    assert state_of(api, item_id)["state"] == COMPLETED
+
+    # Confirm the fallback is in play before the edit.
+    result = api._compute_compare(api.sftp, str(local_dir), "/")
+    assert result["files"][name] == "same"
+
+    local_path.write_bytes(data + os.urandom(128))
+
+    result2 = api._compute_compare(api.sftp, str(local_dir), "/")
+    assert result2["files"][name] == "newer_local"
+
+
+def test_mtime_fallback_cleared_on_disconnect(
+        sftp_env_no_set_time, wait_for_queue_count, wait_for_drain, state_of):
+    """The fallback store is scoped to one connection: shutdown() must clear
+    it, so a fresh connection never inherits a stale memory from a previous
+    session."""
+    api, _server_root, local_dir = sftp_env_no_set_time
+    name = "up.bin"
+    data = os.urandom(4096)
+    (local_dir / name).write_bytes(data)
+
+    item_id = _enqueue_one(api, "upload", local_dir, "/", name, "overwrite", wait_for_queue_count)
+    wait_for_drain(api)
+    assert state_of(api, item_id)["state"] == COMPLETED
+    assert api._mtime_fallback
+
+    api.shutdown()
+    assert api._mtime_fallback == {}
+
+
+def test_normal_server_does_not_populate_fallback(
+        sftp_env, wait_for_queue_count, wait_for_drain, state_of):
+    """On a server that does set times successfully, the fallback store must
+    stay empty: the success branch never records, and a stray earlier record
+    for this pair (there is none here) would be cleared."""
+    api, server_root, local_dir = sftp_env
+    up_name = "up.bin"
+    down_name = "down.bin"
+    (local_dir / up_name).write_bytes(os.urandom(4096))
+    (server_root / down_name).write_bytes(os.urandom(4096))
+
+    up_id = _enqueue_one(api, "upload", local_dir, "/", up_name, "overwrite", wait_for_queue_count)
+    wait_for_drain(api)
+    assert state_of(api, up_id)["state"] == COMPLETED
+
+    down_id = _enqueue_one(api, "download", local_dir, "/", down_name, "overwrite", wait_for_queue_count)
+    wait_for_drain(api)
+    assert state_of(api, down_id)["state"] == COMPLETED
+
+    assert api._mtime_fallback == {}
