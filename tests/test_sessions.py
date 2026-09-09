@@ -383,7 +383,7 @@ def test_successful_password_login_stamps_identity(api, monkeypatch):
         return FakeClient()
 
     monkeypatch.setattr(app.Api, "_open", fake_open)
-    monkeypatch.setattr(app.Api, "_transport_info", lambda self: {})
+    monkeypatch.setattr(app.Api, "_transport_info", lambda self, client=None: {})
     monkeypatch.setattr(app.Api, "_sweep_scratch_files", lambda self: None)
 
     result = api.connect({"host": " example.com ", "port": "22", "username": " alice ",

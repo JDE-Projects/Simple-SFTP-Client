@@ -132,6 +132,37 @@ class _FakeClientOk:
         return None
 
 
+class _FakeSFTPNormalizeFail:
+    """SFTP subsystem opens, but the first real request (home normalization)
+    fails: a transport dropped, or a server refusing the request, after
+    open_sftp() already succeeded."""
+    def __init__(self, calls):
+        self._calls = calls
+
+    def normalize(self, path):
+        raise OSError("transport dropped after open_sftp")
+
+    def close(self):
+        self._calls.append("closed_normfail_sftp")
+
+
+class _FakeClientNormalizeFail:
+    """Stands in for a client whose transport and SFTP subsystem both come up,
+    but whose first post-open request (home normalization) fails during
+    connect()'s remaining setup."""
+    def __init__(self, calls):
+        self._calls = calls
+
+    def open_sftp(self):
+        return _FakeSFTPNormalizeFail(self._calls)
+
+    def close(self):
+        self._calls.append("closed_normfail_client")
+
+    def get_transport(self):
+        return None
+
+
 def test_connect_failure_then_success_leaves_no_dangling_client(monkeypatch, tmp_path):
     api = Api()
     # Keep the post-connect scratch sweep off the real home directory.
@@ -158,6 +189,90 @@ def test_connect_failure_then_success_leaves_no_dangling_client(monkeypatch, tmp
     assert isinstance(api.client, _FakeClientOk)
     # The failed attempt's client was closed and never touched the good one.
     assert "closed_fail_client" in calls
+    assert "closed_ok_client" not in calls
+
+
+def test_connect_normalize_failure_leaves_state_unpublished(monkeypatch, tmp_path):
+    # Post-open setup failure: open_sftp() succeeds, then home normalization
+    # raises. State must never be published as connected, and the half-open
+    # session must be torn down rather than left holding a closed transport
+    # while the app reports "connected". Fails against the pre-fix code, which
+    # set self.client/sftp/connected before normalizing and left them set.
+    api = Api()
+    api._local_cwd = str(tmp_path)
+    calls = []
+    monkeypatch.setattr(api, "_open", lambda *a, **k: _FakeClientNormalizeFail(calls))
+
+    r = api.connect({"host": "h", "username": "u", "password": "p"})
+    assert r["ok"] is False
+    assert api.client is None
+    assert api.sftp is None
+    assert api.connected is False
+    # Both halves of the failed attempt were closed, not leaked.
+    assert "closed_normfail_sftp" in calls
+    assert "closed_normfail_client" in calls
+    # No password identity was stamped for a connection that never came up.
+    assert api._cred_pass == ""
+    assert api._cred_identity is None
+
+
+def test_connect_normalize_failure_then_success(monkeypatch, tmp_path):
+    api = Api()
+    api._local_cwd = str(tmp_path)
+    calls = []
+    attempts = [_FakeClientNormalizeFail(calls), _FakeClientOk(calls)]
+    monkeypatch.setattr(api, "_open", lambda *a, **k: attempts.pop(0))
+    payload = {"host": "h", "username": "u", "password": "p"}
+
+    r1 = api.connect(payload)
+    assert r1["ok"] is False
+    assert api.connected is False
+    assert api.client is None and api.sftp is None
+
+    r2 = api.connect(payload)
+    assert r2["ok"] is True
+    assert api.connected is True
+    assert isinstance(api.client, _FakeClientOk)
+    # The good client was never closed by the earlier failure's cleanup.
+    assert "closed_ok_client" not in calls
+
+
+def test_disconnect_after_normalize_failure_is_clean(monkeypatch, tmp_path):
+    api = Api()
+    api._local_cwd = str(tmp_path)
+    calls = []
+    monkeypatch.setattr(api, "_open", lambda *a, **k: _FakeClientNormalizeFail(calls))
+    assert api.connect({"host": "h", "username": "u", "password": "p"})["ok"] is False
+
+    # Disconnect after a failed connect stays safe and leaves state clean.
+    assert api.disconnect() == {"ok": True}
+    assert api.connected is False
+    assert api.client is None
+    assert api.sftp is None
+
+
+def test_failed_reconnect_preserves_prior_good_connection(monkeypatch, tmp_path):
+    api = Api()
+    api._local_cwd = str(tmp_path)
+    calls = []
+    attempts = [_FakeClientOk(calls), _FakeClientNormalizeFail(calls)]
+    monkeypatch.setattr(api, "_open", lambda *a, **k: attempts.pop(0))
+    payload = {"host": "h", "username": "u", "password": "p"}
+
+    assert api.connect(payload)["ok"] is True
+    good_client = api.client
+    good_sftp = api.sftp
+    assert isinstance(good_client, _FakeClientOk)
+
+    # A reconnect that fails during home normalization must not tear down or
+    # replace the still-good prior connection.
+    r = api.connect(payload)
+    assert r["ok"] is False
+    assert api.connected is True
+    assert api.client is good_client
+    assert api.sftp is good_sftp
+    # Only the failed attempt's objects were closed.
+    assert "closed_normfail_client" in calls
     assert "closed_ok_client" not in calls
 
 

@@ -1215,9 +1215,20 @@ class Api:
         try:
             new_client = self._open(host, port, username, password, key_path, passphrase)
             new_sftp = new_client.open_sftp()
-            # Commit only now that both steps have fully succeeded: an
-            # earlier failure below never reaches this point, so it can
-            # never touch (or leak) a prior good connection's client/sftp.
+            # Run every remaining fallible setup step on the new, still-
+            # unpublished objects. Home normalization can fail (a dropped
+            # transport, a server that refuses the request); if it does, the
+            # except handlers below close new_client/new_sftp and never touch
+            # self.*, so a failure here can neither report a closed session as
+            # connected nor clobber a prior good connection during a reconnect.
+            ti = self._transport_info(new_client)
+            home = new_sftp.normalize(".")
+            start = (p.get("start_path") or "").strip() or home
+            try:
+                new_sftp.stat(start)
+            except Exception:
+                start = home
+            # Commit only now that all setup has fully succeeded.
             self.client = new_client
             self.sftp = new_sftp
             self.connected = True
@@ -1233,20 +1244,12 @@ class Api:
             else:
                 self._cred_pass = password
                 self._cred_identity = (host, port, username, "password")
-            ti = self._transport_info()
             if ti:
                 self._vlog(f"Negotiated: cipher {ti.get('cipher','?')} · "
                            f"kex {ti.get('kex','?')} · mac {ti.get('mac','?')}")
-            with self._sftp_lock:
-                home = self.sftp.normalize(".")
-                self._vlog(f"SFTP session opened — home {home}", "ok")
-                start = (p.get("start_path") or "").strip() or home
-                try:
-                    self.sftp.stat(start)
-                except Exception:
-                    start = home
+            self._vlog(f"SFTP session opened — home {home}", "ok")
             self._sweep_scratch_files()
-            return {"ok": True, "home": home, "cwd": start, "transport": self._transport_info()}
+            return {"ok": True, "home": home, "cwd": start, "transport": ti}
         except UnknownHostKey as e:
             self._cred_pass = ""
             self._cred_identity = None
@@ -1389,9 +1392,9 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": f"Could not remove the host key: {e}"}
 
-    def _transport_info(self):
+    def _transport_info(self, client=None):
         try:
-            t = self.client.get_transport()
+            t = (client or self.client).get_transport()
             return {"cipher": t.remote_cipher, "kex": getattr(t, "kex_engine", ""),
                     "mac": t.remote_mac}
         except Exception:
