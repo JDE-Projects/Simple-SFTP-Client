@@ -113,6 +113,7 @@
   tr.c-newer_local td.name{color:var(--green);} tr.c-newer_remote td.name{color:var(--amber);}
   tr.c-local_only td.name,tr.c-remote_only td.name{color:var(--blue);}
   tr.c-has_changes td.name{color:var(--blue);}
+  tr.c-conflict td.name{color:var(--red);}
   .pane.dragover{outline:2px dashed var(--accent);outline-offset:-4px;}
 
   /* queue: the footer bar always stays one row tall; the full list opens
@@ -946,9 +947,18 @@ function applyCompareResult(result){
   compareMap={rootLocal:result.root_local,rootRemote:result.root_remote,
     files:result.files||{},folders:result.folders||{}};
   renderPane("local"); renderPane("remote");
-  const c={};["same","newer_local","newer_remote","local_only","remote_only"].forEach(k=>c[k]=0);
+  const c={};["same","newer_local","newer_remote","local_only","remote_only","conflict"].forEach(k=>c[k]=0);
   for(const n in compareMap.files)c[compareMap.files[n]]++;
-  $("statusText").innerHTML=`Compared: <b style="color:var(--green)">${c.newer_local} newer here</b>, <b style="color:var(--amber)">${c.newer_remote} newer remote</b>, ${c.local_only} local-only, ${c.remote_only} remote-only`; }
+  // Folders carry their own local_only/remote_only status for an empty
+  // one-sided folder; a folder's "conflict" is skipped here since the same
+  // rel already counted it once above (a conflict is always in both maps).
+  for(const n in compareMap.folders){
+    const st=compareMap.folders[n];
+    if(st==="local_only"||st==="remote_only")c[st]++;
+  }
+  let msg=`Compared: <b style="color:var(--green)">${c.newer_local} newer here</b>, <b style="color:var(--amber)">${c.newer_remote} newer remote</b>, ${c.local_only} local-only, ${c.remote_only} remote-only`;
+  if(c.conflict>0)msg+=`, <b style="color:var(--red)">${c.conflict} name clash${c.conflict===1?"":"es"}</b>`;
+  $("statusText").innerHTML=msg; }
 async function onSync(direction){ if(!connected||busy)return;
   if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
   const r=await API.sync_plan(state.local.cwd,state.remote.cwd,direction,true);
@@ -958,7 +968,7 @@ async function onSync(direction){ if(!connected||busy)return;
   const done=await new Promise(res=>{pendingSyncResolve=res;});
   if(!done.ok){toast(done.error||"Sync failed",true);return;}
   const result=done.result;
-  if(!result.count){toast("Already in sync, nothing to transfer");return;}
+  if(!result.count&&!(result.conflicts&&result.conflicts.length)){toast("Already in sync, nothing to transfer");return;}
   if(!await confirmSyncPlan(result))return;
   const rr=await API.start_sync(result.token,"overwrite");
   if(!rr.ok){toast(rr.error||"Could not queue the transfer",true);return;}
@@ -1095,6 +1105,7 @@ function confirmDiff(collide,srcSide,destSide){
 function confirmSyncPlan(result){
   const sample=result.sample||[];
   let rows=sample.map(p=>{
+    if(p.is_dir) return `<tr><td class="name">${esc(p.name)}<span class="meta" style="color:var(--text-dim);font-size:10px;border:1px solid var(--border);border-radius:4px;padding:1px 5px;margin-left:6px">folder</span></td><td class="size">-</td><td class="size">-</td><td>-</td></tr>`;
     const locCell=p.local?`${hsize(p.local.size)}<br>${fmod(p.local.mtime)}`:"—";
     const remCell=p.remote?`${hsize(p.remote.size)}<br>${fmod(p.remote.mtime)}`:"—";
     let newer="—";
@@ -1105,10 +1116,16 @@ function confirmSyncPlan(result){
     }
     return `<tr><td class="name">${esc(p.name)}</td><td class="size">${locCell}</td><td class="size">${remCell}</td><td>${newer}</td></tr>`;
   }).join("");
-  if(result.more>0) rows+=`<tr><td class="name" colspan="4">and ${result.more} more file(s)…</td></tr>`;
+  if(result.more>0) rows+=`<tr><td class="name" colspan="4">and ${result.more} more item(s)…</td></tr>`;
   $("syBody").innerHTML=rows;
-  $("syText").textContent=`${result.count} file(s) will transfer (${hsize(result.total_bytes)}):`;
-  $("syOk").textContent=`Transfer (${result.count} file${result.count===1?"":"s"})`;
+  const conflicts=result.conflicts||[];
+  let text=`${result.count} item(s) will transfer (${hsize(result.total_bytes)}):`;
+  if(conflicts.length){
+    const names=conflicts.map(c=>esc(c.name)).join(", ");
+    text+=`<br><br><span style="color:var(--red)">${conflicts.length} name clash${conflicts.length===1?"":"es"} will not be synced (a file on one side and a folder with the same name on the other): ${names}</span>`;
+  }
+  $("syText").innerHTML=text;
+  $("syOk").textContent=`Transfer (${result.count} item${result.count===1?"":"s"})`;
   return new Promise(res=>{
     $("syncModal").classList.add("show");
     const done=v=>{$("syncModal").classList.remove("show");res(v);};

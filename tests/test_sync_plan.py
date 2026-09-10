@@ -31,7 +31,7 @@ def _by_name(plan):
 
 
 def _sync(api, local_dir, direction, changed_only=True):
-    plan, transfers = api._compute_sync(api.sftp, str(local_dir), "/", direction, changed_only)
+    plan, transfers, _conflicts = api._compute_sync(api.sftp, str(local_dir), "/", direction, changed_only)
     return plan, transfers
 
 
@@ -45,7 +45,7 @@ def test_upload_plan_includes_local_only_file(sftp_env):
     assert by_name["new.txt"]["local"]["size"] == 5
     assert isinstance(by_name["new.txt"]["local"]["mtime"], int)
     assert by_name["new.txt"]["remote"] is None
-    assert transfers == [(str(local_dir / "new.txt"), "/new.txt", 5)]
+    assert transfers == [(str(local_dir / "new.txt"), "/new.txt", 5, False)]
 
 
 def test_download_plan_includes_remote_only_file(sftp_env):
@@ -57,7 +57,7 @@ def test_download_plan_includes_remote_only_file(sftp_env):
     assert by_name["new.txt"]["status"] == "remote_only"
     assert by_name["new.txt"]["local"] is None
     assert by_name["new.txt"]["remote"]["size"] == 5
-    assert transfers == [(str(local_dir / "new.txt"), "/new.txt", 5)]
+    assert transfers == [(str(local_dir / "new.txt"), "/new.txt", 5, False)]
 
 
 def test_upload_plan_includes_changed_file(sftp_env):
@@ -129,7 +129,7 @@ def test_nested_changed_file_appears_in_plan_with_its_rel_path(sftp_env):
     assert by_name["top/mid/changed.txt"]["local"]["size"] == len(b"local version, different length")
     assert transfers == [
         (str(local_dir / "top" / "mid" / "changed.txt"), "/top/mid/changed.txt",
-         len(b"local version, different length")),
+         len(b"local version, different length"), False),
     ]
 
 
@@ -158,7 +158,7 @@ def test_nested_only_file_classifies_correctly_on_each_side(sftp_env):
     assert up_by_name["top/local_only.txt"]["status"] == "local_only"
     assert "top/remote_only.txt" not in up_by_name
     assert upload_transfers == [
-        (str(local_dir / "top" / "local_only.txt"), "/top/local_only.txt", len(b"only local")),
+        (str(local_dir / "top" / "local_only.txt"), "/top/local_only.txt", len(b"only local"), False),
     ]
 
     download_plan, download_transfers = _sync(api, local_dir, "download")
@@ -166,5 +166,5 @@ def test_nested_only_file_classifies_correctly_on_each_side(sftp_env):
     assert down_by_name["top/remote_only.txt"]["status"] == "remote_only"
     assert "top/local_only.txt" not in down_by_name
     assert download_transfers == [
-        (str(local_dir / "top" / "remote_only.txt"), "/top/remote_only.txt", len(b"only remote")),
+        (str(local_dir / "top" / "remote_only.txt"), "/top/remote_only.txt", len(b"only remote"), False),
     ]

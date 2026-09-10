@@ -2903,19 +2903,22 @@ class Api:
 
     # ───────────── compare / sync plan / download-changed ─────────────
     def _compute_pair_maps(self, sftp, local_dir, remote_dir, on_progress=None, stop_event=None):
-        """Builds rel -> (size, mtime, local_path, remote_path) maps for both
-        sides of a folder pair, by streaming the same _iter_local/_iter_remote
-        enumerators the background scanner uses, so compare/sync descend the
+        """Builds rel -> (size, mtime, local_path, remote_path, is_dir) maps
+        for both sides of a folder pair, by streaming the same
+        _iter_local/_iter_remote enumerators the background scanner uses
+        (including their empty-folder markers), so compare/sync descend the
         whole tree instead of one directory level. rel is a posix path
-        relative to remote_dir, shared between both maps so a file at any
-        depth lines up on both sides. on_progress, if given, is called with a
-        count of files seen since the last call (not a running total), so the
-        caller can accumulate it the same way the scan progress counter does.
-        Returns (None, None) if stop_event fires before either walk finishes,
-        the signal a caller uses to tell a cancelled compare/sync apart from
-        a genuinely empty one. Raises ScanIncomplete if a folder could not be
-        listed or a file's metadata could not be read during either walk, since
-        a compare/sync result built on a tree that was not fully seen can
+        relative to remote_dir, shared between both maps so a file or folder
+        at any depth lines up on both sides. The compared root itself (rel
+        ".") is never added: it is the folder being compared, not a child of
+        it. on_progress, if given, is called with a count of files seen since
+        the last call (not a running total), so the caller can accumulate it
+        the same way the scan progress counter does. Returns (None, None) if
+        stop_event fires before either walk finishes, the signal a caller
+        uses to tell a cancelled compare/sync apart from a genuinely empty
+        one. Raises ScanIncomplete if a folder could not be listed or a
+        file's metadata could not be read during either walk, since a
+        compare/sync result built on a tree that was not fully seen can
         misclassify files as one-sided or in-sync (unlike the ordinary
         transfer scan, which reports partial progress instead). An unsafe
         remote name is skipped and logged, not treated as incomplete."""
@@ -2936,22 +2939,27 @@ class Api:
                 f"Some folders could not be read ({problems[0]}) "
                 f"[{len(problems)} problem(s)]; compare/sync was not run.")
 
-        for lp, rp, size, mtime, _is_dir in self._iter_local(local_dir, remote_dir, True, problems=problems):
+        for lp, rp, size, mtime, is_dir in self._iter_local(
+                local_dir, remote_dir, True, problems=problems, include_dirs=True):
             if stop_event is not None and stop_event.is_set():
                 return None, None
             rel = posixpath.relpath(rp, remote_dir)
-            local_map[rel] = (size, mtime, lp, rp)
+            if rel == ".":
+                continue
+            local_map[rel] = (size, mtime, lp, rp, is_dir)
             bump()
         # Fail fast: if the local walk already found a problem, refuse now
         # rather than running the whole remote (network) walk just to discard it.
         if problems:
             _raise_incomplete()
-        for lp, rp, size, mtime, _is_dir in self._iter_remote(
-                sftp, remote_dir, local_dir, True, local_dir, problems=problems):
+        for lp, rp, size, mtime, is_dir in self._iter_remote(
+                sftp, remote_dir, local_dir, True, local_dir, problems=problems, include_dirs=True):
             if stop_event is not None and stop_event.is_set():
                 return None, None
             rel = posixpath.relpath(rp, remote_dir)
-            remote_map[rel] = (size, mtime, lp, rp)
+            if rel == ".":
+                continue
+            remote_map[rel] = (size, mtime, lp, rp, is_dir)
             bump()
         if on_progress and seen_since_report:
             on_progress(seen_since_report)
@@ -2970,11 +2978,24 @@ class Api:
         having failed its time stamp at transfer time (see
         _mtime_fallback_matches), in which case a matching size alone still
         counts as 'same'. local_map/remote_map are rel -> (size, mtime, lp,
-        rp) as built by _compute_pair_maps."""
+        rp, is_dir) as built by _compute_pair_maps.
+
+        A rel present on only one side is 'local_only'/'remote_only' whether
+        it is a file or a folder. A rel present on both sides where one side
+        is a folder and the other a file is a 'conflict': never resolved
+        automatically, never overwritten. A rel that is a folder on both
+        sides is 'same' (both are empty-subtree folders at the same path, so
+        there is nothing to move)."""
         if rel in local_map and rel not in remote_map:
             return "local_only"
         if rel in remote_map and rel not in local_map:
             return "remote_only"
+        l_is_dir = local_map[rel][4]
+        r_is_dir = remote_map[rel][4]
+        if l_is_dir != r_is_dir:
+            return "conflict"
+        if l_is_dir and r_is_dir:
+            return "same"
         lsize, lmtime = local_map[rel][0], local_map[rel][1]
         rsize, rmtime = remote_map[rel][0], remote_map[rel][1]
         if lsize == rsize:
@@ -2989,59 +3010,95 @@ class Api:
         """Pure recursive compare core: no threading, no bridge concerns, so
         it can be called directly from tests or from the background thread
         _run_compare drives. Returns {"files": {rel: status}, "folders":
-        {rel: "has_changes"}} (folders holds every ancestor of a changed
-        file, so a deep change is visible without opening every level), or
-        None if stop_event fired before the walk finished."""
+        {rel: status}}, or None if stop_event fired before the walk finished.
+
+        "folders" holds both kinds of entry: every ancestor of a changed file
+        gets "has_changes" (so a deep change is visible without opening every
+        level), and every rel that is itself an empty-subtree folder gets its
+        own explicit status (local_only/remote_only/conflict; a folder that
+        is 'same' on both sides adds nothing, since there is no change to
+        show). The explicit status is applied after the ancestor pass so it
+        always wins if the two would ever land on the same rel. A "conflict"
+        rel (a file on one side, an empty folder on the other) is added to
+        BOTH "files" and "folders", so whichever pane is showing it (the file
+        row in one, the folder row in the other) is colored to flag it."""
         local_map, remote_map = self._compute_pair_maps(
             sftp, local_dir, remote_dir, on_progress=on_progress, stop_event=stop_event)
         if local_map is None:
             return None
-        files = {rel: self._classify(rel, local_map, remote_map)
-                 for rel in set(local_map) | set(remote_map)}
+        statuses = {rel: self._classify(rel, local_map, remote_map)
+                    for rel in set(local_map) | set(remote_map)}
+
+        def is_dir_rel(rel):
+            entry = local_map.get(rel) or remote_map.get(rel)
+            return bool(entry[4])
+
+        files = {}
         folders = {}
-        for rel, status in files.items():
+        for rel, status in statuses.items():
+            if status == "conflict":
+                files[rel] = "conflict"
+                folders[rel] = "conflict"
+                continue
+            if is_dir_rel(rel):
+                if status != "same":
+                    folders[rel] = status
+            else:
+                files[rel] = status
+        for rel, status in statuses.items():
             if status == "same":
                 continue
             parent = posixpath.dirname(rel)
             while parent not in ("", "."):
-                folders[parent] = "has_changes"
+                folders.setdefault(parent, "has_changes")
                 parent = posixpath.dirname(parent)
         return {"files": files, "folders": folders}
 
     def _compute_sync(self, sftp, local_dir, remote_dir, direction, changed_only=True,
                        on_progress=None, stop_event=None):
         """Pure recursive sync-plan core (see _compute_compare). Returns
-        (plan, transfers): plan is the list the UI shows (name is the rel
-        path, so a nested file's plan entry still reads as its full relative
-        name); transfers is the resolved (local_path, remote_path, size)
-        list actually handed to the queue, built from the same maps so it
-        never has to re-derive a path from a name that came back from the
-        page. Returns (None, None) if stop_event fired before the walk
-        finished."""
+        (plan, transfers, conflicts): plan is the list the UI shows (name is
+        the rel path, so a nested file's plan entry still reads as its full
+        relative name, and is_dir marks a folder-creation entry rather than a
+        file); transfers is the resolved (local_path, remote_path, size,
+        is_dir) list actually handed to the queue, built from the same maps
+        so it never has to re-derive a path from a name that came back from
+        the page. conflicts is a list of {"name": rel} for every rel that is
+        a file on one side and an empty folder on the other: a conflict is
+        never transferred in either direction (it is excluded from `wanted`
+        for both directions), only reported, so nothing is ever overwritten
+        to resolve it. Returns (None, None, None) if stop_event fired before
+        the walk finished."""
         local_map, remote_map = self._compute_pair_maps(
             sftp, local_dir, remote_dir, on_progress=on_progress, stop_event=stop_event)
         if local_map is None:
-            return None, None
+            return None, None, None
         wanted = ("local_only", "newer_local") if direction == "upload" else ("remote_only", "newer_remote")
         plan = []
         transfers = []
+        conflicts = []
         for rel in set(local_map) | set(remote_map):
             status = self._classify(rel, local_map, remote_map)
+            if status == "conflict":
+                conflicts.append({"name": rel})
+                continue
             if status not in wanted and (changed_only or status == "same"):
                 continue
             lentry = local_map.get(rel)
             rentry = remote_map.get(rel)
             local = {"size": lentry[0], "mtime": lentry[1]} if lentry else None
             remote = {"size": rentry[0], "mtime": rentry[1]} if rentry else None
-            plan.append({"name": rel, "status": status, "local": local, "remote": remote})
+            is_dir = bool((lentry or rentry)[4])
+            plan.append({"name": rel, "status": status, "local": local, "remote": remote,
+                         "is_dir": is_dir})
             # The transfer's source side must actually exist to send anything;
             # changed_only=False can otherwise list a status that makes no
             # sense for this direction (e.g. a remote_only file on an
             # upload), which nothing can transfer.
             source = lentry if direction == "upload" else rentry
             if source is not None:
-                transfers.append((source[2], source[3], source[0]))
-        return plan, transfers
+                transfers.append((source[2], source[3], source[0], is_dir))
+        return plan, transfers, conflicts
 
     # ───────────── compare / sync background jobs (own thread, own session) ─────────────
     def _start_compare(self, kind):
@@ -3123,7 +3180,7 @@ class Api:
                 return
             on_progress = lambda n: self._bump_compare_found(cid, n)  # noqa: E731
             if kind == "sync":
-                plan, transfers = self._compute_sync(
+                plan, transfers, conflicts = self._compute_sync(
                     sftp, local_dir, remote_dir, direction, changed_only,
                     on_progress=on_progress, stop_event=stop_event)
                 if plan is None:
@@ -3134,8 +3191,9 @@ class Api:
                     if e is not None:
                         e["direction"] = direction
                 total_bytes = sum(t[2] for t in transfers if t[2] and t[2] > 0)
-                result = {"count": len(plan), "total_bytes": total_bytes,
-                          "sample": plan[:200], "more": max(0, len(plan) - 200), "token": cid}
+                result = {"count": len(transfers), "total_bytes": total_bytes,
+                          "sample": plan[:200], "more": max(0, len(plan) - 200), "token": cid,
+                          "conflicts": conflicts}
                 _finish(True, result=result, transfers=transfers)
             else:
                 data = self._compute_compare(
@@ -3216,21 +3274,21 @@ class Api:
                 batch = []
 
             batch_cap = min(64, SCAN_QUEUE_HIGH_WATER) or 64
-            for lp, rp, size in transfers:
+            for lp, rp, size, is_dir in transfers:
                 if stop_event.is_set() or not self.connected:
                     break
-                batch.append((lp, rp, size, 0, False))
+                batch.append((lp, rp, size, 0, is_dir))
                 if len(batch) >= batch_cap:
                     flush()
                     if stop_event.is_set() or not self.connected:
                         break
             flush()
             if stop_event.is_set():
-                self._worker_log(f"Sync stopped ({found} file(s) queued before stopping)", "warn")
+                self._worker_log(f"Sync stopped ({found} item(s) queued before stopping)", "warn")
             elif not self.connected:
-                self._worker_log(f"Sync halted: disconnected ({found} file(s) queued)", "warn")
+                self._worker_log(f"Sync halted: disconnected ({found} item(s) queued)", "warn")
             elif found:
-                self._worker_log(f"Sync: {found} file(s) queued")
+                self._worker_log(f"Sync: {found} item(s) queued")
             else:
                 self._worker_log("Sync: nothing to transfer")
         except Exception as e:

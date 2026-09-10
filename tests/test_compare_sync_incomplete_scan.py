@@ -256,7 +256,7 @@ def test_unsafe_remote_name_is_skipped_not_refused_sync(tmp_path):
         "/": [_FakeAttr("good.bin", size=5), _FakeAttr("../escape.bin", size=5)],
     })
 
-    plan, _transfers = api._compute_sync(sftp, str(local_dir), "/", "download")
+    plan, _transfers, _conflicts = api._compute_sync(sftp, str(local_dir), "/", "download")
 
     assert plan is not None
     names = {p["name"] for p in plan}
@@ -344,9 +344,10 @@ def test_cancellation_before_any_problem_check_returns_none_for_sync(tmp_path):
     stop_event = _AlreadySetEvent()
     sftp = _RaisingSftp()
 
-    plan, transfers = api._compute_sync(sftp, str(local_dir), "/", "download", stop_event=stop_event)
+    plan, transfers, conflicts = api._compute_sync(sftp, str(local_dir), "/", "download", stop_event=stop_event)
     assert plan is None
     assert transfers is None
+    assert conflicts is None
 
 
 class _AlreadySetEvent:
@@ -367,9 +368,10 @@ def test_empty_readable_tree_succeeds_with_no_files_or_plan(tmp_path):
     data = api._compute_compare(sftp, str(local_dir), "/")
     assert data == {"files": {}, "folders": {}}
 
-    plan, transfers = api._compute_sync(sftp, str(local_dir), "/", "upload")
+    plan, transfers, conflicts = api._compute_sync(sftp, str(local_dir), "/", "upload")
     assert plan == []
     assert transfers == []
+    assert conflicts == []
 
 
 # ───────────── full async job: _run_compare turns ScanIncomplete into a clean failure ─────────────
