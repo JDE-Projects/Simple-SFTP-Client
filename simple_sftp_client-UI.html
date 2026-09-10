@@ -155,7 +155,7 @@
   #updateNotice a{color:var(--accent-2);text-decoration:none;font-weight:500;}
   #updateNotice a:hover{text-decoration:underline;}
 
-  /* console (activity log) — height is kept in sync with the connection bar */
+  /* console (activity log): height is kept in sync with the connection bar */
   .console{position:relative;padding:0;overflow:hidden;flex:0 0 auto;}
   .console-body{height:100%;overflow-y:auto;padding:8px 12px 8px 12px;font-family:"JetBrains Mono",monospace;
     font-size:11px;line-height:1.65;-webkit-user-select:text;user-select:text;}
@@ -416,7 +416,7 @@ window.appEvent=function(ev,p){
       p.errors.length?"error":(p.cancelled?"warn":"ok"));
     refresh("local"); refresh("remote"); }
   else if(ev==="size_progress"){ $("statusText").textContent=`Calculating size... ${p.files} files, ${p.bytes}`; }
-  else if(ev==="watch"){ clog(p.ok?("Watch: uploaded "+p.file):("Watch error: "+p.file+" — "+(p.error||"")), p.ok?"ok":"error"); }
+  else if(ev==="watch"){ clog(p.ok?("Watch: uploaded "+p.file):("Watch error: "+p.file+" - "+(p.error||"")), p.ok?"ok":"error"); }
   else if(ev==="console"){ clog(p.msg, p.level); }
   else if(ev==="external_drop"){ externalUpload(p.paths); }
   else if(ev==="quit-confirm"){ confirm2("Transfers running","Transfers are still running, quit anyway?").then(ok=>{ if(ok)API.confirm_quit(); }); }
@@ -696,7 +696,7 @@ async function init(){
 function syncConsoleHeight(){ const bar=document.querySelector(".conn"); const cw=$("consoleWrap"); if(!bar||!cw)return;
   const apply=()=>{cw.style.height=bar.offsetHeight+"px";}; apply();
   if(window.ResizeObserver){ new ResizeObserver(apply).observe(bar); } else { window.addEventListener("resize",apply); }
-  // custom fonts load after first paint and reflow the bar — re-sync once they're ready
+  // custom fonts load after first paint and reflow the bar, so re-sync once they're ready
   if(document.fonts&&document.fonts.ready){ document.fonts.ready.then(apply); }
   window.addEventListener("load",apply); }
 function cap(s){return s[0].toUpperCase()+s.slice(1);}
@@ -740,7 +740,7 @@ async function doConnect(){
     ["compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=false);
     $("filterRemote").disabled=false; clog("Connected to "+($("user").value.trim())+"@"+($("host").value.trim()),"ok");
     const listed=await loadRemote(r.cwd);
-    if(!listed){ $("crumbsRemote").textContent="(couldn't list folder — use Refresh)";
+    if(!listed){ $("crumbsRemote").textContent="(couldn't list folder, use Refresh)";
       clog("Connected, but the first folder listing failed. Use Refresh to retry.","warn"); }
     pollHealth(); return true;
   }
@@ -770,8 +770,8 @@ function infoBox(title,text){ $("cfTitle").textContent=title; $("cfText").textCo
 async function onViewHostKey(){ const host=$("host").value.trim(); const port=$("port").value.trim()||"22";
   if(!host){ toast("Enter a host first",true); return; }
   const r=await API.get_host_key(host, port);
-  if(r.known && r.entries && r.entries.length){ infoBox("Host key \u2014 "+r.host, r.entries.map(x=>x.key_type+"\n"+x.fingerprint).join("\n\n")); }
-  else { infoBox("Host key \u2014 "+r.host, "No host key is pinned yet for "+r.host+".\nIt is recorded the first time you connect and accept it."); }
+  if(r.known && r.entries && r.entries.length){ infoBox("Host key: "+r.host, r.entries.map(x=>x.key_type+"\n"+x.fingerprint).join("\n\n")); }
+  else { infoBox("Host key: "+r.host, "No host key is pinned yet for "+r.host+".\nIt is recorded the first time you connect and accept it."); }
 }
 async function onTest(){ const host=$("host").value.trim(); if(!host){ infoBox("Test","Enter a host to test."); return; }
   setConn("busy","Testing..."); clog("Testing "+host+":"+($("port").value.trim()||"22")+"...");
@@ -1003,7 +1003,7 @@ async function deleteSel(side){ const items=selItems(side); if(!items.length)ret
   if(!await confirm2("Delete",`Delete ${items.length} item(s) from ${side}? This cannot be undone.`))return;
   const r=await API.delete(side,state[side].cwd,items);
   const failed=(r.errors&&r.errors.length)||0, okCount=items.length-failed;
-  if(failed) clog(`Deleted ${okCount}/${items.length} from ${side} — ${failed} could not be deleted`,"error");
+  if(failed) clog(`Deleted ${okCount}/${items.length} from ${side}, ${failed} could not be deleted`,"error");
   else clog(`Deleted ${items.length} item(s) from ${side}`,"ok");
   refresh(side); }
 async function calcSize(name){ $("statusText").textContent="Calculating size..."; $("cancelBtn").disabled=false;
