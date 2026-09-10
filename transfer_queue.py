@@ -41,6 +41,7 @@ class TransferItem:
     error: str = ""
     cancel_requested: bool = False
     on_conflict: str = "overwrite"
+    is_dir: bool = False
 
 
 class TransferQueue:
@@ -79,7 +80,8 @@ class TransferQueue:
         with self._lock:
             return self._paused
 
-    def append(self, direction, local_path, remote_path, name, size=0, on_conflict="overwrite"):
+    def append(self, direction, local_path, remote_path, name, size=0, on_conflict="overwrite",
+               is_dir=False):
         with self._lock:
             item = TransferItem(
                 id=self._next_id,
@@ -89,6 +91,7 @@ class TransferQueue:
                 name=name,
                 size=size,
                 on_conflict=on_conflict,
+                is_dir=is_dir,
             )
             self._next_id += 1
             self._items.append(item)
@@ -220,7 +223,7 @@ class TransferQueue:
             return failed
 
     def snapshot(self):
-        """Plain dicts (id, direction, name, state, error) in FIFO order, copies only."""
+        """Plain dicts (id, direction, name, state, error, is_dir) in FIFO order, copies only."""
         with self._lock:
             return [
                 {
@@ -229,6 +232,7 @@ class TransferQueue:
                     "name": item.name,
                     "state": item.state,
                     "error": item.error,
+                    "is_dir": item.is_dir,
                 }
                 for item in self._items
             ]
@@ -271,6 +275,7 @@ class TransferQueue:
                     "name": item.name,
                     "state": item.state,
                     "error": item.error,
+                    "is_dir": item.is_dir,
                 }
                 for item in self._items
             ]

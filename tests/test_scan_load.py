@@ -5,7 +5,7 @@ regardless of batch size, and a scan that a cancel can actually cut short.
 
 These never touch a real disk or network for the files being "transferred":
 api._iter_local is replaced with a synthetic generator that yields
-(local_path, remote_path, size, mtime) tuples straight out of a Python range,
+(local_path, remote_path, size, mtime, is_dir) tuples straight out of a Python range,
 and api._one (the per-file byte-moving call) is stubbed to a no-op. That
 isolates the thing actually being tested, the scanner/queue/worker-pool
 bookkeeping (backpressure, batching, pruning), from the cost of moving real
@@ -63,10 +63,10 @@ def _drive_synthetic_upload(api, monkeypatch, n, path_fn):
     """
     monkeypatch.setattr(api, "_one", lambda *a, **k: None)
 
-    def fake_iter_local(lp, rp, is_dir):
+    def fake_iter_local(lp, rp, is_dir, **kwargs):
         for i in range(n):
             plp, prp = path_fn(i)
-            yield (plp, prp, 16, FIXED_MTIME)
+            yield (plp, prp, 16, FIXED_MTIME, False)
 
     monkeypatch.setattr(api, "_iter_local", fake_iter_local)
 
@@ -201,11 +201,11 @@ def test_cancel_all_stops_a_large_scan_before_it_finishes(sftp_env, monkeypatch)
     n = 50_000
     monkeypatch.setattr(api, "_one", lambda *a, **k: None)
 
-    def slow_flat_gen(lp, rp, is_dir):
+    def slow_flat_gen(lp, rp, is_dir, **kwargs):
         for i in range(n):
             if i and i % 2000 == 0:
                 time.sleep(0.01)
-            yield (f"/fake_local/f{i}.bin", f"/top/f{i}.bin", 16, FIXED_MTIME)
+            yield (f"/fake_local/f{i}.bin", f"/top/f{i}.bin", 16, FIXED_MTIME, False)
 
     monkeypatch.setattr(api, "_iter_local", slow_flat_gen)
 

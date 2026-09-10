@@ -61,7 +61,7 @@ def test_mark_completed_shows_in_snapshot_and_counts(q):
 
     snap = q.snapshot()
     assert snap == [{"id": item_id, "direction": "upload", "name": "file",
-                      "state": COMPLETED, "error": ""}]
+                      "state": COMPLETED, "error": "", "is_dir": False}]
     assert q.counts()[COMPLETED] == 1
     assert q.pending() == 0
 
@@ -547,7 +547,7 @@ def test_clear_finished_resets_index_and_counter_so_finds_and_counts_stay_correc
     assert removed == 2  # only the still-live completed objects
     assert q.counts()[COMPLETED] == 0
     assert q.snapshot() == [{"id": waiting_id, "direction": "upload", "name": "filew",
-                              "state": WAITING, "error": ""}]
+                              "state": WAITING, "error": "", "is_dir": False}]
 
     # cleared ids are gone from the index (unknown to every id-based method)
     assert q.mark_completed(ids[-1]) is False

@@ -196,11 +196,11 @@ def test_iter_local_yields_every_file_in_a_nested_tree_in_any_order(tmp_path):
     results = set(api._iter_local(str(root), "/top", True))
 
     assert results == {
-        (str(root / "a.bin"), "/top/a.bin", 10, stamps[root / "a.bin"]),
-        (str(root / "b.bin"), "/top/b.bin", 20, stamps[root / "b.bin"]),
-        (str(root / "mid" / "c.bin"), "/top/mid/c.bin", 30, stamps[root / "mid" / "c.bin"]),
+        (str(root / "a.bin"), "/top/a.bin", 10, stamps[root / "a.bin"], False),
+        (str(root / "b.bin"), "/top/b.bin", 20, stamps[root / "b.bin"], False),
+        (str(root / "mid" / "c.bin"), "/top/mid/c.bin", 30, stamps[root / "mid" / "c.bin"], False),
         (str(root / "mid" / "deep" / "d.bin"), "/top/mid/deep/d.bin", 40,
-         stamps[root / "mid" / "deep" / "d.bin"]),
+         stamps[root / "mid" / "deep" / "d.bin"], False),
     }
 
 
@@ -237,10 +237,10 @@ def test_iter_remote_yields_every_file_in_a_nested_tree_in_any_order(tmp_path):
     results = set(api._iter_remote(sftp, "/top", str(tmp_path / "top"), True, root))
 
     assert results == {
-        (str(tmp_path / "top" / "a.bin"), "/top/a.bin", 10, 1_700_000_001),
-        (str(tmp_path / "top" / "b.bin"), "/top/b.bin", 20, 1_700_000_002),
-        (str(tmp_path / "top" / "mid" / "c.bin"), "/top/mid/c.bin", 30, 1_700_000_003),
-        (str(tmp_path / "top" / "mid" / "deep" / "d.bin"), "/top/mid/deep/d.bin", 40, 1_700_000_004),
+        (str(tmp_path / "top" / "a.bin"), "/top/a.bin", 10, 1_700_000_001, False),
+        (str(tmp_path / "top" / "b.bin"), "/top/b.bin", 20, 1_700_000_002, False),
+        (str(tmp_path / "top" / "mid" / "c.bin"), "/top/mid/c.bin", 30, 1_700_000_003, False),
+        (str(tmp_path / "top" / "mid" / "deep" / "d.bin"), "/top/mid/deep/d.bin", 40, 1_700_000_004, False),
     }
 
 
@@ -257,7 +257,7 @@ def test_iter_remote_skips_temp_parts_and_confines_hostile_names(tmp_path):
 
     results = list(api._iter_remote(sftp, "/top", str(tmp_path / "top"), True, root))
 
-    assert results == [(str(tmp_path / "top" / "good.bin"), "/top/good.bin", 5, 1_700_000_005)]
+    assert results == [(str(tmp_path / "top" / "good.bin"), "/top/good.bin", 5, 1_700_000_005, False)]
     with api._console_lock:
         messages = [line["msg"] for line in api._console_buffer]
     assert any("unsafe remote name" in m for m in messages)
