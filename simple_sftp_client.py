@@ -1756,11 +1756,23 @@ class Api:
                 continue
             break
 
-    def _iter_local(self, lp, rp, is_dir, problems=None):
-        """Stream (local_path, remote_path, size, mtime) one file at a time
-        from a local file or folder, without creating any directories. A
-        single file yields one tuple; a folder is walked depth-first, one
-        subfolder's listing in memory at a time rather than the whole tree.
+    def _iter_local(self, lp, rp, is_dir, problems=None, include_dirs=False):
+        """Stream (local_path, remote_path, size, mtime, is_dir) one file (or
+        folder marker) at a time from a local file or folder, without
+        creating any directories. A single file yields one tuple with
+        is_dir False and returns True (this path contributed a file). A
+        folder is walked depth-first, one subfolder's listing in memory at a
+        time rather than the whole tree, and returns True if any file was
+        found anywhere in its subtree, False otherwise.
+
+        include_dirs, when True, also yields a folder marker tuple
+        (path, path, 0, 0, True) for any directory whose entire subtree
+        contains no files: a folder that does contain files anywhere below
+        it already gets created as a side effect of sending those files, so
+        it is never marked here. The default False keeps every existing
+        caller (compare/sync) seeing only file tuples, unchanged. A marker is
+        only ever yielded after that directory's own listing succeeds: a
+        directory that could not be listed is not known to be empty.
 
         problems, if given, is a list that a listing failure or an unreadable
         file's metadata appends a short descriptor to (in addition to the usual
@@ -1775,8 +1787,9 @@ class Api:
                 size, mtime = 0, 0
                 if problems is not None:
                     problems.append(f"could not read {lp}: {e}")
-            yield (lp, rp, size, mtime)
-            return
+            yield (lp, rp, size, mtime, False)
+            return True
+        had_file = False
         try:
             with os.scandir(lp) as it:
                 for entry in it:
@@ -1788,7 +1801,9 @@ class Api:
                     except OSError:
                         child_is_dir = False
                     if child_is_dir:
-                        yield from self._iter_local(entry.path, rchild, True, problems=problems)
+                        had = yield from self._iter_local(
+                            entry.path, rchild, True, problems=problems, include_dirs=include_dirs)
+                        had_file = had_file or had
                     else:
                         try:
                             st = entry.stat(follow_symlinks=False)
@@ -1797,14 +1812,18 @@ class Api:
                             size, mtime = 0, 0
                             if problems is not None:
                                 problems.append(f"could not read {entry.path}: {e}")
-                        yield (entry.path, rchild, size, mtime)
+                        yield (entry.path, rchild, size, mtime, False)
+                        had_file = True
         except OSError as e:
             self._worker_log(f"could not list {lp}: {e}", "error")
             if problems is not None:
                 problems.append(f"could not list {lp}: {e}")
-            return
+            return False
+        if include_dirs and not had_file:
+            yield (lp, rp, 0, 0, True)
+        return had_file
 
-    def _iter_remote(self, sftp, rp, lp, is_dir, root, problems=None):
+    def _iter_remote(self, sftp, rp, lp, is_dir, root, problems=None, include_dirs=False):
         """Same as _iter_local but over an sftp session for a remote file or
         folder, again without creating any directories. sftp must be a
         session owned by the caller (the scanner opens its own, never
@@ -1812,6 +1831,15 @@ class Api:
         local folder the user selected for this download; it stays fixed
         across the whole recursive walk so every level, however deep, is
         checked against the same boundary rather than its immediate parent.
+
+        Yields (local_path, remote_path, size, mtime, is_dir) tuples. A
+        single file yields one file tuple and returns True (this path
+        contributed a file); a folder returns True if any file was found
+        anywhere in its subtree, False otherwise. include_dirs, when True,
+        also yields a folder marker (lp, rp, 0, 0, True) for a directory
+        whose whole subtree has no files, the same rule and default as
+        _iter_local; a marker is only yielded once this directory's own
+        listing has succeeded.
 
         problems, if given, is a list that a listing failure appends a short
         descriptor to (in addition to the usual log); see _iter_local for why
@@ -1828,8 +1856,9 @@ class Api:
         case (no subfolders) stays effectively unbuffered."""
         if not is_dir:
             size, mtime = self._rstat(sftp, rp)
-            yield (lp, rp, size, mtime)
-            return
+            yield (lp, rp, size, mtime, False)
+            return True
+        had_file = False
         subdirs = []
         try:
             for a in sftp.listdir_iter(rp):
@@ -1850,14 +1879,20 @@ class Api:
                 if stat.S_ISDIR(a.st_mode):
                     subdirs.append((rchild, lchild))
                 else:
-                    yield (lchild, rchild, a.st_size, int(a.st_mtime or 0))
+                    yield (lchild, rchild, a.st_size, int(a.st_mtime or 0), False)
+                    had_file = True
         except Exception as e:
             self._worker_log(f"could not list {rp}: {friendly_error(e)}", "error")
             if problems is not None:
                 problems.append(f"could not list {rp}: {friendly_error(e)}")
-            return
+            return False
         for rchild, lchild in subdirs:
-            yield from self._iter_remote(sftp, rchild, lchild, True, root, problems=problems)
+            had = yield from self._iter_remote(
+                sftp, rchild, lchild, True, root, problems=problems, include_dirs=include_dirs)
+            had_file = had_file or had
+        if include_dirs and not had_file:
+            yield (lp, rp, 0, 0, True)
+        return had_file
 
     def _scan_and_queue(self, roots, direction, on_conflict, scan_id, stop_event, local_root=None):
         """Runs entirely on its own daemon thread, never the pywebview bridge
@@ -1901,8 +1936,8 @@ class Api:
                 if stop_event.is_set() or not self.connected:
                     stopped_early = True
                     break
-                gen = self._iter_local(lp, rp, is_dir) if direction == "upload" \
-                    else self._iter_remote(sftp, rp, lp, is_dir, local_root)
+                gen = self._iter_local(lp, rp, is_dir, include_dirs=True) if direction == "upload" \
+                    else self._iter_remote(sftp, rp, lp, is_dir, local_root, include_dirs=True)
                 for triple in gen:
                     if stop_event.is_set() or not self.connected:
                         stopped_early = True
@@ -2129,25 +2164,27 @@ class Api:
         return {"ok": True, "scanning": True}
 
     def _enqueue_files(self, files, direction, on_conflict):
-        """Append (local_path, remote_path, size, mtime) tuples to the queue
-        as per-file items and wake the worker pool. Returns the count
+        """Append (local_path, remote_path, size, mtime, is_dir) tuples to the
+        queue as per-item jobs and wake the worker pool. Returns the count
         enqueued. Shared by pane transfers (enqueue) and external drops
         (upload_paths). Sizes are carried from enumeration (real local size
         for uploads, real remote size for downloads), never re-stat here.
         mtime is part of the enumeration tuple but unused here: timestamp
         preservation re-reads the live source at publish time, not this
-        scan-time value.
+        scan-time value. is_dir marks a "make folder" job (always size 0)
+        rather than a file transfer; see _worker_loop/_make_dir.
 
         Also decides the worker-pool size for this batch (worker_target) and
         raises the pool's target under _worker_lock: only ever up, never torn
         down under a still-draining pool, so a mid-batch top-up never shrinks
         workers already running."""
         sizes = []
-        for lp, rp, size, _mtime in files:
+        for lp, rp, size, _mtime, is_dir in files:
             name = os.path.basename(lp)
             sizes.append(size)
             queue_size = size if size and size > 0 else 0
-            self.queue.append(direction, lp, rp, name, size=queue_size, on_conflict=on_conflict)
+            self.queue.append(direction, lp, rp, name, size=queue_size, on_conflict=on_conflict,
+                               is_dir=is_dir)
         batch_target = worker_target(sizes)
         with self._worker_lock:
             if not self._workers:
@@ -2289,10 +2326,17 @@ class Api:
                     if item.cancel_requested:
                         break
                     try:
-                        res = self._one(item.direction, item.local_path, item.remote_path,
-                                         item.name, done_count, total, item.on_conflict,
-                                         sftp, cancel_check=lambda it=item: it.cancel_requested,
-                                         progress_key=item.id, dir_cache=dir_cache)
+                        if item.is_dir:
+                            # A "make folder" job: no bytes to move, so there
+                            # is no progress callback and nothing to skip.
+                            self._make_dir(item.direction, item.local_path,
+                                            item.remote_path, sftp, dir_cache)
+                            res = "ok"
+                        else:
+                            res = self._one(item.direction, item.local_path, item.remote_path,
+                                             item.name, done_count, total, item.on_conflict,
+                                             sftp, cancel_check=lambda it=item: it.cancel_requested,
+                                             progress_key=item.id, dir_cache=dir_cache)
                         ok = True
                         break  # success (including "skip"/"cancelled"): stop retrying
                     except Exception as e:
@@ -2322,7 +2366,13 @@ class Api:
                     self._worker_log(f"skip {item.name} (already up to date)")
                 elif ok:
                     self.queue.mark_completed(item.id)
-                    self._worker_log(f"{arrow} {(item.remote_path if item.direction == 'upload' else item.name)}", "ok")
+                    if item.is_dir:
+                        if item.direction == "upload":
+                            self._worker_log(f"{arrow} folder {item.remote_path}", "ok")
+                        else:
+                            self._worker_log(f"created folder {item.local_path}", "ok")
+                    else:
+                        self._worker_log(f"{arrow} {(item.remote_path if item.direction == 'upload' else item.name)}", "ok")
                 else:
                     self.queue.mark_failed(item.id, last_err or "transfer failed")
                     self._worker_log(f"failed {item.name}", "error")
@@ -2886,7 +2936,7 @@ class Api:
                 f"Some folders could not be read ({problems[0]}) "
                 f"[{len(problems)} problem(s)]; compare/sync was not run.")
 
-        for lp, rp, size, mtime in self._iter_local(local_dir, remote_dir, True, problems=problems):
+        for lp, rp, size, mtime, _is_dir in self._iter_local(local_dir, remote_dir, True, problems=problems):
             if stop_event is not None and stop_event.is_set():
                 return None, None
             rel = posixpath.relpath(rp, remote_dir)
@@ -2896,7 +2946,7 @@ class Api:
         # rather than running the whole remote (network) walk just to discard it.
         if problems:
             _raise_incomplete()
-        for lp, rp, size, mtime in self._iter_remote(
+        for lp, rp, size, mtime, _is_dir in self._iter_remote(
                 sftp, remote_dir, local_dir, True, local_dir, problems=problems):
             if stop_event is not None and stop_event.is_set():
                 return None, None
@@ -3169,7 +3219,7 @@ class Api:
             for lp, rp, size in transfers:
                 if stop_event.is_set() or not self.connected:
                     break
-                batch.append((lp, rp, size, 0))
+                batch.append((lp, rp, size, 0, False))
                 if len(batch) >= batch_cap:
                     flush()
                     if stop_event.is_set() or not self.connected:
@@ -3593,6 +3643,54 @@ class Api:
         t.start()
         debug.log("WATCH start", {"local": local_dir, "remote": remote_dir})
         return {"ok": True}
+
+    def _make_dir(self, direction, local_path, remote_path, sftp, dir_cache=None):
+        """Execute a "make folder" queue item: create the empty folder at
+        remote_path (upload) or local_path (download). Idempotent if the
+        folder is already there. Raises with a clear message (never swallows)
+        if the target already exists as a FILE, or if creation otherwise
+        fails, so the caller's existing retry/failure handling marks the
+        queue item FAILED with that message exactly like a file transfer.
+
+        dir_cache, if given, is updated with a newly-confirmed remote folder
+        so a later file item under it skips the redundant ensure in _one."""
+        if direction == "upload":
+            try:
+                st = sftp.stat(remote_path)
+            except Exception:
+                st = None
+            if st is not None:
+                if stat.S_ISDIR(st.st_mode):
+                    if dir_cache is not None:
+                        dir_cache.add(remote_path)
+                    return
+                raise IOError(
+                    f"cannot create folder: a file with this name already exists: {remote_path}")
+            parent = posixpath.dirname(remote_path)
+            if parent and parent != "/":
+                self._ensure_remote_dir(parent, sftp)
+            try:
+                sftp.mkdir(remote_path)
+            except Exception:
+                pass  # confirmed (or refuted) by the stat below, not by mkdir's own result
+            # _ensure_remote_dir deliberately swallows mkdir errors, so the
+            # only way to know the folder actually exists is to stat it here.
+            st2 = sftp.stat(remote_path)
+            if not stat.S_ISDIR(st2.st_mode):
+                raise IOError(
+                    f"cannot create folder: a file with this name already exists: {remote_path}")
+            if dir_cache is not None:
+                dir_cache.add(remote_path)
+        else:
+            if os.path.exists(local_path):
+                if os.path.isdir(local_path):
+                    return
+                raise IOError(
+                    f"cannot create folder: a file with this name already exists: {local_path}")
+            try:
+                os.makedirs(local_path, exist_ok=True)
+            except OSError as e:
+                raise IOError(f"cannot create folder: {e}") from e
 
     def _ensure_remote_dir(self, path, sftp=None):
         """Create path and any missing parents over sftp (defaults to
