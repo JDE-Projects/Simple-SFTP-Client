@@ -52,7 +52,12 @@ from transfer_queue import TransferQueue
 APP_VERSION = "1.8.0"
 GITHUB_REPO = "JDE-Projects/Simple-SFTP-Client"   # owner/repo for update checks
 WORKER_COUNT = 2   # transfer queue workers by default, each its own SFTP session
-WORKER_COUNT_MAX = 5   # ceiling for a batch of many small files (channels-per-connection headroom, see status.md)
+# Ceiling for a batch of many small files. Every worker opens its own SFTP
+# channel on the one SSH connection, alongside the browsing channel (which the
+# folder watcher shares) and any Compare, Sync, or folder-scan channel.
+# OpenSSH servers allow 10 sessions per connection by default (MaxSessions),
+# so 5 leaves headroom under that common limit.
+WORKER_COUNT_MAX = 5
 # A background scan pauses queuing new files once this many are still WAITING,
 # and resumes once the worker pool has drained enough of them. This is what
 # keeps memory bounded while a 200GB / 1M-file folder is being scanned: the
@@ -2731,7 +2736,7 @@ class Api:
 
     def _apply_download_mtime(self, lp, rp, mtime, size):
         """Stamp a freshly downloaded local file with the remote file's
-        modification time (Option B), so a later size+mtime compare reads an
+        modification time, so a later size+mtime compare reads an
         unchanged file as 'same'. A mtime of 0 means the server's reply
         carried no modification time; the file keeps its own time. If there
         is no time to set, or setting it fails, the file is remembered for
@@ -2757,7 +2762,7 @@ class Api:
 
     def _apply_upload_mtime(self, sftp, rp, lp):
         """Stamp an uploaded remote file with the local source's modification
-        time (Option B). If the server refuses to set the time, the file is
+        time. If the server refuses to set the time, the file is
         remembered for the rest of this connection: a later compare or skip
         check that finds a matching size will still treat it as unchanged,
         even though its time does not match. This memory does not survive a
@@ -2849,8 +2854,8 @@ class Api:
     def _classify(self, rel, local_map, remote_map):
         """Metadata equality, not proven byte equality: a pair is 'same' when
         sizes match and modification times agree within MTIME_TOL. Because
-        transfers now preserve the source mtime (Option B), a same-size edit no
-        longer hides as 'same' -- its mtime differs, so it sorts to newer_local
+        transfers preserve the source mtime, a same-size edit does not hide
+        as 'same' -- its mtime differs, so it sorts to newer_local
         or newer_remote by time, UNLESS this connection remembers this pair as
         having failed its time stamp at transfer time (see
         _mtime_fallback_matches), in which case a matching size alone still

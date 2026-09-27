@@ -415,7 +415,7 @@ window.appEvent=function(ev,p){
   else if(ev==="quit-confirm"){ confirm2("Transfers running","Transfers are still running, quit anyway?").then(ok=>{ if(ok)API.confirm_quit(); }); }
 };
 
-/* ───── Phase 2 queue: worker never pushes, the window pulls on a timer ───── */
+/* ───── Transfer queue: worker never pushes, the window pulls on a timer ───── */
 let qPollTimer=null, qPolling=false, qModalOpen=false;
 
 const QSTATE_LABEL={waiting:"Waiting",active:"Sending",completed:"Done",skipped:"Skipped",failed:"Failed",cancelled:"Cancelled"};
