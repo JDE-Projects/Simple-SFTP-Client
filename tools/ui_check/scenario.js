@@ -19,6 +19,10 @@ const batchDone=()=>waitFor(()=>$("qMeta").textContent.startsWith("Done:")&&queu
 const consoleText=()=>$("console").textContent;
 try{
   await waitFor(()=>typeof API!=="undefined"&&API);
+  const bottom=document.querySelector(".bottom-bar"), q=document.querySelector(".queue"), barIds=[...bottom.querySelectorAll("[id]")].map(el=>el.id).sort();
+  ok("bottom bar has only the standard controls",()=>JSON.stringify(barIds)===JSON.stringify(["dbgToggle","updateBtn","updateNotice","verLabel"]),()=>barIds);
+  ok("bottom bar does not overlap the queue",()=>bottom.getBoundingClientRect().top>=q.getBoundingClientRect().bottom,()=>JSON.stringify({queue:q.getBoundingClientRect().bottom,bar:bottom.getBoundingClientRect().top}));
+  ok("debug and remember controls are checkboxes",()=>$("dbgToggle").type==="checkbox"&&$("rememberToggle").type==="checkbox");
   $("host").value="127.0.0.1"; $("user").value="test";
   await onConn();
   await waitFor(()=>state.remote.cwd==="/");
@@ -49,11 +53,60 @@ try{
   ok("remote: late refresh reply dropped, pane stays in /other",()=>state.remote.cwd==="/other"&&names("remote").includes("o.txt"),()=>state.remote.cwd+" "+names("remote"));
   await loadRemote("/");
 
+  // Compare summaries stay when browsing within roots, then clear as soon as
+  // either a refresh or navigation leaves the roots.
+  await onCompare();
+  const compared=await waitFor(()=>$("localCompare").textContent.includes("newer here")&&$("remoteCompare").textContent.includes("newer remote"),20000);
+  ok("compare summaries appear in both pane titles",()=>compared,()=>$("localCompare").textContent+" | "+$("remoteCompare").textContent);
+  await waitFor(()=>!qWasBusy,10000); await sleep(1500);
+  ok("compare colors and summaries survive the compare finishing",()=>!!compareMap&&$("localCompare").textContent!==""&&$("remoteCompare").textContent!=="");
+
+  // Narrowest window the app allows (min_size 1000 wide), with the compare
+  // counts and a long watch tag showing: bar stays one row, titles one line.
+  const app=document.querySelector(".app"), bar=document.querySelector(".bottom-bar");
+  app.style.width="1000px"; $("watchTag").textContent="Watching → /srv/releases/storefront/current/a/very/long/folder/name";
+  await sleep(100);
+  const br=bar.getBoundingClientRect(), inBar=el=>{const r=el.getBoundingClientRect();return r.left>=br.left-0.5&&r.right<=br.right+0.5&&r.top>=br.top-0.5&&r.bottom<=br.bottom+0.5;};
+  ok("narrow: bottom bar stays one 44px row",()=>Math.round(br.height)===44,()=>br.height);
+  ok("narrow: bottom bar contents stay inside it",()=>[...bar.querySelectorAll(".bar-left,.bar-right,#updateBtn,#verLabel,.dbg-toggle")].every(inBar));
+  const oneLine=el=>el.getBoundingClientRect().height<24;
+  ok("narrow: pane titles stay one line",()=>[...document.querySelectorAll(".pane-title")].every(oneLine),()=>[...document.querySelectorAll(".pane-title")].map(e=>e.getBoundingClientRect().height));
+  ok("narrow: long watch tag is cut off, not overflowing",()=>{const t=$("watchTag"),p=t.parentElement.getBoundingClientRect(),r=t.getBoundingClientRect();return r.right<=p.right+0.5&&t.scrollWidth>t.clientWidth;});
+  app.style.width=""; $("watchTag").textContent="";
+
+  // The update notice sits on the bar's true center, not shifted by the
+  // wider right-hand zone.
+  $("updateNotice").textContent="You're on the latest version"; await sleep(50);
+  const nr=$("updateNotice").getBoundingClientRect(), fr=bar.getBoundingClientRect();
+  ok("update notice is centered in the bottom bar",()=>Math.abs((nr.left+nr.right)/2-(fr.left+fr.right)/2)<=2,()=>((nr.left+nr.right)/2-(fr.left+fr.right)/2).toFixed(1)+"px off");
+  $("updateNotice").textContent="";
+
+  // Keyboard focus shows the teal outline.
+  const outlined=el=>getComputedStyle(el).outlineStyle==="solid";
+  $("dbgToggle").focus(); ok("focus: debug switch shows an outline",()=>outlined(document.querySelector(".dbg-track")));
+  $("rememberToggle").focus(); ok("focus: remember switch shows an outline",()=>outlined(document.querySelector(".remember-track")));
+  $("updateBtn").focus(); ok("focus: update button shows an outline",()=>outlined($("updateBtn")));
+  $("theme-btn").focus(); ok("focus: theme button shows an outline",()=>outlined($("theme-btn")));
+  $("compareBtn").focus(); ok("focus: pane buttons show an outline",()=>outlined($("compareBtn")));
+  document.activeElement.blur();
+  refresh("remote"); await waitFor(()=>!state.remote.refreshing&&!compareMap,5000);
+  ok("one manual refresh right after a compare clears it",()=>!compareMap&&$("localCompare").textContent==="",()=>$("localCompare").textContent);
+  await onCompare(); await waitFor(()=>!!compareMap,20000); await waitFor(()=>!qWasBusy,10000);
+  await loadLocal(T.sub);
+  ok("compare summaries remain in compared subfolder",()=>!!compareMap&&$("localCompare").textContent!=="");
+  await loadLocal(T.other);
+  ok("compare summaries clear outside compared root",()=>!compareMap&&$("localCompare").textContent===""&&$("remoteCompare").textContent==="");
+  await loadLocal(T.local);
+  applyCompareResult({root_local:T.local,root_remote:"/",files:{"a.txt":"newer_local"},folders:{}});
+  refresh("local"); await waitFor(()=>!state.local.refreshing&&!compareMap);
+  ok("compare summaries clear after pane refresh",()=>!compareMap&&$("localCompare").textContent===""&&$("remoteCompare").textContent==="");
+
   // Starting Watch must not rerun the end-of-batch refresh.
   const before=await fs("calls");
   const w=onWatch(); await clickOk(); await w; await sleep(2000);
   const after=await fs("calls");
   ok("watch started",()=>watching===true);
+  ok("watch tag shows while watching",()=>$("watchTag").textContent.includes("Watching →")&&$("watchTag").title.includes(state.local.cwd)&&$("watchTag").title.includes(state.remote.cwd),()=>$("watchTag").textContent);
   ok("starting Watch triggers no pane refresh",()=>(after.list_local||0)===(before.list_local||0)&&(after.list_remote||0)===(before.list_remote||0),()=>JSON.stringify({before,after}));
 
   // Watcher upload into the folder the remote pane shows.
@@ -79,9 +132,14 @@ try{
   ok("uploaded file shows in remote pane",()=>names("remote").includes("up.txt"),()=>names("remote"));
   ok("poll slowed to once a second while only watching",()=>qPollDelay===1000&&!!qPollTimer);
 
+  await onWatch();
+  ok("watch tag hides after stop",()=>!watching&&$("watchTag").textContent==="");
+  const restart=onWatch(); await clickOk(); await restart;
+
   // Disconnect while watching.
   await onConn(); await sleep(1500);
   ok("Watch button reset after disconnect",()=>!watching&&$("watchBtn").textContent==="Watch",()=>$("watchBtn").textContent);
+  ok("watch tag hides after disconnect",()=>$("watchTag").textContent==="");
   ok("poll stopped after disconnect",()=>!qPollTimer);
   await post("/report",{checks});
 }catch(e){ await post("/report",{checks,error:String(e&&e.stack||e)}); }
