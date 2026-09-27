@@ -1,23 +1,17 @@
 """
 Shared test setup.
 
-Beyond making the project root importable, this hosts a throwaway, in-process
-paramiko SFTP server and the fixtures that wire a real simple_sftp_client.Api
-to it. Nothing is installed or left running: the server is a daemon thread
-bound to an ephemeral port on 127.0.0.1, with a throwaway in-memory host key,
-serving a pytest tmp_path. The server pieces are adapted from the manual
+Hosts a throwaway, in-process paramiko SFTP server and the fixtures that wire
+a real simple_sftp_client.Api to it. Nothing is installed or left running: the
+server is a daemon thread bound to an ephemeral port on 127.0.0.1, with a
+throwaway in-memory host key, serving a pytest tmp_path. The server pieces are adapted from the manual
 tools/test_sftp_server.py (see the test-sftp-server branch).
 """
 import os
 import posixpath
 import socket
-import sys
 import threading
 import time
-
-# Make the project root (one level up from tests/) importable so
-# `import simple_sftp_client` finds the module during test collection.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import paramiko
 import pytest
