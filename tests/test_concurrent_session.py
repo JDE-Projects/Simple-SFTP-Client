@@ -139,12 +139,22 @@ def test_watch_upload_is_buffered_with_its_remote_folder(sftp_env, wait_until):
     assert api.poll_queue()["watching"] is True
     (local_dir / "queued.txt").write_bytes(b"queued")
 
-    wait_until(lambda: (server_root / "queued.txt").exists())
-    status = api.poll_queue()
+    # The file lands on the server a moment before the watcher records its
+    # message and refresh folder, so keep polling until both arrive.
+    uploaded = {"msg": "Watch: uploaded queued.txt", "level": "ok"}
+    console, refresh = [], []
+
+    def delivered():
+        status = api.poll_queue()
+        console.extend(status["console"])
+        refresh.extend(status["watch_refresh"])
+        return uploaded in console and refresh
+
+    wait_until(delivered)
     api.stop_watch()
 
-    assert {"msg": "Watch: uploaded queued.txt", "level": "ok"} in status["console"]
-    assert status["watch_refresh"] == ["/"]
+    assert console.count(uploaded) == 1
+    assert refresh == ["/"]
     assert api.poll_queue()["watch_refresh"] == []
     assert api.poll_queue()["watching"] is False
 
@@ -163,10 +173,19 @@ def test_watch_refresh_deduplicates_folders_from_one_pass(sftp_env, wait_until):
     wait_until(lambda: (server_root / "first.txt").exists()
                and (server_root / "second.txt").exists()
                and (server_root / "sub" / "nested.txt").exists())
-    status = api.poll_queue()
+    # Refresh folders are recorded at the end of a pass, after the files
+    # land, so keep polling until that pass's report arrives. Earlier empty
+    # polls are fine; the one report must name each folder once.
+    polls = []
+
+    def reported():
+        polls.append(api.poll_queue()["watch_refresh"])
+        return bool(polls[-1])
+
+    wait_until(reported)
     api.stop_watch()
 
-    assert status["watch_refresh"] == ["/", "/sub"]
+    assert polls[-1] == ["/", "/sub"]
 
 
 def test_failed_watch_upload_logs_error_without_refresh(

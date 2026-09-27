@@ -3423,16 +3423,36 @@ class Api:
                 # failure partway through the restore can't truncate the
                 # only remaining copy of the private key.
                 if backup_path is not None:
-                    try:
-                        os.replace(backup_path, out_path)
-                    except OSError:
-                        # Restore rename failed. Leave the durable backup on
-                        # disk as the recovery artifact instead of letting
-                        # `finally` delete it; out_path still holds a
-                        # complete (if mismatched) new key, never a
-                        # truncated one.
-                        pass
-                    backup_path = None
+                    # Windows can refuse the rename with "Access is denied"
+                    # for a few milliseconds while antivirus or the search
+                    # indexer holds the just-published key open, so retry
+                    # briefly before giving up.
+                    restored = False
+                    for attempt in range(5):
+                        try:
+                            os.replace(backup_path, out_path)
+                            restored = True
+                            break
+                        except OSError:
+                            if attempt < 4:
+                                time.sleep(0.05)
+                    kept_backup, backup_path = backup_path, None
+                    if not restored:
+                        # Leave the durable backup on disk as the recovery
+                        # artifact instead of letting `finally` delete it;
+                        # out_path still holds a complete (if mismatched)
+                        # new key, never a truncated one. Say so, so the
+                        # user isn't left with a pair that quietly no
+                        # longer matches.
+                        debug.log("KEYGEN restore failed",
+                                  {"path": out_path, "backup": kept_backup})
+                        return {"ok": False, "error": (
+                            "The key couldn't be saved, and the old private key "
+                            f"couldn't be put back. {out_path} now holds a new "
+                            "private key that doesn't match the old public key. "
+                            f"The old private key is saved as {kept_backup}. "
+                            f"Rename it to {os.path.basename(out_path)} to keep "
+                            "using the old key.")}
                 else:
                     try:
                         os.remove(out_path)
