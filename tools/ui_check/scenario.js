@@ -23,6 +23,16 @@ try{
   ok("bottom bar has only the standard controls",()=>JSON.stringify(barIds)===JSON.stringify(["dbgToggle","updateBtn","updateNotice","verLabel"]),()=>barIds);
   ok("bottom bar does not overlap the queue",()=>bottom.getBoundingClientRect().top>=q.getBoundingClientRect().bottom,()=>JSON.stringify({queue:q.getBoundingClientRect().bottom,bar:bottom.getBoundingClientRect().top}));
   ok("debug and remember controls are checkboxes",()=>$("dbgToggle").type==="checkbox"&&$("rememberToggle").type==="checkbox");
+
+  // The runner points the debug log at a folder that doesn't exist, so
+  // turning it on always fails: a warning must reach the console, and the
+  // switch must reflect that logging stayed off. Wait for init() to finish
+  // wiring the checkbox before relying on its onchange handler.
+  await waitFor(()=>typeof $("dbgToggle").onchange==="function");
+  $("dbgToggle").click();
+  const warned=await waitFor(()=>consoleText().includes("Debug log:"),5000);
+  ok("a debug log write failure shows a warning in the console",()=>warned,()=>consoleText().slice(-300));
+  ok("debug switch reflects logging staying off",()=>$("dbgToggle").checked===false);
   $("host").value="127.0.0.1"; $("user").value="test";
   await onConn();
   await waitFor(()=>state.remote.cwd==="/");

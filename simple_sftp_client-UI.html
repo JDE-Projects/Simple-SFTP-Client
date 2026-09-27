@@ -409,6 +409,10 @@ function clog(m,level){ const box=$("console"); if(!box)return; const empty=box.
   while(box.children.length>500)box.removeChild(box.firstChild); box.scrollTop=box.scrollHeight; }
 // back-compat shim: existing toast(msg,isErr) calls now write to the console
 function toast(m,e){ clog(m, e?"error":"info"); }
+// Debug log warnings (a failed write, a locked old log...) arrive through
+// drain_debug_warnings(), set_debug(), and poll_queue(). A warning is the
+// only time background logging state is copied to the checkbox.
+function showDebugWarnings(list,enabled){ if(list&&list.length){ list.forEach(m=>clog(m,"warn")); $("dbgToggle").checked=!!enabled; } }
 function clearConsole(){ const box=$("console"); if(box)box.innerHTML='<div class="console-empty">Console cleared.</div>'; }
 async function exportConsole(){ const box=$("console"); if(!box)return;
   const lines=[...box.querySelectorAll(".cline")].map(l=>{ const t=l.querySelector(".ctime"); const time=t?t.textContent:"";
@@ -530,6 +534,7 @@ async function queueTick(){
   try{
     const p=await API.poll_queue();
     (p.console||[]).forEach(line=>clog(line.msg,line.level));
+    showDebugWarnings(p.debug_warnings,p.debug_enabled);
     const busy=!!p.scanning||!!p.comparing||p.pending>0;
     // A watcher-only tick: nothing in the queue moved, so leave the footer
     // (including a finished batch's summary) exactly as it is.
@@ -672,6 +677,7 @@ async function init(){
   $("upBtn").onclick=()=>startTransfer("upload"); $("downBtn").onclick=()=>startTransfer("download");
   $("qViewBtn").onclick=()=>{ qModalOpen=true; $("queueModal").classList.add("show");
     API.poll_queue().then(p=>{ lastProgressById=p.progress||{}; renderQueueRows(p.items); renderQueueSummary(p.counts);
+      showDebugWarnings(p.debug_warnings,p.debug_enabled);
       const rfBtn=$("qRetryFailedBtn"); if(rfBtn)rfBtn.disabled=!((p.counts&&p.counts.failed)>0); }); };
   $("qCloseBtn").onclick=()=>{ qModalOpen=false; $("queueModal").classList.remove("show"); };
   $("qClearBtn").onclick=async()=>{ const r=await API.clear_finished(); renderQueueRows(r.items);
@@ -686,6 +692,7 @@ async function init(){
     if(!r.pending){ if(!sizeCalculating)$("qName").textContent="Idle"; $("qMeta").textContent=""; $("qFill").style.width="0%"; } };
   $("qRetryFailedBtn").onclick=async()=>{ const r=await API.retry_all_failed(); if(r&&r.ok){ startQueuePoll();
     const p=await API.poll_queue(); lastProgressById=p.progress||{}; renderQueueRows(p.items); renderQueueSummary(p.counts);
+    showDebugWarnings(p.debug_warnings,p.debug_enabled);
     $("qRetryFailedBtn").disabled=!((p.counts&&p.counts.failed)>0); } };
   $("qRetryFailedFooterBtn").onclick=async()=>{ const r=await API.retry_all_failed(); if(r&&r.ok){
     $("qRetryFailedFooterBtn").style.display="none"; startQueuePoll(); } };
@@ -699,7 +706,7 @@ async function init(){
   $("kgCopy").onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText($("kgPub").textContent);toast("Public key copied");};
   $("kgInstall").onclick=onInstallKey;
   $("sessClose").onclick=()=>$("sessModal").classList.remove("show");
-  $("dbgToggle").onchange=async e=>{const r=await API.set_debug(e.target.checked);e.target.checked=!!r.enabled;toast(r.enabled?"Debug log on":"Debug log off");};
+  $("dbgToggle").onchange=async e=>{const r=await API.set_debug(e.target.checked);e.target.checked=!!r.enabled;toast(r.enabled?"Debug log on":"Debug log off");showDebugWarnings(r.warnings,r.enabled);};
   $("updateBtn").onclick=()=>doUpdate(true);
   ["local","remote"].forEach(side=>{
     $("filter"+cap(side)).addEventListener("input",e=>{state[side].filter=e.target.value.toLowerCase();renderPane(side);});
@@ -724,6 +731,13 @@ async function init(){
   clog("Ready to connect. Enter a host and click Connect to begin.");
   loadLocal(""); // shows drives on Windows / home elsewhere
   setTimeout(()=>doUpdate(false),1500); // quiet startup check
+  // Light always-on poll so a debug log warning is never stuck waiting on a
+  // queue that isn't running (poll_queue only ticks while something's active).
+  // The first call catches a launch-time prune() warning. The switch is only
+  // re-synced when a warning arrives, since a failed write is what turns
+  // logging off behind the page's back.
+  const drainDebug=()=>API.drain_debug_warnings().then(r=>showDebugWarnings(r.warnings,r.enabled));
+  drainDebug(); setInterval(drainDebug,3000);
 }
 // keep the console the same height as the connection bar, even as it reflows
 function syncConsoleHeight(){ const bar=document.querySelector(".conn"); const cw=$("consoleWrap"); if(!bar||!cw)return;

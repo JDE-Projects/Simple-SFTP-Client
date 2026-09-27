@@ -48,6 +48,7 @@ import webview
 import paramiko
 
 from transfer_queue import TransferQueue
+import debug_log
 
 APP_VERSION = "1.8.0"
 GITHUB_REPO = "JDE-Projects/Simple-SFTP-Client"   # owner/repo for update checks
@@ -583,30 +584,22 @@ class _ParamikoBridge(logging.Handler):
             pass
 
 
-class DebugLog:
-    def __init__(self):
-        self._on = False
-        self._path = None
-        self._lock = threading.Lock()
+class AppDebugLog(debug_log.DebugLog):
+    """Adds the paramiko protocol-log bridge on top of the shared DebugLog:
+    attached whenever logging is on, detached the moment it goes off."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self._bridge = None  # paramiko logging handler, attached only while on
 
     def set_enabled(self, on):
-        on = bool(on)
-        with self._lock:
-            if on and not self._path:
-                stamp = datetime.now().strftime("%m%d%Y_%H%M%S")
-                self._path = os.path.join(exe_dir(), f"Debug_Log_{stamp}.txt")
-                try:
-                    with open(self._path, "w", encoding="utf-8") as f:
-                        f.write("=== Simple SFTP Client debug log ===\n")
-                        f.write(f"Started: {datetime.now().isoformat()}\n" + "=" * 60 + "\n\n")
-                except Exception:
-                    self._path = None
-                    self._on = False
-                    return False
-            self._on = on
-        self._set_paramiko(on)
-        return True
+        ok = super().set_enabled(on)
+        self._set_paramiko(self.is_enabled())
+        return ok
+
+    def log(self, label, content=""):
+        super().log(label, content)
+        if self._bridge is not None and not self.is_enabled():
+            self._set_paramiko(False)
 
     def _set_paramiko(self, on):
         """Capture paramiko's verbose transport/SFTP logging while debug is on."""
@@ -622,26 +615,8 @@ class DebugLog:
         except Exception:
             pass
 
-    def is_enabled(self):
-        return self._on
 
-    def log(self, label, content=""):
-        if not self._on or not self._path:
-            return
-        try:
-            with self._lock, open(self._path, "a", encoding="utf-8") as f:
-                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] {_scrub(str(label))}\n")
-                if content:
-                    if isinstance(content, (dict, list)):
-                        content = json.dumps(content, indent=2, default=str)
-                    f.write(f"{_scrub(str(content))}\n")
-                f.write("\n")
-        except Exception:
-            pass
-
-
-debug = DebugLog()
+debug = AppDebugLog(exe_dir(), "Simple SFTP Client", redact=_scrub)
 
 
 def human_size(n):
@@ -961,6 +936,11 @@ class Api:
         # Set by confirm_quit() once the page answers yes to the "transfers
         # are still running" quit prompt raised from main()'s closing veto.
         self._quit_confirmed = False
+        # Debug log warnings (a failed write, a locked old log that couldn't
+        # be pruned...) land here from debug.on_warning, which can fire on any
+        # thread. Never surfaced through _emit/evaluate_js: see _on_debug_warning.
+        self._debug_warnings = []
+        self._debug_warnings_lock = threading.Lock()
 
     def set_window(self, w):
         self._window = w
@@ -988,7 +968,28 @@ class Api:
     def set_debug(self, on):
         ok = debug.set_enabled(on)
         debug.log("Debug enabled" if on and ok else "Debug disabled")
-        return {"ok": ok, "enabled": debug.is_enabled()}
+        return {"ok": ok, "enabled": debug.is_enabled(), "warnings": self._drain_debug_warnings()}
+
+    def _on_debug_warning(self, msg):
+        """debug.on_warning callback: can fire from any thread (a worker's
+        log() call, main()'s launch-time prune()...), so it must never touch
+        the window. It only buffers; poll_queue()/set_debug()/
+        drain_debug_warnings() are what deliver it to the page. The template
+        already writes the warning into the log itself, so this must not call
+        debug.log() again, or evaluate_js, or it could deadlock or loop."""
+        with self._debug_warnings_lock:
+            self._debug_warnings.append(msg)
+
+    def _drain_debug_warnings(self):
+        with self._debug_warnings_lock:
+            warnings = self._debug_warnings
+            self._debug_warnings = []
+        return warnings
+
+    def drain_debug_warnings(self):
+        # "enabled" lets the page untick the Debug switch after a write
+        # failure turned logging off in the background.
+        return {"warnings": self._drain_debug_warnings(), "enabled": debug.is_enabled()}
 
     def export_console(self, text):
         """Save the on-screen console to a text file next to the exe."""
@@ -2104,6 +2105,8 @@ class Api:
             "compare_found": self._compare_found_total(),
             "compare_done": compare_done,
             "counts": self.queue.counts(),
+            "debug_warnings": self._drain_debug_warnings(),
+            "debug_enabled": debug.is_enabled(),
         }
 
     def cancel_item(self, item_id):
@@ -3929,6 +3932,8 @@ def main():
         except Exception:
             pass
     api = Api()
+    debug.on_warning = api._on_debug_warning
+    debug.prune()  # catches anything already over the cap from a previous run
     window = webview.create_window(
         "Simple SFTP Client", url=resource_path("simple_sftp_client-UI.html"),
         js_api=api, width=1480, height=980, min_size=(1000, 700),

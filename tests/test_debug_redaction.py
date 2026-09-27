@@ -5,7 +5,7 @@ protocol logging). This covers the pattern-based scrub applied there: it
 masks passwords embedded in URLs and any private-key material, and leaves
 everything else untouched.
 """
-from simple_sftp_client import DebugLog, _scrub
+from simple_sftp_client import AppDebugLog, _scrub
 
 
 def test_scrub_masks_sftp_url_password():
@@ -58,13 +58,13 @@ def test_scrub_passes_through_ordinary_text_unchanged():
     assert _scrub(text) == text
 
 
-def test_debug_log_off_by_default():
-    dbg = DebugLog()
+def test_debug_log_off_by_default(tmp_path):
+    dbg = AppDebugLog(str(tmp_path), "Test App", redact=_scrub)
     assert dbg.is_enabled() is False
 
 
 def test_debug_log_writes_nothing_when_off(tmp_path):
-    dbg = DebugLog()
+    dbg = AppDebugLog(str(tmp_path), "Test App", redact=_scrub)
     # Off by default, so log() must be a no-op even if a path were ever set.
     dbg.log("some label", "some content")
     assert dbg._path is None
