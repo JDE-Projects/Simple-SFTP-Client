@@ -690,7 +690,7 @@ def error_tips(e):
     if isinstance(e, (TimeoutError, socket.timeout)):
         return ("The server didn't respond in time. Common causes:\n"
                 "• The host address or port number is wrong.\n"
-                "• A firewall is blocking the attempt — on the server's network or in its operating system.\n"
+                "• A firewall is blocking the attempt, either on the server's network or in its operating system.\n"
                 "• A missing NAT rule or port-forward means your connection never reaches the server.\n\n"
                 "Ask the SFTP server's administrator to confirm that connections from your network are "
                 "allowed on this port.")
@@ -1297,7 +1297,7 @@ class Api:
             if ti:
                 self._vlog(f"Negotiated: cipher {ti.get('cipher','?')} · "
                            f"kex {ti.get('kex','?')} · mac {ti.get('mac','?')}")
-            self._vlog(f"SFTP session opened — home {home}", "ok")
+            self._vlog(f"SFTP session opened, home folder {home}", "ok")
             self._sweep_scratch_files()
             return {"ok": True, "home": home, "cwd": start, "transport": ti}
         except UnknownHostKey as e:
@@ -1428,7 +1428,7 @@ class Api:
 
     def test_connection(self, p):
         """Reachability check only: open a TCP socket and read the SSH banner.
-        Confirms host/port reachable and that an SSH server answers — no host
+        Confirms host/port reachable and that an SSH server answers. No host
         key check and no authentication (that is Connect's job)."""
         host = (p.get("host") or "").strip()
         if not host:
@@ -1450,8 +1450,8 @@ class Api:
             return {"ok": False, "error": friendly_error(e), "tips": error_tips(e)}
         if banner.startswith(b"SSH-"):
             ident = banner.decode("ascii", "replace").splitlines()[0].strip()
-            self._vlog(f"Test: {host}:{port} reachable — {ident}", "ok")
-            return {"ok": True, "msg": f"{host}:{port} reachable — {ident}"}
+            self._vlog(f"Test: {host}:{port} reachable ({ident})", "ok")
+            return {"ok": True, "msg": f"{host}:{port} reachable ({ident})"}
         return {"ok": False, "warn": True,
                 "error": f"Something is listening on {host}:{port}, but it didn't identify as an "
                          "SSH/SFTP server.",
@@ -2013,7 +2013,7 @@ class Api:
         self._stop_all_compares()
         stranded = self.queue.fail_waiting("Connection lost")
         suffix = f" ({stranded} queued item(s) failed)" if stranded else ""
-        self._worker_log(f"Connection lost — remaining transfers stopped.{suffix}", "error")
+        self._worker_log(f"Connection lost. Remaining transfers stopped.{suffix}", "error")
 
     def cancel(self):
         """Cancel-all, wired to the footer Cancel button: cancels every waiting
