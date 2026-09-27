@@ -209,6 +209,79 @@ def test_delete_session_non_default_port_deletes_both_names(api, monkeypatch):
     }
 
 
+def test_delete_session_real_failure_sets_pw_warning(api, monkeypatch):
+    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump({"sessions": [base_session()]}, f)
+
+    def failing_delete_password(service, key):
+        raise OSError("credential manager is unavailable")
+
+    monkeypatch.setattr(keyring, "delete_password", failing_delete_password)
+
+    result = api.delete_session("test-session")
+
+    assert result["ok"] is True
+    assert result["sessions"] == []
+    assert "pw_warning" in result
+    assert "example.com|alice" in result["pw_warning"]
+
+
+def test_delete_session_password_delete_error_is_harmless(api, monkeypatch):
+    # PasswordDeleteError means "no such entry", which is fine: the
+    # credential was never there (or was already removed).
+    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump({"sessions": [base_session()]}, f)
+
+    def missing_entry_delete_password(service, key):
+        raise keyring.errors.PasswordDeleteError(service)
+
+    monkeypatch.setattr(keyring, "delete_password", missing_entry_delete_password)
+
+    result = api.delete_session("test-session")
+
+    assert result["ok"] is True
+    assert result["sessions"] == []
+    assert "pw_warning" not in result
+
+
+def test_delete_session_non_default_port_one_name_missing_is_harmless(api, monkeypatch):
+    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump({"sessions": [base_session(port="2222")]}, f)
+
+    attempted = []
+
+    def delete_password(service, key):
+        attempted.append(key)
+        if key == "example.com|alice":
+            raise keyring.errors.PasswordDeleteError(service)
+
+    monkeypatch.setattr(keyring, "delete_password", delete_password)
+
+    result = api.delete_session("test-session")
+
+    assert result["ok"] is True
+    assert "pw_warning" not in result
+    assert set(attempted) == {"example.com|2222|alice", "example.com|alice"}
+
+
+def test_delete_session_non_default_port_one_name_fails_for_real(api, monkeypatch):
+    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump({"sessions": [base_session(port="2222")]}, f)
+
+    def delete_password(service, key):
+        if key == "example.com|alice":
+            raise OSError("credential manager is unavailable")
+
+    monkeypatch.setattr(keyring, "delete_password", delete_password)
+
+    result = api.delete_session("test-session")
+
+    assert result["ok"] is True
+    assert "pw_warning" in result
+    assert "example.com|alice" in result["pw_warning"]
+    assert "example.com|2222|alice" not in result["pw_warning"]
+
+
 def test_remembered_password_falls_back_to_legacy_name_for_other_ports(api, monkeypatch):
     def get_password(service, key):
         if key == "h|2222|u":

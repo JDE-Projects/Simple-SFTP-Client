@@ -1047,7 +1047,8 @@ function openSessions(){ const list=$("sessions")._list||[]; const box=$("sessLi
       }
       const r=await API.delete_session(x.name);
       if(!r.ok){ infoBox("Could not delete session", r.error||"Delete failed."); return; }
-      fillSessions(r.sessions); openSessions(); }; d.appendChild(del); box.appendChild(d); });
+      fillSessions(r.sessions); openSessions();
+      if(r.pw_warning){ infoBox("Password not removed", r.pw_warning); } }; d.appendChild(del); box.appendChild(d); });
   $("sessModal").classList.add("show"); }
 
 /* ───── update check ───── */

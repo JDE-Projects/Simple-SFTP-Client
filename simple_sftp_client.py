@@ -1137,6 +1137,7 @@ class Api:
             # entry alone rather than orphan it.
             return {"ok": False,
                     "error": f"Could not update {SESSIONS_FILE}. The session was not removed."}
+        failed_names = []
         if target and target.get("remember"):
             host = target.get("host")
             port = target.get("port")
@@ -1144,13 +1145,32 @@ class Api:
             names = [cred_key(host, port, username)]
             if parse_port(port) != 22:
                 names.append(f"{(host or '').strip()}|{(username or '').strip()}")
-            for name in names:
-                try:
-                    import keyring
-                    keyring.delete_password("SimpleSFTPClient", name)
-                except Exception as e:
-                    debug.log("keyring delete failed", str(e))
-        return {"ok": True, "sessions": sessions}
+            try:
+                import keyring
+                import keyring.errors
+            except Exception as e:
+                debug.log("keyring import failed", str(e))
+                failed_names = list(names)
+            else:
+                for cred_name in names:
+                    try:
+                        keyring.delete_password("SimpleSFTPClient", cred_name)
+                    except keyring.errors.PasswordDeleteError:
+                        # No matching credential was found, which is fine:
+                        # it was either never saved or already removed.
+                        pass
+                    except Exception as e:
+                        debug.log("keyring delete failed", f"{cred_name}: {e}")
+                        failed_names.append(cred_name)
+        result = {"ok": True, "sessions": sessions}
+        if failed_names:
+            entries = "\n".join(
+                f"Generic Credentials, entry for SimpleSFTPClient with user name {n}"
+                for n in failed_names)
+            result["pw_warning"] = (
+                "The saved password could not be removed from Windows Credential "
+                "Manager. Delete it by hand:\n" + entries)
+        return result
 
     def _remembered_password(self, host, username, port=22):
         try:
