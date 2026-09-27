@@ -132,6 +132,7 @@ pipeline from this repo. You can also check the file against the published
   passwords or passphrases; as a backstop, the log also scrubs any
   credentials embedded in URLs and any private-key material before writing.
 - **Network use.** Other than the job you ask of it, this app makes one automatic network call: a check to GitHub for a newer release (at startup and when you press **Check for updates**), which sends only a version request. It collects and sends no personal data, usage data, or analytics.
+- **Privacy policy.** The full privacy policy for this app and the other JDE-Projects tools is at https://jde-projects.com/privacy.
 
 ## A note on how this was built
 This project was built with AI assistance. The design decisions, feature
