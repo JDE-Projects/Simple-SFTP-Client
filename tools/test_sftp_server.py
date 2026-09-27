@@ -21,21 +21,18 @@ Everything it writes lives under tools/.sftp_test/ (git-ignored):
     data/       the folder served as "/". Emptied on start, removed on stop.
     samples/    sample upload files (only with --samples). Removed on stop.
 
-Design notes worth keeping:
-  - canonicalize() returns a POSIX-clean absolute path. paramiko's default uses
-    os.path, which on Windows hands the client back-slashed / doubled paths and
-    leaves the app's remote pane blank.
-  - The server key is loaded from / written to a file so restarts do not change
-    the host key.
+The server itself lives in tools/sftp_server_core.py, shared with the pytest
+fixtures in tests/conftest.py. This script adds the fixed port, the stable host
+key, the served folder, and the sample files.
 """
 import argparse
 import os
-import posixpath
 import shutil
-import socket
 import threading
 
 import paramiko
+
+from sftp_server_core import PASSWORD, USER, make_fs, start
 
 # ───────────── layout (all git-ignored) ─────────────
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -46,8 +43,6 @@ SAMPLES = os.path.join(RUNTIME, "samples")
 
 HOST = "127.0.0.1"
 PORT = 2222
-USER = "test"
-PASSWORD = "testpass"
 
 # Sample upload files: name -> size in bytes. The 60MB file makes a transfer
 # long enough to catch a cancel.
@@ -67,151 +62,6 @@ def _load_host_key():
     key = paramiko.RSAKey.generate(2048)
     key.write_private_key_file(KEY_FILE)
     return key
-
-
-# ───────────── filesystem-backed SFTP interface ─────────────
-class Handle(paramiko.SFTPHandle):
-    def stat(self):
-        try:
-            return paramiko.SFTPAttributes.from_stat(os.fstat(self.readfile.fileno()))
-        except OSError as e:
-            return paramiko.SFTPServer.convert_errno(e.errno)
-
-
-class FS(paramiko.SFTPServerInterface):
-    ROOT = SRV_ROOT
-
-    def _real(self, path):
-        p = path if posixpath.isabs(path) else "/" + path
-        p = posixpath.normpath(p).strip("/")
-        return os.path.join(self.ROOT, *p.split("/")) if p else self.ROOT
-
-    def list_folder(self, path):
-        rp = self._real(path)
-        try:
-            out = []
-            for name in os.listdir(rp):
-                attr = paramiko.SFTPAttributes.from_stat(os.stat(os.path.join(rp, name)))
-                attr.filename = name
-                out.append(attr)
-            return out
-        except OSError as e:
-            return paramiko.SFTPServer.convert_errno(e.errno)
-
-    def stat(self, path):
-        try:
-            return paramiko.SFTPAttributes.from_stat(os.stat(self._real(path)))
-        except OSError as e:
-            return paramiko.SFTPServer.convert_errno(e.errno)
-
-    def lstat(self, path):
-        try:
-            return paramiko.SFTPAttributes.from_stat(os.lstat(self._real(path)))
-        except OSError as e:
-            return paramiko.SFTPServer.convert_errno(e.errno)
-
-    def open(self, path, flags, attr):
-        rp = self._real(path)
-        try:
-            flags |= getattr(os, "O_BINARY", 0)
-            fd = os.open(rp, flags, 0o666)
-        except OSError as e:
-            return paramiko.SFTPServer.convert_errno(e.errno)
-        if flags & os.O_WRONLY:
-            mode = "ab" if flags & os.O_APPEND else "wb"
-        elif flags & os.O_RDWR:
-            mode = "a+b" if flags & os.O_APPEND else "r+b"
-        else:
-            mode = "rb"
-        try:
-            f = os.fdopen(fd, mode)
-        except OSError as e:
-            return paramiko.SFTPServer.convert_errno(e.errno)
-        h = Handle(flags)
-        h.filename = rp
-        h.readfile = f
-        h.writefile = f
-        return h
-
-    def remove(self, path):
-        try:
-            os.remove(self._real(path))
-            return paramiko.SFTP_OK
-        except OSError as e:
-            return paramiko.SFTPServer.convert_errno(e.errno)
-
-    def rename(self, oldpath, newpath):
-        try:
-            os.rename(self._real(oldpath), self._real(newpath))
-            return paramiko.SFTP_OK
-        except OSError as e:
-            return paramiko.SFTPServer.convert_errno(e.errno)
-
-    def posix_rename(self, oldpath, newpath):
-        # Backs the posix-rename@openssh.com extension the app uses to publish
-        # a finished upload over its real destination. os.replace overwrites
-        # the target atomically, matching real posix-rename servers. Without
-        # this the base implementation returns unsupported and the app refuses
-        # every upload to protect the existing copy, so the served folder must
-        # provide it to smoke-test transfers and the folder watcher.
-        try:
-            os.replace(self._real(oldpath), self._real(newpath))
-            return paramiko.SFTP_OK
-        except OSError as e:
-            return paramiko.SFTPServer.convert_errno(e.errno)
-
-    def mkdir(self, path, attr):
-        try:
-            os.mkdir(self._real(path))
-            return paramiko.SFTP_OK
-        except OSError as e:
-            return paramiko.SFTPServer.convert_errno(e.errno)
-
-    def rmdir(self, path):
-        try:
-            os.rmdir(self._real(path))
-            return paramiko.SFTP_OK
-        except OSError as e:
-            return paramiko.SFTPServer.convert_errno(e.errno)
-
-    def chattr(self, path, attr):
-        return paramiko.SFTP_OK
-
-    def canonicalize(self, path):
-        # POSIX-clean absolute path. The default uses os.path (Windows
-        # back-slashes) which hands the client a malformed remote path and
-        # leaves the app's remote pane blank.
-        if not path.startswith("/"):
-            path = "/" + path
-        return posixpath.normpath(path)
-
-
-class Server(paramiko.ServerInterface):
-    def check_channel_request(self, kind, chanid):
-        return paramiko.OPEN_SUCCEEDED
-
-    def check_auth_password(self, username, password):
-        if username == USER and password == PASSWORD:
-            return paramiko.AUTH_SUCCESSFUL
-        return paramiko.AUTH_FAILED
-
-    def get_allowed_auths(self, username):
-        return "password"
-
-
-def _serve(sock, host_key):
-    while True:
-        try:
-            conn, _ = sock.accept()
-        except OSError:
-            return
-        t = paramiko.Transport(conn)
-        t.add_server_key(host_key)
-        t.set_subsystem_handler("sftp", paramiko.SFTPServer, FS)
-        try:
-            t.start_server(server=Server())
-        except Exception:
-            continue
 
 
 def _make_samples():
@@ -244,11 +94,7 @@ def main():
     if args.samples:
         _make_samples()
 
-    srv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv_sock.bind((HOST, PORT))
-    srv_sock.listen(16)
-    threading.Thread(target=_serve, args=(srv_sock, host_key), daemon=True).start()
+    srv_sock, _ = start(make_fs(SRV_ROOT), host_key, HOST, PORT)
 
     print(f"SFTP test server on {HOST}:{PORT}   user={USER}   pass={PASSWORD}")
     print(f"Serving folder: {SRV_ROOT}")
