@@ -28,7 +28,11 @@ If you enjoyed this project and would like to buy me a coffee, check out my [Ko-
   small files.
 - Compare local vs remote and sync folders in either direction, across
   subfolders too, with a preview of what will transfer and a
-  download-changed-only option.
+  download-changed-only option. Compare and Sync refuse a folder pair where
+  either side has more than 500,000 files (an empty folder counts as one);
+  memory use at that size is about 1 GB or more in the worst case. The
+  limit does not make a large comparison run any faster, and very long
+  paths use more memory per file than short ones.
 - Before overwriting, a per-file comparison shows each file's size, date, and
   which side is newer, so you can overwrite, skip existing, or cancel.
 - Transfers keep each file's original modification date, so a repeat

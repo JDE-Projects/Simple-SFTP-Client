@@ -70,6 +70,12 @@ SCAN_QUEUE_HIGH_WATER = 3000
 # 2-second timestamp granularity of FAT/exFAT volumes, while staying tight
 # enough that a real edit is never mistaken for unchanged.
 MTIME_TOL = 2
+# Compare and Sync build an in-memory map of every file and empty-folder
+# marker on each side before they can classify anything, unlike the ordinary
+# transfer scan which streams. COMPARE_SYNC_ENTRY_LIMIT caps entries added to
+# each side's map, so a folder too large to hold in memory is refused with a
+# clear message instead of running out of memory partway through.
+COMPARE_SYNC_ENTRY_LIMIT = 500_000
 
 
 def worker_target(sizes):
@@ -535,8 +541,11 @@ class ScanIncomplete(Exception):
     """Raised by _compute_pair_maps when part of the tree could not be read
     during the walk (an unreadable folder, an unreadable file's metadata, or a
     lost connection mid-listing), so compare/sync refuse to report a result
-    built on a tree that was not fully seen. An unsafe remote name is not one
-    of these: it is skipped and logged, since it can never be represented
+    built on a tree that was not fully seen. It is also raised when a tree is
+    larger than COMPARE_SYNC_ENTRY_LIMIT entries on either side, since compare
+    and sync hold both sides in memory at once and refuse rather than risk
+    running out of it partway through. An unsafe remote name is not one of
+    these: it is skipped and logged, since it can never be represented
     locally and refusing would block a whole folder over one such name."""
 
 
@@ -2816,7 +2825,10 @@ class Api:
         file's metadata could not be read during either walk, since a
         compare/sync result built on a tree that was not fully seen can
         misclassify files as one-sided or in-sync (unlike the ordinary
-        transfer scan, which reports partial progress instead). An unsafe
+        transfer scan, which reports partial progress instead). Also raises
+        ScanIncomplete if either side's map would grow past
+        COMPARE_SYNC_ENTRY_LIMIT entries, refusing before the remote (network)
+        walk ever starts if the local walk already hit the limit. An unsafe
         remote name is skipped and logged, not treated as incomplete."""
         local_map = {}
         remote_map = {}
@@ -2835,6 +2847,11 @@ class Api:
                 f"Some folders could not be read ({problems[0]}) "
                 f"[{len(problems)} problem(s)]; compare/sync was not run.")
 
+        def _raise_too_many():
+            raise ScanIncomplete(
+                f"Too many files to compare (more than "
+                f"{COMPARE_SYNC_ENTRY_LIMIT:,}). Pick a smaller folder.")
+
         for lp, rp, size, mtime, is_dir in self._iter_local(
                 local_dir, remote_dir, True, problems=problems, include_dirs=True):
             if stop_event is not None and stop_event.is_set():
@@ -2842,6 +2859,8 @@ class Api:
             rel = posixpath.relpath(rp, remote_dir)
             if rel == ".":
                 continue
+            if len(local_map) >= COMPARE_SYNC_ENTRY_LIMIT:
+                _raise_too_many()
             local_map[rel] = (size, mtime, lp, rp, is_dir)
             bump()
         # Fail fast: if the local walk already found a problem, refuse now
@@ -2855,6 +2874,8 @@ class Api:
             rel = posixpath.relpath(rp, remote_dir)
             if rel == ".":
                 continue
+            if len(remote_map) >= COMPARE_SYNC_ENTRY_LIMIT:
+                _raise_too_many()
             remote_map[rel] = (size, mtime, lp, rp, is_dir)
             bump()
         if on_progress and seen_since_report:
@@ -3101,6 +3122,7 @@ class Api:
                 data["root_remote"] = remote_dir
                 _finish(True, result=data)
         except ScanIncomplete as e:
+            self._worker_log(f"compare: {e}", "error")
             _finish(False, error=str(e))
         except Exception as e:
             reason = friendly_error(e)
