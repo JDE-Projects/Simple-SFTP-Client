@@ -548,7 +548,7 @@ async function queueTick(){
       if(d.kind==="sync"){
         if(pendingSyncResolve){ const res=pendingSyncResolve; pendingSyncResolve=null; res(d); }
       } else if(d.kind==="compare"){
-        if(d.ok){ applyCompareResult(d.result); compareJustFinished=true; } else toast(d.error||"Compare failed",true);
+        if(d.ok){ applyCompareResult(d.result); compareJustFinished=true; } else { clearCompare(); toast(d.error||"Compare failed",true); }
       }
     }
     if(p.comparing && !p.scanning){

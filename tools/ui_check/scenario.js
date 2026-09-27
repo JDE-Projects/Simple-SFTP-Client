@@ -101,6 +101,17 @@ try{
   refresh("local"); await waitFor(()=>!state.local.refreshing&&!compareMap);
   ok("compare summaries clear after pane refresh",()=>!compareMap&&$("localCompare").textContent===""&&$("remoteCompare").textContent==="");
 
+  // A compare that finishes with an error must clear any earlier compare's
+  // colors and counts, not leave a stale result showing under a fresh toast.
+  applyCompareResult({root_local:T.local,root_remote:"/",files:{"a.txt":"newer_local"},folders:{}});
+  ok("setup: seeded a compare result before the failing compare",()=>!!compareMap&&$("localCompare").textContent!=="");
+  startQueuePoll();
+  const missingLocal=T.local+"\\does_not_exist";
+  const cr=await API.compare(missingLocal,state.remote.cwd);
+  ok("failing compare starts normally",()=>cr.ok,()=>JSON.stringify(cr));
+  const failedCleared=await waitFor(()=>!compareMap&&$("localCompare").textContent===""&&$("remoteCompare").textContent==="",20000);
+  ok("a failed compare clears the previous compare's colors and counts",()=>failedCleared,()=>$("localCompare").textContent+" | "+$("remoteCompare").textContent);
+
   // Starting Watch must not rerun the end-of-batch refresh.
   const before=await fs("calls");
   const w=onWatch(); await clickOk(); await w; await sleep(2000);
