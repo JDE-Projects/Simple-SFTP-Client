@@ -177,6 +177,70 @@ def test_upload_fallback_invalidated_by_real_size_change(
     assert result2["files"][name] == "newer_local"
 
 
+def _download_without_remote_time(api, server_root, local_dir, name,
+                                  wait_for_queue_count, wait_for_drain, state_of):
+    data = os.urandom(4096)
+    (server_root / name).write_bytes(data)
+    item_id = _enqueue_one(api, "download", local_dir, "/", name, "overwrite", wait_for_queue_count)
+    wait_for_drain(api)
+    assert state_of(api, item_id)["state"] == COMPLETED
+    assert (local_dir / name).read_bytes() == data
+    return data
+
+
+def test_download_without_remote_time_is_logged_and_remembered(
+        sftp_env_no_times, wait_for_queue_count, wait_for_drain, state_of):
+    """A server that leaves the modification time out of its reply gives the
+    download nothing to stamp. The file is logged and remembered by size for
+    this connection, the same as a failed stamp, instead of passing silently."""
+    api, server_root, local_dir = sftp_env_no_times
+    _download_without_remote_time(api, server_root, local_dir, "down.bin",
+                                  wait_for_queue_count, wait_for_drain, state_of)
+    with api._console_lock:
+        messages = [line["msg"] for line in api._console_buffer]
+    assert any("no modification time" in m for m in messages)
+    assert api._mtime_fallback
+
+
+def test_download_without_remote_time_makes_compare_read_same(
+        sftp_env_no_times, wait_for_queue_count, wait_for_drain, state_of):
+    api, server_root, local_dir = sftp_env_no_times
+    name = "down.bin"
+    _download_without_remote_time(api, server_root, local_dir, name,
+                                  wait_for_queue_count, wait_for_drain, state_of)
+    result = api._compute_compare(api.sftp, str(local_dir), "/")
+    assert result["files"][name] == "same"
+
+
+def test_download_without_remote_time_makes_skip_take_effect(
+        sftp_env_no_times, wait_for_queue_count, wait_for_drain, state_of):
+    api, server_root, local_dir = sftp_env_no_times
+    name = "down.bin"
+    _download_without_remote_time(api, server_root, local_dir, name,
+                                  wait_for_queue_count, wait_for_drain, state_of)
+    item_id2 = _enqueue_one(api, "download", local_dir, "/", name, "skip", wait_for_queue_count)
+    wait_for_drain(api)
+    assert state_of(api, item_id2)["state"] == SKIPPED
+
+
+def test_download_without_remote_time_invalidated_by_real_size_change(
+        sftp_env_no_times, wait_for_queue_count, wait_for_drain, state_of):
+    """A later edit that changes the remote file's size must still show as a
+    change: the remembered size no longer matches, so Compare stops reading
+    the pair as 'same'."""
+    api, server_root, local_dir = sftp_env_no_times
+    name = "down.bin"
+    data = _download_without_remote_time(api, server_root, local_dir, name,
+                                         wait_for_queue_count, wait_for_drain, state_of)
+    result = api._compute_compare(api.sftp, str(local_dir), "/")
+    assert result["files"][name] == "same"
+
+    (server_root / name).write_bytes(data + os.urandom(128))
+
+    result2 = api._compute_compare(api.sftp, str(local_dir), "/")
+    assert result2["files"][name] != "same"
+
+
 def test_mtime_fallback_cleared_on_disconnect(
         sftp_env_no_set_time, wait_for_queue_count, wait_for_drain, state_of):
     """The fallback store is scoped to one connection: shutdown() must clear

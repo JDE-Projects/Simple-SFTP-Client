@@ -29,16 +29,33 @@ PASSWORD = "testpass"
 
 
 # ───────────── in-process SFTP server (adapted from tools/test_sftp_server.py) ─────────────
+def _attrs(st, report_times=True):
+    """Build SFTP attributes from an os.stat result. With report_times False,
+    both times are left out, so the reply carries no modification time at all,
+    the way a server that omits file times would answer."""
+    attr = paramiko.SFTPAttributes.from_stat(st)
+    if not report_times:
+        attr.st_atime = None
+        attr.st_mtime = None
+    return attr
+
+
 class Handle(paramiko.SFTPHandle):
+    REPORT_TIMES = True
+
     def stat(self):
         try:
-            return paramiko.SFTPAttributes.from_stat(os.fstat(self.readfile.fileno()))
+            return _attrs(os.fstat(self.readfile.fileno()), self.REPORT_TIMES)
         except OSError as e:
             return paramiko.SFTPServer.convert_errno(e.errno)
 
 
 class FS(paramiko.SFTPServerInterface):
     ROOT = None  # set per test to a tmp_path subfolder
+
+    # Set to False on a subclass to model a server that leaves file times out
+    # of its stat and listing replies, for the unreadable-remote-time test.
+    REPORT_TIMES = True
 
     def _real(self, path):
         p = path if posixpath.isabs(path) else "/" + path
@@ -50,7 +67,7 @@ class FS(paramiko.SFTPServerInterface):
         try:
             out = []
             for name in os.listdir(rp):
-                attr = paramiko.SFTPAttributes.from_stat(os.stat(os.path.join(rp, name)))
+                attr = _attrs(os.stat(os.path.join(rp, name)), self.REPORT_TIMES)
                 attr.filename = name
                 out.append(attr)
             return out
@@ -59,13 +76,13 @@ class FS(paramiko.SFTPServerInterface):
 
     def stat(self, path):
         try:
-            return paramiko.SFTPAttributes.from_stat(os.stat(self._real(path)))
+            return _attrs(os.stat(self._real(path)), self.REPORT_TIMES)
         except OSError as e:
             return paramiko.SFTPServer.convert_errno(e.errno)
 
     def lstat(self, path):
         try:
-            return paramiko.SFTPAttributes.from_stat(os.lstat(self._real(path)))
+            return _attrs(os.lstat(self._real(path)), self.REPORT_TIMES)
         except OSError as e:
             return paramiko.SFTPServer.convert_errno(e.errno)
 
@@ -87,6 +104,7 @@ class FS(paramiko.SFTPServerInterface):
         except OSError as e:
             return paramiko.SFTPServer.convert_errno(e.errno)
         h = Handle(flags)
+        h.REPORT_TIMES = self.REPORT_TIMES
         h.filename = rp
         h.readfile = f
         h.writefile = f
@@ -282,6 +300,13 @@ def sftp_env_no_set_time(tmp_path):
     """Same as sftp_env, but the server refuses to set file modification
     times, the way a server without SFTP time-setting support would."""
     yield from _start_sftp_env(tmp_path, {"SET_TIME_SUPPORTED": False})
+
+
+@pytest.fixture
+def sftp_env_no_times(tmp_path):
+    """Same as sftp_env, but the server leaves modification times out of its
+    stat and listing replies, so the client never learns a remote file's time."""
+    yield from _start_sftp_env(tmp_path, {"REPORT_TIMES": False})
 
 
 @pytest.fixture
