@@ -1,5 +1,5 @@
 """
-Tests for Phase 4: auto-tuned worker concurrency. worker_target() picks the
+Tests for auto-tuned worker concurrency. worker_target() picks the
 pool size for a batch once, up front, from its file sizes; _target_workers on
 the Api resets back to the default once the pool empties.
 """

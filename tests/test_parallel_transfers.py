@@ -1,5 +1,5 @@
 """
-Tests for Phase 4: bounded parallel transfers (WORKER_COUNT workers draining
+Tests for bounded parallel transfers (WORKER_COUNT workers draining
 the queue concurrently, each over its own SFTP session).
 
 Built on the same in-process paramiko SFTP server and sftp_env/wait_for_drain/

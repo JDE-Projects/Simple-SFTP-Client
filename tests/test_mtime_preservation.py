@@ -1,5 +1,5 @@
 """
-Tests for Option B timestamp preservation: a transfer stamps the destination
+Tests for timestamp preservation: a transfer stamps the destination
 with the source's modification time, so a later size+mtime compare reads an
 unchanged file as "same" instead of a false edit.
 
