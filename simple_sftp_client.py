@@ -911,7 +911,6 @@ class Api:
         self._progress_lock = threading.Lock()
         self._console_buffer = []
         self._console_lock = threading.Lock()
-        self._poll_mode = False
         # Background folder scans (enqueue/upload_paths): each running scan
         # gets its own id and stop Event here, guarded by _scan_lock. A fresh
         # transfer always gets a brand-new Event, so a stop from a previous,
@@ -1411,30 +1410,6 @@ class Api:
         entries = [{"key_type": kt, "fingerprint": fingerprint_sha256(k)}
                    for kt, k in sub.items()]
         return {"known": True, "host": host, "entries": entries}
-
-    def forget_host_key(self, host, port=22):
-        """Remove a pinned host key (e.g. before deliberately re-trusting)."""
-        host = (host or "").strip()
-        try:
-            name = hostkey_name(host, port) if host else ""
-        except InvalidPort:
-            return {"ok": False,
-                    "error": INVALID_PORT_ERROR}
-        try:
-            hk = load_known_hosts()
-        except KnownHostsUnreadable as e:
-            return {"ok": False,
-                    "error": f"The saved host-key file is unreadable, so it was left untouched. "
-                             f"File: {e.path}. Delete it to start fresh."}
-        try:
-            if name and hk.lookup(name):
-                del hk[name]
-                if not _save_host_keys_atomic(hk):
-                    return {"ok": False, "error": "Could not save the host key: write failed."}
-                debug.log(f"Forgot host key for {name}.")
-            return {"ok": True}
-        except Exception as e:
-            return {"ok": False, "error": f"Could not remove the host key: {e}"}
 
     def _transport_info(self, client=None):
         try:
@@ -2036,7 +2011,7 @@ class Api:
         queue item and flags every active one so each worker's byte loop stops
         and finalizes it as cancelled. Also stops any background scan still
         streaming files in, so a cancel during a huge scan halts it promptly.
-        self._cancel is still set for the legacy path (sync/watch/external-drop),
+        self._cancel is also set to stop a running folder-size calculation,
         which is not on the per-item flag."""
         self._stop_all_scans()
         self._stop_all_compares()
@@ -2156,7 +2131,7 @@ class Api:
 
     def enqueue(self, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"):
         """New entry point for pane transfers: starts a background scan that
-        streams jobs (same is_dir shape as transfer()) into per-file queue
+        streams jobs (a list of {name, is_dir}) into per-file queue
         items and returns immediately, instead of walking the whole tree up
         front. On a huge folder that walk used to block with zero feedback
         and create empty folder shells; now files are queued (and their
@@ -2223,15 +2198,14 @@ class Api:
 
     def _ensure_worker(self):
         """Top the worker pool up to self._target_workers live threads
-        whenever there is waiting work. Poll mode is turned on here, under the
+        whenever there is waiting work. Workers are started here under the
         same lock a worker retires itself with, so starting and stopping
-        workers can never overlap and leave poll mode in the wrong state."""
+        workers can never overlap and leave the pool in the wrong state."""
         with self._worker_lock:
             if self.queue.is_paused():
                 return
             self._workers = [w for w in self._workers if w.is_alive()]
             while len(self._workers) < self._target_workers and self.queue.waiting() > 0:
-                self._poll_mode = True
                 w = threading.Thread(target=self._worker_loop, daemon=True)
                 self._workers.append(w)
                 w.start()
@@ -2247,10 +2221,9 @@ class Api:
         knows its own done_count).
 
         Runs entirely off the pywebview bridge thread, so it must never call
-        evaluate_js (that is what deadlocked the window). While any worker in
-        the pool is running, _poll_mode is True: _progress() only updates
-        in-memory state instead of emitting, and _worker_log() buffers console
-        lines for the window to pull via poll_queue()."""
+        evaluate_js (that is what deadlocked the window). _progress() only
+        updates in-memory state and _worker_log() buffers console lines, both
+        for the window to pull via poll_queue()."""
         me = threading.current_thread()
         try:
             if not self.connected or self.client is None:
@@ -2268,7 +2241,6 @@ class Api:
                 if me in self._workers:
                     self._workers.remove(me)
                 if not self._workers:
-                    self._poll_mode = False
                     self._target_workers = WORKER_COUNT
                     with self._progress_lock:
                         self._progress_by_id = {}
@@ -2312,7 +2284,6 @@ class Api:
                             # state and logs the drain summary; the others just
                             # retire quietly.
                             if not self._workers:
-                                self._poll_mode = False
                                 with self._progress_lock:
                                     self._progress_by_id = {}
                                 if self.queue.is_paused() and self.queue.waiting() > 0:
@@ -2418,39 +2389,12 @@ class Api:
                 if me in self._workers:
                     self._workers.remove(me)
                 if not self._workers:
-                    self._poll_mode = False
                     # Leave the target alone during a pause-hold so a resume drains
                     # the rest at the scaled count; any real drain resets it.
                     if not (self.queue.is_paused() and self.queue.waiting() > 0):
                         self._target_workers = WORKER_COUNT
                     with self._progress_lock:
                         self._progress_by_id = {}
-
-    def transfer(self, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"):
-        """jobs: list of {name, is_dir}. Expands dirs, transfers files with
-        progress, resume (partial), skip-if-identical, and per-file retry."""
-        if not self.connected:
-            return {"ok": False, "error": "Not connected."}
-        self._cancel.clear()
-        files = []   # (local_path, remote_path, size)
-        try:
-            for j in jobs:
-                if direction == "upload":
-                    lp = os.path.join(local_dir, j["name"])
-                    rp = posixpath.join(remote_dir, j["name"])
-                    files += self._walk_local(lp, rp) if j["is_dir"] else [(lp, rp, 0)]
-                else:
-                    name = j["name"]
-                    rp = posixpath.join(remote_dir, name)
-                    try:
-                        lp = safe_local_child(local_dir, name, local_dir)
-                    except ValueError as e:
-                        self._worker_log(f"skipped unsafe remote name {name!r}: {e}", "error")
-                        continue
-                    files += self._walk_remote(rp, lp, local_dir) if j["is_dir"] else [(lp, rp, 0)]
-        except Exception as e:
-            return {"ok": False, "error": f"Could not enumerate: {e}"}
-        return self._run_transfer(files, direction, on_conflict)
 
     def upload_paths(self, paths, remote_dir, on_conflict="overwrite"):
         """Upload absolute local paths (files or folders) dragged in from outside
@@ -2508,59 +2452,17 @@ class Api:
         except Exception as e:
             debug.log("external drop handler failed", str(e))
 
-    def _run_transfer(self, files, direction, on_conflict):
-        total = len(files)
-        done = 0
-        errors = []
-        skipped = 0
-        for lp, rp, _size in files:
-            if self._cancel.is_set():
-                break
-            name = os.path.basename(lp)
-            arrow = "↑" if direction == "upload" else "↓"
-            ok = False
-            res = None
-            for attempt in range(3):
-                try:
-                    res = self._one(direction, lp, rp, name, done, total, on_conflict,
-                                     self.sftp, cancel_check=lambda: self._cancel.is_set())
-                    if res == "skip":
-                        skipped += 1
-                    ok = True
-                    break
-                except Exception as e:
-                    debug.log(f"transfer retry {attempt+1}", f"{name}: {e}")
-                    time.sleep(0.6)
-            if ok:
-                if res == "skip":
-                    self._vlog(f"skip {name} (already up to date)")
-                else:
-                    self._vlog(f"{arrow} {(rp if direction == 'upload' else name)}", "ok")
-            else:
-                errors.append(name)
-                self._vlog(f"failed {name}", "error")
-            done += 1
-        self._emit("transfer_done", {"total": total, "errors": errors, "skipped": skipped,
-                                     "cancelled": self._cancel.is_set()})
-        return {"ok": True, "total": total, "errors": errors, "skipped": skipped,
-                "cancelled": self._cancel.is_set()}
-
     def _one(self, direction, lp, rp, name, idx, total, on_conflict, sftp,
-             cancel_check=None, progress_key=None, dir_cache=None):
-        """sftp is the session to transfer over: self.sftp for the legacy
-        path, a worker's own session for the queue path. cancel_check is a
-        callable returning True to stop the byte loop early; defaults to the
-        legacy self._cancel flag. progress_key is what _progress() files this
-        transfer's progress under (a queue item id, or the file name for the
-        legacy path, which does not read it back by key). dir_cache, if given,
+             cancel_check, progress_key=None, dir_cache=None):
+        """sftp is the worker's own session to transfer over. cancel_check is
+        a callable returning True to stop the byte loop early. progress_key is
+        what _progress() files this transfer's progress under (the queue item
+        id; defaults to the file name). dir_cache, if given,
         is a set of remote directories this worker has already confirmed
         exist, owned by the caller: since folders are no longer created up
         front by a scan, an upload must ensure its remote parent directory
         exists lazily, and the cache avoids a stat/mkdir round trip for every
         single file once a worker has already ensured that directory."""
-        if cancel_check is None:
-            def cancel_check():
-                return self._cancel.is_set()
         if progress_key is None:
             progress_key = name
         # size- and time-aware: skip identical when asked, otherwise resend
@@ -2778,25 +2680,15 @@ class Api:
                    "pct": int(sent * 100 / size) if size else 100,
                    "speed": human_size(speed) + "/s" if speed else "",
                    "eta": int(eta)}
-        # Worker threads (queue path): keyed by item id, in-memory only, the
-        # window polls instead. Legacy bridge-thread path (_run_transfer):
-        # emit as before, nothing to key by since only one file is active.
-        if self._poll_mode:
-            with self._progress_lock:
-                self._progress_by_id[progress_key] = payload
-        else:
-            self._emit("progress", payload)
-
-    def _rsize(self, sftp, rp):
-        try:
-            return sftp.stat(rp).st_size
-        except Exception:
-            return -1
+        # Called from worker threads: keyed by item id and kept in memory
+        # only, since the window pulls it through poll_queue(). Never emit
+        # from here (evaluate_js off the bridge thread deadlocks the window).
+        with self._progress_lock:
+            self._progress_by_id[progress_key] = payload
 
     def _rstat(self, sftp, rp):
-        """Same as _rsize but also returns the remote modification time, for
-        callers (the streaming scanner) that need both. -1 size / 0 mtime on
-        failure, matching _rsize's existing fallback."""
+        """Remote file size and modification time. -1 size / 0 mtime on
+        failure."""
         try:
             a = sftp.stat(rp)
             return a.st_size, int(a.st_mtime or 0)
@@ -2885,51 +2777,6 @@ class Api:
             self._record_mtime_fallback(lp, rp, local_stat.st_size)
         else:
             self._clear_mtime_fallback(lp, rp)
-
-    def _walk_local(self, lp, rp):
-        out = []
-        for root, _dirs, fnames in os.walk(lp):
-            rel = os.path.relpath(root, lp)
-            rbase = rp if rel == "." else posixpath.join(rp, rel.replace("\\", "/"))
-            try:
-                self.sftp.mkdir(rbase)
-            except Exception:
-                pass
-            for fn in fnames:
-                if is_temp_part(fn):
-                    continue
-                full = os.path.join(root, fn)
-                try:
-                    size = os.path.getsize(full)
-                except OSError:
-                    size = 0
-                out.append((full, posixpath.join(rbase, fn), size))
-        return out
-
-    def _walk_remote(self, rp, lp, root):
-        """root is the local folder the user selected for this download; it
-        stays fixed across the recursive walk so every level is checked
-        against the same boundary rather than its immediate parent."""
-        out = []
-        try:
-            attrs = self.sftp.listdir_attr(rp)
-        except Exception:
-            return out
-        os.makedirs(lp, exist_ok=True)
-        for a in attrs:
-            if is_temp_part(a.filename):
-                continue
-            rchild = posixpath.join(rp, a.filename)
-            try:
-                lchild = safe_local_child(lp, a.filename, root)
-            except ValueError as e:
-                self._worker_log(f"skipped unsafe remote name {a.filename!r}: {e}", "error")
-                continue
-            if stat.S_ISDIR(a.st_mode):
-                out += self._walk_remote(rchild, lchild, root)
-            else:
-                out.append((lchild, rchild, a.st_size))
-        return out
 
     # ───────────── compare / sync plan / download-changed ─────────────
     def _compute_pair_maps(self, sftp, local_dir, remote_dir, on_progress=None, stop_event=None):
@@ -3822,8 +3669,8 @@ class Api:
 
     def _ensure_remote_dir(self, path, sftp=None):
         """Create path and any missing parents over sftp (defaults to
-        self.sftp for existing legacy callers; a worker passes its own
-        session, never the shared browsing one)."""
+        self.sftp, which the folder watcher uses under _sftp_lock; a worker
+        passes its own session, never the shared browsing one)."""
         sftp = self.sftp if sftp is None else sftp
         parts = path.strip("/").split("/")
         cur = "/"
