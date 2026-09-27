@@ -371,8 +371,8 @@ function queueActive(){ return queuePending>0; }
 function updateCancelBtn(){ $("cancelBtn").disabled=!(queuePending>0); }
 function updatePauseBtn(){ const b=$("pauseBtn"); b.disabled=!(queuePending>0); b.textContent=queuePaused?"Resume":"Pause"; }
 let authMode="password", rememberPw=false;
-const state={ local:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],anchor:null},
-              remote:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],anchor:null} };
+const state={ local:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],anchor:null,navSeq:0,refreshing:false,refreshAgain:false,refreshManualAgain:false},
+              remote:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],anchor:null,navSeq:0,refreshing:false,refreshAgain:false,refreshManualAgain:false} };
 // {rootLocal, rootRemote, files:{rel:status}, folders:{rel:"has_changes"}} or
 // null. rel keys are posix paths relative to the folder Compare was run
 // against, so coloring stays anchored to that folder as the user browses
@@ -409,14 +409,13 @@ async function toggleTheme(){ const next=currentTheme==="light"?"dark":"light"; 
 window.addEventListener("pywebviewready",init);
 window.appEvent=function(ev,p){
   if(ev==="size_progress"){ $("statusText").textContent=`Calculating size... ${p.files} files, ${p.bytes}`; }
-  else if(ev==="watch"){ clog(p.ok?("Watch: uploaded "+p.file):("Watch error: "+p.file+" - "+(p.error||"")), p.ok?"ok":"error"); }
   else if(ev==="console"){ clog(p.msg, p.level); }
   else if(ev==="external_drop"){ externalUpload(p.paths); }
   else if(ev==="quit-confirm"){ confirm2("Transfers running","Transfers are still running, quit anyway?").then(ok=>{ if(ok)API.confirm_quit(); }); }
 };
 
 /* ───── Transfer queue: worker never pushes, the window pulls on a timer ───── */
-let qPollTimer=null, qPolling=false, qModalOpen=false;
+let qPollTimer=null, qPollDelay=0, qPolling=false, qModalOpen=false, qWasBusy=false;
 
 const QSTATE_LABEL={waiting:"Waiting",active:"Sending",completed:"Done",skipped:"Skipped",failed:"Failed",cancelled:"Cancelled"};
 const QSTATE_FINISHED={completed:1,skipped:1,failed:1,cancelled:1};
@@ -496,17 +495,30 @@ function renderQueueSummary(counts){
 }
 let lastProgressById={};   // progress payloads keyed by queue item id (string keys, JSON)
 function startQueuePoll(){
-  if(qPollTimer)return;
-  qPollTimer=setInterval(queueTick,200);
+  qWasBusy=true;
+  setQueuePollDelay(200);
+}
+function setQueuePollDelay(delay){
+  if(qPollTimer&&qPollDelay===delay)return;
+  if(qPollTimer)clearInterval(qPollTimer);
+  qPollTimer=setInterval(queueTick,delay); qPollDelay=delay;
 }
 function stopQueuePoll(){
-  if(qPollTimer){ clearInterval(qPollTimer); qPollTimer=null; }
+  if(qPollTimer){ clearInterval(qPollTimer); qPollTimer=null; qPollDelay=0; }
 }
 async function queueTick(){
   if(qPolling)return; qPolling=true;
   try{
     const p=await API.poll_queue();
     (p.console||[]).forEach(line=>clog(line.msg,line.level));
+    const busy=!!p.scanning||!!p.comparing||p.pending>0;
+    // A watcher-only tick: nothing in the queue moved, so leave the footer
+    // (including a finished batch's summary) exactly as it is.
+    if(!busy&&!qWasBusy){
+      if((p.watch_refresh||[]).includes(state.remote.cwd))refresh("remote",true);
+      if(p.watching)setQueuePollDelay(1000); else stopQueuePoll();
+      return;
+    }
     lastProgressById=p.progress||{};
     const counts=p.counts||{};
     // up to two files can be active at once; roll them up into the footer.
@@ -583,8 +595,9 @@ async function queueTick(){
     // batches; only treat the queue as finished once the scan itself is done.
     // A running compare/sync computation must also keep the timer alive even
     // while the queue is otherwise idle.
-    if(!p.scanning && !p.comparing && p.pending===0){
-      stopQueuePoll();
+    const refreshRemote=(p.watch_refresh||[]).includes(state.remote.cwd);
+    if(refreshRemote)refresh("remote",true);
+    if(qWasBusy&&!busy){
       // A Sync whose plan was dropped before delivery (a disconnect during
       // the walk clears it) would otherwise leave onSync awaiting forever;
       // fail it loudly here so the click never hangs silently.
@@ -602,12 +615,16 @@ async function queueTick(){
       // summary so the same count doesn't show twice in the footer.
       $("qSummary").textContent="";
       if(footerRetry)footerRetry.style.display=failed>0?"":"none";
-      refresh("local"); refresh("remote");
+      refresh("local",true); if(!refreshRemote)refresh("remote",true);
       queuePaused=false;
       updatePauseBtn();
-    } else if(footerRetry){
+    } else if(busy&&footerRetry){
       footerRetry.style.display="none";
     }
+    qWasBusy=busy;
+    if(busy)setQueuePollDelay(200);
+    else if(p.watching)setQueuePollDelay(1000);
+    else stopQueuePoll();
   } finally { qPolling=false; }
 }
 
@@ -718,6 +735,7 @@ async function onConn(){
     $("pass").value=""; $("keypass").value=""; $("kgPass").value="";
     $("connBtn").textContent="Connect"; $("connBtn").className="btn-primary";
     ["upBtn","downBtn","compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=true);
+    watching=false; $("watchBtn").classList.remove("btn-primary"); $("watchBtn").classList.add("btn-ghost"); $("watchBtn").textContent="Watch";
     compareMap=null; renderPane("local");
     state.remote.entries=[]; renderPane("remote"); $("crumbsRemote").textContent="(not connected)"; $("latency").textContent=""; return; }
   setConn("busy","Connecting..."); $("connBtn").disabled=true;
@@ -788,12 +806,41 @@ function pollHealth(){ clearTimeout(pollTimer); if(!connected)return;
     else { $("connDot").className="dot live"; $("latency").textContent=r.ms+" ms"; } pollTimer=setTimeout(pollHealth,5000); }); }
 
 /* ───── listing/nav ───── */
-async function loadLocal(path){ const r=await API.list_local(path); if(!r.ok){toast(r.error,true);return;}
-  pushHist("local",r.cwd); state.local.cwd=r.cwd; state.local.entries=r.entries; state.local.sel=new Set(); state.local.anchor=null; renderPane("local"); setCrumbs("local",r.cwd); }
-async function loadRemote(path){ if(!connected)return false; const r=await API.list_remote(path); if(!r.ok){toast(r.error,true);return false;}
-  pushHist("remote",r.cwd); state.remote.cwd=r.cwd; state.remote.entries=r.entries; state.remote.sel=new Set(); state.remote.anchor=null; renderPane("remote"); setCrumbs("remote",r.cwd); return true; }
-function refresh(side){ side==="local"?reloadLocal():loadRemote(state.remote.cwd); }
-function reloadLocal(){ API.list_local(state.local.cwd).then(r=>{if(r.ok){state.local.entries=r.entries;renderPane("local");}}); }
+async function loadLocal(path){ const s=state.local, nav=++s.navSeq, r=await API.list_local(path); if(nav!==s.navSeq)return false; if(!r.ok){toast(r.error,true);return false;}
+  pushHist("local",r.cwd); s.cwd=r.cwd; s.entries=r.entries; s.sel=new Set(); s.anchor=null; renderPane("local"); setCrumbs("local",r.cwd); return true; }
+async function loadRemote(path){ if(!connected)return false; const s=state.remote, nav=++s.navSeq, r=await API.list_remote(path); if(nav!==s.navSeq||!connected)return false; if(!r.ok){toast(r.error,true);return false;}
+  pushHist("remote",r.cwd); s.cwd=r.cwd; s.entries=r.entries; s.sel=new Set(); s.anchor=null; renderPane("remote"); setCrumbs("remote",r.cwd); return true; }
+function refresh(side,automatic=false){
+  const s=state[side];
+  if(side==="remote"&&!connected)return;
+  if(s.refreshing){ s.refreshAgain=true; s.refreshManualAgain=s.refreshManualAgain||!automatic; return; }
+  refreshPane(side,automatic);
+}
+async function refreshPane(side,automatic){
+  const s=state[side];
+  if(side==="remote"&&!connected)return;
+  s.refreshing=true;
+  const cwd=s.cwd, nav=s.navSeq;
+  const selectedNames=new Set([...s.sel].map(i=>s.entries[i]&&s.entries[i].name).filter(Boolean));
+  const anchorName=s.anchor==null?null:s.entries[s.anchor]&&s.entries[s.anchor].name;
+  try{
+    const r=await (side==="local"?API.list_local(cwd):API.list_remote(cwd));
+    if(s.cwd!==cwd||s.navSeq!==nav||(side==="remote"&&!connected))return;
+    if(!r.ok){
+      const msg=r.error||`Could not refresh ${side} pane`;
+      if(automatic)clog(msg,"warn"); else toast(msg,true);
+      return;
+    }
+    s.entries=r.entries;
+    s.sel=new Set(r.entries.map((e,i)=>selectedNames.has(e.name)?i:null).filter(i=>i!==null));
+    s.anchor=anchorName==null?null:r.entries.findIndex(e=>e.name===anchorName);
+    if(s.anchor===-1)s.anchor=null;
+    renderPane(side);
+  } finally {
+    s.refreshing=false;
+    if(s.refreshAgain){ const nextAutomatic=!s.refreshManualAgain; s.refreshAgain=false; s.refreshManualAgain=false; refresh(side,nextAutomatic); }
+  }
+}
 function pushHist(side,cwd){ const s=state[side]; if(s.hist[s.hi]===cwd)return; s.hist=s.hist.slice(0,s.hi+1); s.hist.push(cwd); s.hi=s.hist.length-1; }
 function setCrumbs(side,cwd){ const el=$("crumbs"+cap(side)); const hint=(side==="local"&&cwd==="DRIVES"); el.textContent=hint?"Type or paste a folder path":cwd; el.classList.toggle("crumbs-hint",hint); }
 function startEditPath(side){ if(side==="remote"&&!connected)return;
@@ -803,10 +850,10 @@ function startEditPath(side){ if(side==="remote"&&!connected)return;
 function endEditPath(side){ $("edit"+cap(side)).style.display="none"; $("crumbs"+cap(side)).style.display=""; }
 async function nav(side,act){ const s=state[side];
   if(act==="refresh"){refresh(side);return;}
-  if(act==="up"){ const r=side==="local"?await API.list_local(s.cwd):await API.list_remote(s.cwd); const parent=r.parent; if(parent!=null) (side==="local"?loadLocal:loadRemote)(parent); return; }
+  if(act==="up"){ const nav=++s.navSeq, cwd=s.cwd, r=await (side==="local"?API.list_local(cwd):API.list_remote(cwd)); if(nav!==s.navSeq)return; const parent=r.parent; if(parent!=null) (side==="local"?loadLocal:loadRemote)(parent); return; }
   if(act==="back"&&s.hi>0){ s.hi--; gotoHist(side); } if(act==="fwd"&&s.hi<s.hist.length-1){ s.hi++; gotoHist(side); } }
-function gotoHist(side){ const s=state[side]; const cwd=s.hist[s.hi];
-  (side==="local"?API.list_local(cwd):API.list_remote(cwd)).then(r=>{ if(r.ok){ s.cwd=r.cwd; s.entries=r.entries; s.sel=new Set(); s.anchor=null; renderPane(side); setCrumbs(side,r.cwd);} }); }
+function gotoHist(side){ const s=state[side], cwd=s.hist[s.hi], nav=++s.navSeq;
+  (side==="local"?API.list_local(cwd):API.list_remote(cwd)).then(r=>{ if(nav!==s.navSeq||(side==="remote"&&!connected))return; if(r.ok){ s.cwd=r.cwd; s.entries=r.entries; s.sel=new Set(); s.anchor=null; renderPane(side); setCrumbs(side,r.cwd);} }); }
 
 // The rel key a pane entry would have in compareMap.files/folders: only
 // defined when this pane's cwd is inside the matching compare root, so a
@@ -975,7 +1022,9 @@ async function onWatch(){ if(!connected)return;
   if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
   if(!await confirm2("Watch local folder","Auto-upload changes from this local folder to the current remote folder while on?"))return;
   const r=await API.start_watch(state.local.cwd,state.remote.cwd); if(!r.ok){toast(r.error,true);return;}
-  watching=true; $("watchBtn").classList.add("btn-primary"); $("watchBtn").classList.remove("btn-ghost"); $("watchBtn").textContent="Watching"; $("statusText").textContent="Watching "+state.local.cwd; }
+  watching=true; $("watchBtn").classList.add("btn-primary"); $("watchBtn").classList.remove("btn-ghost"); $("watchBtn").textContent="Watching"; $("statusText").textContent="Watching "+state.local.cwd;
+  // Carry watcher messages on the poll without treating the start as a batch.
+  if(!qPollTimer)setQueuePollDelay(1000); }
 
 /* ───── context menu ───── */
 function showCtx(ev,side,e){ const m=$("ctx"); m.innerHTML="";
