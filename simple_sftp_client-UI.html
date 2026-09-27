@@ -365,10 +365,10 @@
 
 <script>
 const $=id=>document.getElementById(id);
-let API=null, connected=false, busy=false, queuePending=0;
+let API=null, connected=false, queuePending=0;
 let queuePaused=false;
 function queueActive(){ return queuePending>0; }
-function updateCancelBtn(){ $("cancelBtn").disabled=!(queuePending>0||busy); }
+function updateCancelBtn(){ $("cancelBtn").disabled=!(queuePending>0); }
 function updatePauseBtn(){ const b=$("pauseBtn"); b.disabled=!(queuePending>0); b.textContent=queuePaused?"Resume":"Pause"; }
 let authMode="password", rememberPw=false;
 const state={ local:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],anchor:null},
@@ -408,14 +408,7 @@ async function toggleTheme(){ const next=currentTheme==="light"?"dark":"light"; 
 
 window.addEventListener("pywebviewready",init);
 window.appEvent=function(ev,p){
-  if(ev==="progress"){ $("qName").textContent=p.name; $("qFill").style.width=p.pct+"%";
-    $("qMeta").textContent=`${p.index+1}/${p.total}  ${p.pct}%  ${p.speed||""}${p.eta?"  ETA "+p.eta+"s":""}`; }
-  else if(ev==="transfer_done"){ busy=false; $("cancelBtn").disabled=true; $("qFill").style.width="0%";
-    $("qName").textContent="Idle"; $("qMeta").textContent=p.cancelled?"Cancelled":`Done${p.errors.length?" ("+p.errors.length+" failed)":""}${p.skipped?", "+p.skipped+" skipped":""}`;
-    clog(p.cancelled?"Transfer cancelled":`Transfer complete: ${p.total} file(s)${p.errors.length?", "+p.errors.length+" failed":""}${p.skipped?", "+p.skipped+" skipped":""}`,
-      p.errors.length?"error":(p.cancelled?"warn":"ok"));
-    refresh("local"); refresh("remote"); }
-  else if(ev==="size_progress"){ $("statusText").textContent=`Calculating size... ${p.files} files, ${p.bytes}`; }
+  if(ev==="size_progress"){ $("statusText").textContent=`Calculating size... ${p.files} files, ${p.bytes}`; }
   else if(ev==="watch"){ clog(p.ok?("Watch: uploaded "+p.file):("Watch error: "+p.file+" - "+(p.error||"")), p.ok?"ok":"error"); }
   else if(ev==="console"){ clog(p.msg, p.level); }
   else if(ev==="external_drop"){ externalUpload(p.paths); }
@@ -961,7 +954,7 @@ function applyCompareResult(result){
   let msg=`Compared: <b style="color:var(--green)">${c.newer_local} newer here</b>, <b style="color:var(--amber)">${c.newer_remote} newer remote</b>, <b style="color:var(--blue)">${c.local_only} local-only</b>, <b style="color:var(--blue)">${c.remote_only} remote-only</b>`;
   if(c.conflict>0)msg+=`, <b style="color:var(--red)">${c.conflict} name clash${c.conflict===1?"":"es"}</b>`;
   $("statusText").innerHTML=msg; }
-async function onSync(direction){ if(!connected||busy)return;
+async function onSync(direction){ if(!connected)return;
   if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
   const r=await API.sync_plan(state.local.cwd,state.remote.cwd,direction,true);
   if(!r.ok){toast(r.error||"Sync failed",true);return;}

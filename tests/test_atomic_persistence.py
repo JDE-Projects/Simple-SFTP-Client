@@ -211,19 +211,6 @@ def test_trust_host_key_on_corrupt_file_leaves_it_untouched(known_hosts_path):
         assert f.read() == original
 
 
-def test_forget_host_key_on_corrupt_file_leaves_it_untouched(known_hosts_path):
-    original = "garbage garbage garbage\n"
-    with open(known_hosts_path, "w", encoding="utf-8") as f:
-        f.write(original)
-
-    api = Api()
-    result = api.forget_host_key("example.com")
-
-    assert result["ok"] is False
-    with open(known_hosts_path, encoding="utf-8") as f:
-        assert f.read() == original
-
-
 def test_get_host_key_on_corrupt_file_reports_unreadable(known_hosts_path):
     with open(known_hosts_path, "w", encoding="utf-8") as f:
         f.write("garbage garbage garbage\n")

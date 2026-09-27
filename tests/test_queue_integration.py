@@ -114,6 +114,36 @@ def test_cancel_waiting_item_behind_a_slower_active_one(
     assert not served_small.exists()
 
 
+def test_progress_reaches_the_page_only_through_poll_queue(sftp_env, wait_for_drain, state_of):
+    """Worker progress must land in poll_queue()["progress"] under the item's
+    id, and never go out through _emit: evaluate_js from a worker thread is
+    what deadlocked the window."""
+    api, server_root, local_dir = sftp_env
+    name = "prog.bin"
+    (local_dir / name).write_bytes(os.urandom(256 * 1024))
+
+    emitted = []
+    api._emit = lambda event, payload: emitted.append(event)
+    seen = []
+    real_progress = api._progress
+
+    def spy(name, idx, total, sent, size, elapsed, progress_key=None):
+        real_progress(name, idx, total, sent, size, elapsed, progress_key)
+        seen.append((progress_key, api.poll_queue()["progress"].get(str(progress_key))))
+
+    api._progress = spy
+    api.enqueue([{"name": name, "is_dir": False}], "upload", str(local_dir), "/", "overwrite")
+    wait_for_drain(api)
+
+    item_id = api.queue.snapshot()[-1]["id"]
+    assert state_of(api, item_id)["state"] == COMPLETED
+    assert seen
+    for key, payload in seen:
+        assert key == item_id
+        assert payload is not None and payload["name"] == name
+    assert emitted == []
+
+
 def test_enqueue_locked_out_while_legacy_transfer_active(sftp_env):
     api, server_root, local_dir = sftp_env
     (local_dir / "file.bin").write_bytes(os.urandom(16))
@@ -142,13 +172,15 @@ def test_second_batch_runs_after_the_queue_drained(sftp_env, wait_for_drain, sta
                 str(local_dir), "/", "overwrite")
     wait_for_drain(api)
 
-    # let every worker fully retire (poll mode off, pool empty) before round two
+    # let every worker fully retire (pool empty) before round two
     deadline = time.time() + 15
     while time.time() < deadline:
-        if not any(w.is_alive() for w in api._workers):
-            break
+        with api._worker_lock:
+            if not api._workers:
+                break
         time.sleep(0.02)
-    assert api._poll_mode is False
+    with api._worker_lock:
+        assert api._workers == []
 
     second = [f"b{i}.bin" for i in range(3)]
     for name in second:
