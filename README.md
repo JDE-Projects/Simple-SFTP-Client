@@ -28,11 +28,12 @@ If you enjoyed this project and would like to buy me a coffee, check out my [Ko-
   small files.
 - Compare local vs remote and sync folders in either direction, across
   subfolders too, with a preview of what will transfer and a
-  download-changed-only option. Compare and Sync refuse a folder pair where
-  either side has more than 500,000 files (an empty folder counts as one);
-  memory use at that size is about 1 GB or more in the worst case. The
-  limit does not make a large comparison run any faster, and very long
-  paths use more memory per file than short ones.
+  download-changed-only option. Folders with more than 500,000 items on
+  either side are refused (at that size Compare and Sync can use about 1 GB of
+  memory).
+- Safe transfers: files are written to a temporary copy and swapped in only
+  when complete, so an interrupted transfer never damages the existing file.
+  Servers that can't swap files safely have uploads refused.
 - Before overwriting, a per-file comparison shows each file's size, date, and
   which side is newer, so you can overwrite, skip existing, or cancel.
 - Transfers keep each file's original modification date where the server and
@@ -105,8 +106,9 @@ pipeline from this repo. You can also check the file against the published
 - Python 3 on PATH.
 - `pip install -r requirements.txt` (pinned versions: PySide6, pywebview,
   paramiko, cryptography, keyring, and PyInstaller)
-- Keep `simple_sftp_client.py`, `simple_sftp_client-UI.html`, the `fonts/`
-  folder, the `.ico`, and `.png` together.
+- Keep `simple_sftp_client.py`, `transfer_queue.py`, `debug_log.py`,
+  `simple_sftp_client-UI.html`, the `fonts/` folder, the `.ico`, and `.png`
+  together.
 - Run from source: `python simple_sftp_client.py`
 - Build the .exe: `Build_Simple_SFTP_Client.bat` -> `dist\Simple SFTP Client\Simple SFTP Client.exe`
 
