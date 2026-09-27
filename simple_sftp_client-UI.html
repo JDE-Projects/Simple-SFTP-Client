@@ -517,7 +517,11 @@ function renderQueueSummary(counts){
   $("qSummary").textContent=parts.join(" · ");
 }
 let lastProgressById={};   // progress payloads keyed by queue item id (string keys, JSON)
-function startQueuePoll(){
+// movesFiles is false only for a Compare or a Sync preview, which queue
+// nothing. Marking the batch here, not only when a poll sees work in flight,
+// keeps a transfer that finishes before the first poll from losing its Done line.
+function startQueuePoll(movesFiles=true){
+  if(movesFiles)batchHadTransfers=true;
   qWasBusy=true;
   setQueuePollDelay(200);
 }
@@ -631,10 +635,11 @@ async function queueTick(){
       if(!sizeCalculating)$("qName").textContent="Idle";
       const completed=counts.completed||0, failed=counts.failed||0, cancelled=counts.cancelled||0, skipped=counts.skipped||0;
       const doneTotal=completed+failed+cancelled+skipped;
-      // A bare Compare runs through this same poll but queues nothing, so it
-      // ends with doneTotal 0: leave the transfer summary blank instead of a
-      // misleading "Done: 0 completed".
-      $("qMeta").textContent=doneTotal?(`Done: ${completed} completed`+(failed?`, ${failed} failed`:"")+
+      // counts are the queue's running totals, which include earlier batches
+      // until finished items are cleared. A batch that moved no files (a bare
+      // Compare or Sync preview) leaves the line blank instead of repeating an
+      // earlier batch's result.
+      $("qMeta").textContent=(batchHadTransfers&&doneTotal)?(`Done: ${completed} completed`+(failed?`, ${failed} failed`:"")+
         (cancelled?`, ${cancelled} cancelled`:"")+(skipped?`, ${skipped} skipped`:"")):"";
       // The finished line above already reports failures; drop the live
       // summary so the same count doesn't show twice in the footer.
@@ -1039,7 +1044,7 @@ function setupDrop(side){ const pane=$("pane"+cap(side));
 async function onCompare(){ if(!connected)return;
   const r=await API.compare(state.local.cwd,state.remote.cwd);
   if(!r.ok){toast(r.error,true);return;}
-  startQueuePoll(); }
+  startQueuePoll(false); }
 function applyCompareResult(result){
   compareMap={rootLocal:result.root_local,rootRemote:result.root_remote,
     files:result.files||{},folders:result.folders||{}};
@@ -1064,7 +1069,7 @@ async function onSync(direction){ if(!connected)return;
   if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
   const r=await API.sync_plan(state.local.cwd,state.remote.cwd,direction,true);
   if(!r.ok){toast(r.error||"Sync failed",true);return;}
-  startQueuePoll();
+  startQueuePoll(false);
   const done=await new Promise(res=>{pendingSyncResolve=res;});
   if(!done.ok){toast(done.error||"Sync failed",true);return;}
   const result=done.result;
