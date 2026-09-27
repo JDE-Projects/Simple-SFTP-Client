@@ -14,6 +14,7 @@ Sora (font)           OFL-1.1        github.com/sora-xor/sora-font
   Sora Copyright 2019 The Sora Project Authors
 JetBrains Mono        OFL-1.1        github.com/JetBrains/JetBrainsMono
   JetBrains Mono Copyright 2020 The JetBrains Mono Project Authors
+  Full OFL-1.1 text for both fonts: fonts/OFL.txt
 
 # Per-app (this tool's imports)
 Paramiko              LGPL-2.1       paramiko.org   (+ cryptography, bcrypt, PyNaCl)
