@@ -2840,15 +2840,18 @@ class Api:
     def _apply_download_mtime(self, lp, rp, mtime, size):
         """Stamp a freshly downloaded local file with the remote file's
         modification time (Option B), so a later size+mtime compare reads an
-        unchanged file as 'same'. A mtime of 0 means the remote stat was
-        unavailable; leave the file's own time in that case (this file is
-        not remembered as a fallback either; that is a separate, unrelated
-        condition). If setting the time fails, the file is remembered for
+        unchanged file as 'same'. A mtime of 0 means the server's reply
+        carried no modification time; the file keeps its own time. If there
+        is no time to set, or setting it fails, the file is remembered for
         the rest of this connection: a later compare or skip check that
         finds a matching size will still treat it as unchanged, even though
         its time does not match. This memory does not survive a
         disconnect/reconnect."""
         if not mtime:
+            self._worker_log(f"server reported no modification time for {rp}; "
+                             "this file will be treated as unchanged by size "
+                             "for the rest of this connection", "warn")
+            self._record_mtime_fallback(lp, rp, size)
             return
         try:
             os.utime(lp, (mtime, mtime))
