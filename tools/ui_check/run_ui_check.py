@@ -100,6 +100,12 @@ def main(argv):
     srv_sock, port = sftp_server_core.start(fs_cls, paramiko.RSAKey.generate(2048))
 
     api = simple_sftp_client.Api()
+    simple_sftp_client.debug.on_warning = api._on_debug_warning
+    # Point the debug log at a folder that doesn't exist, so toggling it on
+    # always fails: this exercises the "write failed, warn, turn off" path
+    # deterministically, and keeps a real debug log from ever landing in the
+    # repo (the real log_dir is exe_dir(), the repo root, when run from source).
+    simple_sftp_client.debug.log_dir = os.path.join(work, "no_such_debug_folder")
     api._watch_interval = 0.5
     delay_once, calls, results = {}, {}, {}
     done = threading.Event()

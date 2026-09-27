@@ -135,9 +135,14 @@ pipeline from this repo. You can also check the file against the published
 - Deleting a remote file or folder is permanent and cannot be undone; the app
   confirms first.
 - The optional debug log is off by default; when on it writes
-  `Debug_Log_MMDDYYYY_HHMMSS.txt` next to the app. The app never logs
-  passwords or passphrases; as a backstop, the log also scrubs any
-  credentials embedded in URLs and any private-key material before writing.
+  `Debug_Log_MMDDYYYY_HHMMSS.txt` next to the app (a same-second clash adds
+  `_2`, `_3`, and so on). Each file stops at 5 MiB and rolls over to a new
+  one; the app keeps the active file plus at most 3 older ones (20 MiB
+  total) and deletes only its own log files, next to the app, once there are
+  more. The app never logs passwords or passphrases; as a backstop, the log
+  also scrubs any credentials embedded in URLs and any private-key material
+  before writing. If a log file can't be written, the debug log turns itself
+  off and shows a warning in the console rather than failing silently.
 - **Network use.** Other than the job you ask of it, this app makes one automatic network call: a check to GitHub for a newer release (at startup and when you press **Check for updates**), which sends only a version request. It collects and sends no personal data, usage data, or analytics.
 - **Privacy policy.** The full privacy policy for this app and the other JDE-Projects tools is at https://jde-projects.com/privacy.
 
