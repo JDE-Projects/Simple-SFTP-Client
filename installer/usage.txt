@@ -1,8 +1,5 @@
 Launch Simple SFTP Client from the Start menu.
 Enter a host, username, and password or key to connect over SFTP.
-Browse, upload, and download files; secrets are kept in memory only.
-Compare and sync folders in either direction. Compare and Sync refuse a
-folder pair where either side has more than 500,000 files (an empty
-folder counts as one); memory use at that size is about 1 GB or more in
-the worst case. The limit does not make a large comparison run any
-faster, and very long paths use more memory per file than short ones.
+Browse, upload, download, compare, and sync folders. Passwords stay in memory
+only unless you tick Remember password (stored in Windows Credential Manager).
+Compare and Sync refuse folders with more than 500,000 items on either side.
