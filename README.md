@@ -35,8 +35,9 @@ If you enjoyed this project and would like to buy me a coffee, check out my [Ko-
   paths use more memory per file than short ones.
 - Before overwriting, a per-file comparison shows each file's size, date, and
   which side is newer, so you can overwrite, skip existing, or cancel.
-- Transfers keep each file's original modification date, so a repeat
-  download-changed-only run fetches just what actually changed.
+- Transfers keep each file's original modification date where the server and
+  Windows allow it, so a repeat download-changed-only run fetches just what
+  actually changed.
 - Upload watcher: keep a remote folder up to date from a local one.
 - Remote directory size calculation (on demand) and a connection health
   indicator.
