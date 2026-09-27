@@ -96,6 +96,27 @@ def test_nested_local_folder_uploads_creating_remote_dirs_lazily(sftp_env, wait_
         (local_dir / "top" / "mid" / "deep" / "c.bin").read_bytes()
 
 
+def test_folder_upload_leaves_out_local_scratch_files(sftp_env, wait_for_drain):
+    """A scratch file left in a local folder by an earlier interrupted download
+    is the app's own leftover, not user data: uploading the folder must not
+    queue it or copy it to the server."""
+    api, server_root, local_dir = sftp_env
+    scratch = ".a.bin.0123abcd.sxtpart"
+    assert simple_sftp_client.is_temp_part(scratch)
+    (local_dir / "top").mkdir()
+    (local_dir / "top" / "a.bin").write_bytes(os.urandom(500))
+    (local_dir / "top" / scratch).write_bytes(os.urandom(200))
+
+    result = api.enqueue([{"name": "top", "is_dir": True}], "upload",
+                          str(local_dir), "/", "overwrite")
+    assert result["ok"] is True
+    wait_for_drain(api)
+
+    names = [e["name"] for e in api.queue.snapshot()]
+    assert names == ["a.bin"]
+    assert sorted(os.listdir(server_root / "top")) == ["a.bin"]
+
+
 def test_poll_queue_reports_scanning_while_running_then_false_once_drained(sftp_env, wait_for_drain):
     api, server_root, local_dir = sftp_env
     (local_dir / "top").mkdir()
