@@ -70,6 +70,9 @@ try{
   ok("compare summaries appear in both pane titles",()=>compared,()=>$("localCompare").textContent+" | "+$("remoteCompare").textContent);
   await waitFor(()=>!qWasBusy,10000); await sleep(1500);
   ok("compare colors and summaries survive the compare finishing",()=>!!compareMap&&$("localCompare").textContent!==""&&$("remoteCompare").textContent!=="");
+  // The download batch above left running totals in the queue; a Compare
+  // moves no files, so it must not repeat that batch's Done line.
+  ok("a bare Compare after a batch leaves the Done line blank",()=>$("qMeta").textContent==="",()=>$("qMeta").textContent);
 
   // Narrowest window the app allows (min_size 1000 wide), with the compare
   // counts and a long watch tag showing: bar stays one row, titles one line.
