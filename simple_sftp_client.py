@@ -2057,10 +2057,13 @@ class Api:
             progress = {str(k): v for k, v in self._progress_by_id.items()}
         # Deliver at most one finished compare/sync payload per poll, so the
         # page never has to reconcile two at once. One-shot for a plain
-        # compare (deregistered right after delivery); a sync job stays
-        # registered on success so its stashed transfer list survives for
-        # start_sync(), and is dropped otherwise since there is nothing left
-        # to keep.
+        # compare (deregistered right after delivery), and for a failed sync
+        # (nothing left to keep) or a successful sync plan with nothing to
+        # transfer and no conflicts (a no-op, same as a plain compare). A
+        # successful sync plan with something to transfer or a conflict
+        # stays registered so its stashed transfer list survives for
+        # start_sync(); that entry's lifetime then belongs to
+        # start_sync()/discard_sync()/the sync_plan() safety net, not here.
         compare_done = None
         deregister_id = None
         with self._compare_lock:
@@ -2071,6 +2074,10 @@ class Api:
                                      "error": entry["error"], "result": entry["result"]}
                     if entry["kind"] == "compare" or not entry["ok"]:
                         deregister_id = cid
+                    elif entry["kind"] == "sync":
+                        result = entry["result"] or {}
+                        if not result.get("count") and not result.get("conflicts"):
+                            deregister_id = cid
                     break
         if deregister_id is not None:
             self._deregister_compare(deregister_id)
@@ -3258,13 +3265,24 @@ class Api:
         """Starts a recursive sync-plan computation on its own daemon thread
         and returns immediately; the summary (and a token for start_sync())
         arrives via poll_queue()'s compare_done key. Not @_browsing, for the
-        same reason as compare()."""
+        same reason as compare().
+
+        Safety net: drops any earlier finished sync plan still sitting in
+        _compares before registering the new one. Normally the page frees a
+        plan itself (consuming it via start_sync() or declining it via
+        discard_sync()), but if the page never gets the chance (a reload
+        while a plan is still on screen), this keeps at most one unconsumed
+        plan around instead of piling one up per sync attempt."""
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
         if self._legacy_active.is_set():
             return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}
         if self._compare_active():
             return {"ok": False, "error": "A compare or sync is already running."}
+        with self._compare_lock:
+            stale = [cid for cid, e in self._compares.items() if e["kind"] == "sync" and e["done"]]
+            for cid in stale:
+                self._compares.pop(cid, None)
         cid, stop_event = self._start_compare("sync")
         t = threading.Thread(target=self._run_compare,
                               args=(cid, local_dir, remote_dir, stop_event, direction, changed_only),
@@ -3277,7 +3295,10 @@ class Api:
         normal transfer queue in backpressured batches, reusing the same
         scan registry (and so the same "Scanning… N" / drain UI and
         backpressure) as a folder scan, since there is nothing left to walk.
-        Always deregisters both the scan and the sync job it came from."""
+        The sync plan's entry in _compares was already popped by start_sync()
+        before this thread started, so the token argument only identifies
+        the job for logging; deregistering it here is a harmless no-op.
+        Always deregisters the scan registry entry."""
         found = 0
         batch = []
         try:
@@ -3322,23 +3343,49 @@ class Api:
         """Streams the transfer list a prior sync_plan() computed (identified
         by token, the id poll_queue() handed back in the summary) onto the
         transfer queue. The transfer list itself never round-trips through
-        the page: it stays server-side from computation to enqueue."""
+        the page: it stays server-side from computation to enqueue.
+
+        A token works exactly once: the plan is popped out of _compares here,
+        before the streaming thread even starts, so a second call with the
+        same token (a double-click, or the page re-sending it) always gets
+        the "no longer available" error instead of re-queuing the same
+        files. If not connected or another legacy sync/watch is running, the
+        plan is left untouched: the caller can retry the same token."""
         if not self.connected:
             return {"ok": False, "error": "Not connected."}
         if self._legacy_active.is_set():
             return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}
         with self._compare_lock:
             entry = self._compares.get(token)
-            transfers = entry["transfers"] if entry else None
-            direction = entry["direction"] if entry else None
-        if entry is None or transfers is None:
+            if entry is not None and entry.get("transfers") is not None:
+                self._compares.pop(token, None)
+            else:
+                entry = None
+        if entry is None:
             return {"ok": False, "error": "That sync plan is no longer available. Run Sync again."}
+        transfers = entry["transfers"]
+        direction = entry["direction"]
         scan_id, stop_event = self._register_scan()
         t = threading.Thread(target=self._stream_sync_transfers,
                               args=(transfers, direction, on_conflict, scan_id, stop_event, token),
                               daemon=True)
         t.start()
         return {"ok": True, "scanning": True}
+
+    def discard_sync(self, token):
+        """Bridge method for the page to free a sync plan it decided not to
+        use: the user declined the confirmation, or start_sync() refused it.
+        Pops the entry only if it is a finished sync plan (done computing,
+        never a still-running one, which a stop can't safely interrupt from
+        here); a still-running job is left alone. Idempotent and always
+        returns ok, so a stale or unknown token (already consumed, already
+        discarded, or from a job that failed and was already dropped) is
+        harmless to pass."""
+        with self._compare_lock:
+            entry = self._compares.get(token)
+            if entry is not None and entry["kind"] == "sync" and entry["done"]:
+                self._compares.pop(token, None)
+        return {"ok": True}
 
     @_browsing
     def calc_remote_size(self, remote_dir, name):

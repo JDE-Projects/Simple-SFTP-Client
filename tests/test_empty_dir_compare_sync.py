@@ -141,10 +141,12 @@ def test_folder_already_existing_on_destination_still_ends_fine(sftp_env, wait_f
     r = api.sync_plan(str(local_dir), "/", "upload")
     assert r["ok"] is True
     done = wait_for_compare(api, kind="sync")
-    # nothing to transfer, but the token is still usable and the folder is
-    # still there afterwards (idempotent, via commit 1's _make_dir)
+    # nothing to transfer and no conflicts: the plan is freed on delivery, so
+    # its token is refused, and the existing folder is left in place
+    assert done["result"]["count"] == 0
     start = api.start_sync(done["result"]["token"])
-    assert start["ok"] is True
+    assert start["ok"] is False
+    assert "no longer available" in (start["error"] or "")
     wait_for_drain(api)
     assert (server_root / "already").is_dir()
 

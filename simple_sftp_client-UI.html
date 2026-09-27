@@ -972,9 +972,9 @@ async function onSync(direction){ if(!connected||busy)return;
   if(!done.ok){$("statusText").innerHTML=prevStatus;toast(done.error||"Sync failed",true);return;}
   const result=done.result;
   if(!result.count&&!(result.conflicts&&result.conflicts.length)){$("statusText").innerHTML=prevStatus;toast("Already in sync, nothing to transfer");return;}
-  if(!await confirmSyncPlan(result)){$("statusText").innerHTML=prevStatus;return;}
+  if(!await confirmSyncPlan(result)){API.discard_sync(result.token);$("statusText").innerHTML=prevStatus;return;}
   const rr=await API.start_sync(result.token,"overwrite");
-  if(!rr.ok){$("statusText").innerHTML=prevStatus;toast(rr.error||"Could not queue the transfer",true);return;}
+  if(!rr.ok){API.discard_sync(result.token);$("statusText").innerHTML=prevStatus;toast(rr.error||"Could not queue the transfer",true);return;}
   startQueuePoll(); }
 let watching=false;
 async function onWatch(){ if(!connected)return;
