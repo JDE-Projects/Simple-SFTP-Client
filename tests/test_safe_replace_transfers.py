@@ -620,18 +620,24 @@ def test_watch_upload_refuses_and_keeps_original_when_posix_rename_unsupported(
     original = b"ORIGINAL SERVER COPY"
     (server_root / name).write_bytes(original)
 
-    events = []
-    api._emit = lambda ev, payload: events.append((ev, payload))
-
     assert api.start_watch(str(local_dir), "/")["ok"] is True
     (local_dir / name).write_bytes(b"new local content that must never land")
 
-    wait_until(lambda: any(ev == "watch" and not p["ok"] for ev, p in events), timeout=6)
+    lines = []
+
+    def watch_failed():
+        lines.extend(api.poll_queue()["console"])
+        return any(line["msg"].startswith(f"Watch error: {name} - ") for line in lines)
+
+    wait_until(watch_failed, timeout=6)
     time.sleep(0.2)
     api.stop_watch()
+    lines.extend(api.poll_queue()["console"])
 
-    watch_events = [p for ev, p in events if ev == "watch"]
-    assert all(not p["ok"] for p in watch_events)  # never reported success
+    errors = [line for line in lines if line["msg"].startswith(f"Watch error: {name} - ")]
+    assert errors and all(line["level"] == "error" for line in errors)
+    # never reported success
+    assert not any(line["msg"].startswith("Watch: uploaded ") for line in lines)
     assert (server_root / name).read_bytes() == original
     assert _remote_temp_files(server_root) == []
 

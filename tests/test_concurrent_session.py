@@ -130,6 +130,117 @@ def test_watch_uploads_a_file_that_appears_after_start(sftp_env, wait_until):
     assert (server_root / "new.txt").read_bytes() == b"hello"
 
 
+def test_watch_upload_is_buffered_with_its_remote_folder(sftp_env, wait_until):
+    """A completed watch upload reaches the page through poll_queue(), once."""
+    api, server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    assert api.poll_queue()["watching"] is True
+    (local_dir / "queued.txt").write_bytes(b"queued")
+
+    wait_until(lambda: (server_root / "queued.txt").exists())
+    status = api.poll_queue()
+    api.stop_watch()
+
+    assert {"msg": "Watch: uploaded queued.txt", "level": "ok"} in status["console"]
+    assert status["watch_refresh"] == ["/"]
+    assert api.poll_queue()["watch_refresh"] == []
+    assert api.poll_queue()["watching"] is False
+
+
+def test_watch_refresh_deduplicates_folders_from_one_pass(sftp_env, wait_until):
+    """One watcher pass reports each affected remote folder only once."""
+    api, server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    (local_dir / "sub").mkdir()
+
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    (local_dir / "first.txt").write_bytes(b"first")
+    (local_dir / "second.txt").write_bytes(b"second")
+    (local_dir / "sub" / "nested.txt").write_bytes(b"nested")
+
+    wait_until(lambda: (server_root / "first.txt").exists()
+               and (server_root / "second.txt").exists()
+               and (server_root / "sub" / "nested.txt").exists())
+    status = api.poll_queue()
+    api.stop_watch()
+
+    assert status["watch_refresh"] == ["/", "/sub"]
+
+
+def test_failed_watch_upload_logs_error_without_refresh(
+        sftp_env_no_posix_rename, wait_until):
+    """A failed watch upload never tells the page to refresh a remote folder."""
+    api, server_root, local_dir = sftp_env_no_posix_rename
+    api._watch_interval = 0.05
+    (server_root / "failed.txt").write_bytes(b"old")
+
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    (local_dir / "failed.txt").write_bytes(b"new")
+
+    status = None
+    deadline = time.time() + 6
+    while time.time() < deadline:
+        candidate = api.poll_queue()
+        if any(line["msg"].startswith("Watch error: failed.txt - ")
+               and line["level"] == "error" for line in candidate["console"]):
+            status = candidate
+            break
+        time.sleep(0.02)
+    api.stop_watch()
+
+    assert status is not None
+    assert status["watch_refresh"] == []
+
+
+def test_shutdown_discards_pending_watch_refresh(sftp_env, wait_until):
+    """A refresh generated before disconnect cannot reach a later connection."""
+    api, server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    (local_dir / "disconnect.txt").write_bytes(b"done")
+    wait_until(lambda: (server_root / "disconnect.txt").exists())
+
+    assert api.shutdown()["ok"] is True
+    assert api.poll_queue()["watch_refresh"] == []
+
+
+def test_shutdown_blocks_a_straggling_watcher_from_readding_refresh(
+        sftp_env, wait_until):
+    """A watcher that misses stop_watch's join timeout cannot re-add a refresh."""
+    api, server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    gate_entered = threading.Event()
+    release_gate = threading.Event()
+    real_lock = api._watch_refresh_lock
+
+    class GateLock:
+        def __enter__(self):
+            if threading.current_thread() is api._watch_thread:
+                gate_entered.set()
+                release_gate.wait(5)
+            real_lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            real_lock.release()
+
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    api._watch_refresh_lock = GateLock()
+    (local_dir / "late-refresh.txt").write_bytes(b"done")
+    wait_until(gate_entered.is_set)
+    thread = api._watch_thread
+
+    assert api.shutdown()["ok"] is True
+    release_gate.set()
+    thread.join(5)
+
+    assert not thread.is_alive()
+    assert api.poll_queue()["watch_refresh"] == []
+
+
 def test_watch_retries_a_failed_upload_instead_of_forgetting_it(sftp_env, wait_until):
     """A failed upload must be retried on a later poll, not dropped. The
     watch upload writes through the safe scratch-file publish, so the

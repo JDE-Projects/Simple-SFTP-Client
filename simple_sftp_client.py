@@ -886,6 +886,8 @@ class Api:
         self._watch_stop = None
         self._watch_thread = None
         self._watch_interval = 2.0  # seconds between watch polls
+        self._watch_refresh_lock = threading.Lock()
+        self._watch_refresh = set()
         # transfer queue: a pool of workers drains it, each over its own SFTP
         # session (never self.sftp, that stays reserved for the file browser).
         # Pool size is WORKER_COUNT (2) by default, up to WORKER_COUNT_MAX (5)
@@ -1491,6 +1493,8 @@ class Api:
         # Stop the watcher; stop_watch joins its thread within a bounded time
         # and logs if it does not retire, rather than just setting the event.
         self.stop_watch()
+        with self._watch_refresh_lock:
+            self._watch_refresh.clear()
 
         # Cancel every queued/active transfer so the worker pool drains
         # promptly instead of grinding through retries against a session
@@ -2026,11 +2030,19 @@ class Api:
 
     def poll_queue(self):
         """Pulled by the window on a timer (~200ms) while a queue is active.
-        This is the only channel from the worker threads to the UI: it never
-        calls evaluate_js, so it cannot deadlock the window."""
+        This is the only channel from worker threads and the watcher to the UI:
+        it never calls evaluate_js, so it cannot deadlock the window."""
         with self._console_lock:
             lines = self._console_buffer
             self._console_buffer = []
+        with self._watch_refresh_lock:
+            watch_refresh = sorted(self._watch_refresh)
+            self._watch_refresh.clear()
+        with self._watch_lock:
+            watching = (self._watch_thread is not None
+                        and self._watch_thread.is_alive()
+                        and self._watch_stop is not None
+                        and not self._watch_stop.is_set())
         items, pending = self.queue.snapshot_and_pending()
         active_ids = [it["id"] for it in items if it["state"] == "active"]
         with self._progress_lock:
@@ -2067,6 +2079,8 @@ class Api:
             "active_ids": active_ids,
             "progress": progress,
             "console": lines,
+            "watch_refresh": watch_refresh,
+            "watching": watching,
             "paused": self.queue.is_paused(),
             # A background scan (enqueue/upload_paths) queues files as it
             # finds them, so the UI needs its own signal to show "Scanning…
@@ -3565,6 +3579,7 @@ class Api:
                 # on a later idle poll.
                 if changed and self.queue.pending() > 0:
                     continue
+                refreshed_folders = set()
                 for fp in changed:
                     if stop.is_set():
                         break
@@ -3585,6 +3600,7 @@ class Api:
                         # Serialize against the browsing session: this upload runs
                         # on the watcher thread and shares self.sftp with listing
                         # and health-ping bridge calls (see _browsing).
+                        finished = False
                         with self._sftp_lock:
                             if stop.is_set():
                                 seen_changed.pop(fp, None)
@@ -3592,7 +3608,8 @@ class Api:
                             self._ensure_remote_dir(rdir)
                             finished = self._put_resume(self.sftp, fp, rp, 0, _cb, stop.is_set)
                         if finished:
-                            self._emit("watch", {"file": rel, "ok": True})
+                            self._worker_log(f"Watch: uploaded {rel}", "ok")
+                            refreshed_folders.add(posixpath.dirname(rp))
                             # Accept this state so it is not re-sent.
                             last[fp] = cur[fp]
                             seen_changed.pop(fp, None)
@@ -3602,7 +3619,7 @@ class Api:
                             seen_changed.pop(fp, None)
                             break
                     except Exception as e:
-                        self._emit("watch", {"file": rel, "ok": False, "error": friendly_error(e)})
+                        self._worker_log(f"Watch error: {rel} - {friendly_error(e)}", "error")
                         # Keep the change pending: leave last unadvanced so a
                         # later poll retries. Reset the stability gate so a
                         # transient failure does not skip the next steadiness
@@ -3610,6 +3627,10 @@ class Api:
                         seen_changed.pop(fp, None)
                     finally:
                         self._legacy_active.clear()
+                if refreshed_folders:
+                    with self._watch_refresh_lock:
+                        if not stop.is_set():
+                            self._watch_refresh.update(refreshed_folders)
                 # Forget entries for files that no longer exist so the two maps
                 # do not grow without bound over a long session.
                 for tracked in (last, seen_changed):
