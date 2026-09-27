@@ -105,7 +105,7 @@ def build_setup_script(version: str) -> str:
     sel_remote = _index_of(scene.REMOTE_ENTRIES, scene.SELECTED_REMOTE)
 
     parts = [
-        f"document.getElementById('verText').textContent = 'v' + {json.dumps(version)};",
+        f"document.getElementById('verLabel').textContent = 'v' + {json.dumps(version)};",
         f"document.getElementById('host').value = {json.dumps(scene.HOST)};",
         f"document.getElementById('port').value = {json.dumps(scene.PORT)};",
         f"document.getElementById('user').value = {json.dumps(scene.USERNAME)};",
