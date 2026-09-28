@@ -8,9 +8,10 @@
 // Covers: the page-to-Python bridge answering with the real version; a
 // successful connect listing the server's files; uploading and downloading
 // one file each way, confirmed through the page's own pane listings; a
-// connect to a closed port failing with a plain-language message; a theme
-// round trip with a screenshot of each theme; and a clean disconnect at the
-// end. Does not cover sessions, key-based auth, sync/compare, or watch: see
+// server folder downloaded onto a symlinked local folder, with the console
+// warning and the file landing in the link's target; a connect to a closed
+// port failing with a plain-language message; a theme round trip with a
+// screenshot of each theme; and a clean disconnect at the end. Does not cover sessions, key-based auth, sync/compare, or watch: see
 // tools/ui_check/run_ui_check.py's scenario.js for those, driven headlessly
 // against a stand-in bridge instead of the real window.
 
@@ -99,6 +100,31 @@ export default async function smoke(helpers) {
     `state.local.entries.map(e=>e.name).includes(${JSON.stringify(downloadName)})`, 10000
   ).then(() => true).catch(() => false);
   check("downloaded file appears in the local pane's listing", downloaded, JSON.stringify(await names("local", helpers)));
+
+  // c2) downloading a server folder onto a local folder that is symlinked
+  // (the fixture made it a junction) follows the link and warns in the
+  // console where the files will really be written.
+  await click(await rowSelector("remote", fixture.link_folder, helpers));
+  await click("#downBtn");
+  const clashShown = await waitFor("$('diffModal').classList.contains('show')", 10000)
+    .then(() => true).catch(() => false);
+  check("existing symlinked folder triggers the overwrite prompt", clashShown);
+  if (clashShown) await click("#dfOk");
+  const warning = `${fixture.link_folder} is symlinked to ${fixture.link_target}; files will be written there.`;
+  const warned = await waitFor(`$("console").textContent.includes(${JSON.stringify(warning)})`, 10000)
+    .then(() => true).catch(() => false);
+  check("console warns that the download folder is symlinked", warned,
+    await evaluate(`$("console").textContent.slice(-600)`));
+  let landed = false;
+  for (let i = 0; i < 100 && !landed; i++) {
+    const r = await evaluate(`API.list_local(${JSON.stringify(fixture.link_target)})`);
+    landed = !!(r && r.ok && r.entries.some((e) => e.name === fixture.link_file));
+    if (!landed) await new Promise((res) => setTimeout(res, 100));
+  }
+  check("the folder's file is written into the symlink's target", landed);
+  // list_local remembers the last folder it listed; point it back at the
+  // folder the local pane is showing.
+  await evaluate(`API.list_local(${JSON.stringify(fixture.local_dir)})`);
 
   // d) error path: connect to a closed port shows a plain-language message.
   await click("#connBtn"); // currently connected: this disconnects
