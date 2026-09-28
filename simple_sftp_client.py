@@ -51,7 +51,7 @@ import paramiko
 from transfer_queue import TransferQueue
 import debug_log
 
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 GITHUB_REPO = "JDE-Projects/Simple-SFTP-Client"   # owner/repo for update checks
 WORKER_COUNT = 2   # transfer queue workers by default, each its own SFTP session
 # Ceiling for a batch of many small files. Every worker opens its own SFTP
