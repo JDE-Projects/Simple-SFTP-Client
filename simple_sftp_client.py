@@ -170,7 +170,9 @@ def safe_local_child(parent: str, name: str, root: str) -> str:
     user selected for this transfer). Rejects anything that looks like path
     traversal, or an absolute/UNC/drive path smuggled in as a "filename" by a
     hostile or broken server, by raising ValueError. Does not resolve
-    symlinks (abspath + commonpath only); parent must already be under root."""
+    symlinks (abspath + commonpath only); parent must already be under root.
+    A symlink or junction the user created locally is followed: the server
+    cannot create one, and a download into it is the user's own choice."""
     if not name or name in (".", ".."):
         raise ValueError(f"unsafe name {name!r}")
     if "/" in name or "\\" in name or os.sep in name or (os.altsep and os.altsep in name):
@@ -186,6 +188,17 @@ def safe_local_child(parent: str, name: str, root: str) -> str:
     if common != root_abs:
         raise ValueError(f"unsafe name {name!r}")
     return candidate
+
+
+def local_link_target(path: str):
+    """Return the real location of path when it is a symlink or junction,
+    else None. Used to warn before a download is written through one."""
+    try:
+        if os.path.islink(path) or os.path.isjunction(path):
+            return os.path.realpath(path)
+    except OSError:
+        pass
+    return None
 
 
 def negotiated_summary(ti: dict) -> str:
@@ -2249,6 +2262,9 @@ class Api:
                 except ValueError as e:
                     self._worker_log(f"skipped unsafe remote name {name!r}: {e}", "error")
                     continue
+                target = local_link_target(lp) if is_dir else None
+                if target:
+                    self._worker_log(f"{name} is symlinked to {target}; files will be written there.", "warn")
             roots.append((lp, rp, is_dir))
         scan_id, stop_event = self._register_scan()
         t = threading.Thread(target=self._scan_and_queue,
