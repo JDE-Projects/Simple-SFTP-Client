@@ -14,20 +14,6 @@
 // tools/ui_check/run_ui_check.py's scenario.js for those, driven headlessly
 // against a stand-in bridge instead of the real window.
 
-async function setField(selector, text, { type, evaluate }) {
-  // Backspacing a variable, unknown number of times only clears reliably
-  // when the caret is known to be at the end of the field, which a plain
-  // click doesn't guarantee for text the scenario didn't just type itself
-  // (e.g. the port field's "22" default). Clearing the field's value here
-  // is setup, not simulated typing; the real value the check cares about
-  // still goes in through type()'s real click and real keystrokes below.
-  await evaluate(
-    `(function(){const el=document.querySelector(${JSON.stringify(selector)});` +
-      `el.value="";el.dispatchEvent(new Event("input",{bubbles:true}));})()`
-  );
-  await type(selector, text);
-}
-
 async function names(side, { evaluate }) {
   return evaluate(`state.${side}.entries.map(e=>e.name)`);
 }
@@ -60,10 +46,10 @@ export default async function smoke(helpers) {
     JSON.stringify(meta));
 
   async function connectAndExpectSuccess(port, expectHostKeyPrompt) {
-    await setField("#host", "127.0.0.1", helpers);
-    await setField("#port", String(port), helpers);
-    await setField("#user", fixture.user, helpers);
-    await setField("#pass", fixture.password, helpers);
+    await type("#host", "127.0.0.1");
+    await type("#port", String(port));
+    await type("#user", fixture.user);
+    await type("#pass", fixture.password);
     await click("#connBtn");
     if (expectHostKeyPrompt) {
       const promptShown = await waitFor(
@@ -117,10 +103,10 @@ export default async function smoke(helpers) {
   // d) error path: connect to a closed port shows a plain-language message.
   await click("#connBtn"); // currently connected: this disconnects
   await waitFor("connected === false", 10000);
-  await setField("#host", "127.0.0.1", helpers);
-  await setField("#port", String(fixture.closed_port), helpers);
-  await setField("#user", fixture.user, helpers);
-  await setField("#pass", fixture.password, helpers);
+  await type("#host", "127.0.0.1");
+  await type("#port", String(fixture.closed_port));
+  await type("#user", fixture.user);
+  await type("#pass", fixture.password);
   await click("#connBtn");
   const failModalShown = await waitFor(
     "document.getElementById('confirmModal').classList.contains('show')", 15000
