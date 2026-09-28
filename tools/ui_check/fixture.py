@@ -10,6 +10,12 @@ the port, the login, the local folder to point the app's local pane at, the
 file names on each side, and a second port that was briefly bound and
 released so a connect to it is refused (used for the error-path check).
 
+Also sets up the symlinked-folder check: a server folder LINK_FOLDER holding
+LINK_FILE, and a local folder of the same name that is a junction (a Windows
+folder link, creatable without admin rights) to link_target, a separate folder
+in the run folder. Downloading the server folder writes through the junction
+into link_target, and the app logs that it is symlinked.
+
 Stays running (does nothing) until drive.py tears down the job.
 """
 from __future__ import annotations
@@ -17,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
 import sys
 import time
 
@@ -31,6 +38,8 @@ from tools.sftp_server_core import PASSWORD, USER  # noqa: E402
 
 SERVER_FILES = ["s1.txt", "s2.txt"]
 LOCAL_FILES = ["l1.txt", "l2.txt"]
+LINK_FOLDER = "Photos"
+LINK_FILE = "photo.txt"
 
 
 def _closed_port() -> int:
@@ -65,6 +74,16 @@ def main() -> int:
     with open(os.path.join(local_dir, "sub", "insub.txt"), "w", encoding="utf-8") as f:
         f.write("insub")
 
+    os.makedirs(os.path.join(server_root, LINK_FOLDER))
+    with open(os.path.join(server_root, LINK_FOLDER, LINK_FILE), "w", encoding="utf-8") as f:
+        f.write(LINK_FILE)
+    link_target = os.path.join(out_dir, "link_target")
+    os.makedirs(link_target)
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", os.path.join(local_dir, LINK_FOLDER), link_target],
+        check=True, capture_output=True,
+    )
+
     fs_cls = sftp_server_core.make_fs(server_root)
     host_key = paramiko.RSAKey.generate(2048)
     _sock, port = sftp_server_core.start(fs_cls, host_key)
@@ -79,6 +98,9 @@ def main() -> int:
                 "local_dir": local_dir,
                 "server_files": SERVER_FILES,
                 "local_files": LOCAL_FILES,
+                "link_folder": LINK_FOLDER,
+                "link_file": LINK_FILE,
+                "link_target": os.path.realpath(link_target),
             }
         ),
         flush=True,

@@ -18,6 +18,7 @@ Built with AI assistance, directed by JDE-Projects.
 import os
 import sys
 import io
+import shlex
 import stat
 import ctypes
 from ctypes import wintypes
@@ -50,7 +51,7 @@ import paramiko
 from transfer_queue import TransferQueue
 import debug_log
 
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 GITHUB_REPO = "JDE-Projects/Simple-SFTP-Client"   # owner/repo for update checks
 WORKER_COUNT = 2   # transfer queue workers by default, each its own SFTP session
 # Ceiling for a batch of many small files. Every worker opens its own SFTP
@@ -87,6 +88,59 @@ def worker_target(sizes):
     small = sum(1 for s in sizes if 0 <= s < 1024 * 1024)
     return WORKER_COUNT_MAX if small >= 8 else WORKER_COUNT
 
+
+def _is_remote_debugging_switch(token):
+    # Chromium on Windows accepts "--", "-" or "/" before a switch name and
+    # ignores its case, so every spelling is matched.
+    for prefix in ("--", "-", "/"):
+        if token.startswith(prefix):
+            return token[len(prefix):].lower().startswith("remote-debugging-")
+    return False
+
+
+def _drop_remote_debugging(tokens):
+    """Return tokens without remote-debugging switches, including a value
+    given as the following token (--remote-debugging-port 9222)."""
+    kept = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if _is_remote_debugging_switch(token):
+            if "=" not in token and index < len(tokens) and not tokens[index].startswith(("-", "/")):
+                index += 1
+        else:
+            kept.append(token)
+    return kept
+
+
+def strip_remote_debugging(environ, argv, frozen):
+    """Remove Qt remote-debugging controls from frozen application launches,
+    so the built app never opens Qt's remote-control port. Source runs are
+    left alone: the real-window smoke check depends on that port."""
+    if not frozen:
+        return
+
+    environ.pop("QTWEBENGINE_REMOTE_DEBUGGING", None)
+
+    flags = environ.get("QTWEBENGINE_CHROMIUM_FLAGS")
+    if flags is not None:
+        try:
+            lexer = shlex.shlex(flags, posix=False)
+            lexer.whitespace_split = True
+            tokens = list(lexer)
+        except ValueError:
+            # Unbalanced quote: split on spaces rather than fail at startup.
+            tokens = flags.split()
+        kept = _drop_remote_debugging(tokens)
+        if kept:
+            environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(kept)
+        else:
+            del environ["QTWEBENGINE_CHROMIUM_FLAGS"]
+
+    argv[1:] = _drop_remote_debugging(argv[1:])
+
+
 # Weak / deprecated / CVE-prone algorithms we refuse (secure-or-fail).
 DISABLED_ALGORITHMS = {
     "kex": ["diffie-hellman-group1-sha1", "diffie-hellman-group14-sha1",
@@ -116,7 +170,9 @@ def safe_local_child(parent: str, name: str, root: str) -> str:
     user selected for this transfer). Rejects anything that looks like path
     traversal, or an absolute/UNC/drive path smuggled in as a "filename" by a
     hostile or broken server, by raising ValueError. Does not resolve
-    symlinks (abspath + commonpath only); parent must already be under root."""
+    symlinks (abspath + commonpath only); parent must already be under root.
+    A symlink or junction the user created locally is followed: the server
+    cannot create one, and a download into it is the user's own choice."""
     if not name or name in (".", ".."):
         raise ValueError(f"unsafe name {name!r}")
     if "/" in name or "\\" in name or os.sep in name or (os.altsep and os.altsep in name):
@@ -132,6 +188,23 @@ def safe_local_child(parent: str, name: str, root: str) -> str:
     if common != root_abs:
         raise ValueError(f"unsafe name {name!r}")
     return candidate
+
+
+def local_link_target(path: str):
+    """Return the real location of path when it is a symlink or junction,
+    else None. Used to warn before a download is written through one."""
+    try:
+        if os.path.islink(path) or os.path.isjunction(path):
+            return os.path.realpath(path)
+    except OSError:
+        pass
+    return None
+
+
+def negotiated_summary(ti: dict) -> str:
+    """Format the connect log's negotiated algorithms, e.g. "cipher X · mac Y".
+    Lists only fields that have a real value; returns "" when none do."""
+    return " · ".join(f"{k} {ti[k]}" for k in ("cipher", "mac") if ti and ti.get(k))
 
 
 TEMP_PART_SUFFIX = ".sxtpart"
@@ -1304,9 +1377,9 @@ class Api:
             else:
                 self._cred_pass = password
                 self._cred_identity = (host, port, username, "password")
-            if ti:
-                self._vlog(f"Negotiated: cipher {ti.get('cipher','?')} · "
-                           f"kex {ti.get('kex','?')} · mac {ti.get('mac','?')}")
+            negotiated = negotiated_summary(ti)
+            if negotiated:
+                self._vlog(f"Negotiated: {negotiated}")
             self._vlog(f"SFTP session opened, home folder {home}", "ok")
             self._sweep_scratch_files()
             return {"ok": True, "home": home, "cwd": start, "transport": ti}
@@ -1429,10 +1502,11 @@ class Api:
         return {"known": True, "host": host, "entries": entries}
 
     def _transport_info(self, client=None):
+        # Key exchange is not reported: paramiko discards the agreed method,
+        # and the server offer it was chosen from, once the handshake ends.
         try:
             t = (client or self.client).get_transport()
-            return {"cipher": t.remote_cipher, "kex": getattr(t, "kex_engine", ""),
-                    "mac": t.remote_mac}
+            return {"cipher": t.remote_cipher, "mac": t.remote_mac}
         except Exception:
             return {}
 
@@ -2188,6 +2262,9 @@ class Api:
                 except ValueError as e:
                     self._worker_log(f"skipped unsafe remote name {name!r}: {e}", "error")
                     continue
+                target = local_link_target(lp) if is_dir else None
+                if target:
+                    self._worker_log(f"{name} is symlinked to {target}; files will be written there.", "warn")
             roots.append((lp, rp, is_dir))
         scan_id, stop_event = self._register_scan()
         t = threading.Thread(target=self._scan_and_queue,
@@ -3907,6 +3984,8 @@ def _focus_existing_window(title: str) -> None:
 
 
 def main():
+    strip_remote_debugging(os.environ, sys.argv, getattr(sys, "frozen", False))
+
     # Use the Windows certificate store for TLS instead of the bundled CA list,
     # so antivirus/network filters that inject their own root cert (common on
     # managed laptops) don't break the GitHub update check. Runs before the

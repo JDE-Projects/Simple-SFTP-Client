@@ -162,4 +162,4 @@ noncommercial redistribution are permitted; commercial use is not. Keep the
 copyright notice; no warranty. This tool bundles third-party code; see
 [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt).
 
-For commercial licensing, open a [GitHub issue](https://github.com/JDE-Projects/Simple-SFTP-Client/issues) with the title "Commercial License Inquiry".
+For commercial licensing, see the [JDE-Projects support page](https://jde-projects.com/support/#commercial-licensing).
