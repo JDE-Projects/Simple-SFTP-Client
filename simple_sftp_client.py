@@ -134,6 +134,12 @@ def safe_local_child(parent: str, name: str, root: str) -> str:
     return candidate
 
 
+def negotiated_summary(ti: dict) -> str:
+    """Format the connect log's negotiated algorithms, e.g. "cipher X · mac Y".
+    Lists only fields that have a real value; returns "" when none do."""
+    return " · ".join(f"{k} {ti[k]}" for k in ("cipher", "mac") if ti and ti.get(k))
+
+
 TEMP_PART_SUFFIX = ".sxtpart"
 
 # Match only the exact shape local_temp_path / remote_temp_path build:
@@ -1304,9 +1310,9 @@ class Api:
             else:
                 self._cred_pass = password
                 self._cred_identity = (host, port, username, "password")
-            if ti:
-                self._vlog(f"Negotiated: cipher {ti.get('cipher','?')} · "
-                           f"kex {ti.get('kex','?')} · mac {ti.get('mac','?')}")
+            negotiated = negotiated_summary(ti)
+            if negotiated:
+                self._vlog(f"Negotiated: {negotiated}")
             self._vlog(f"SFTP session opened, home folder {home}", "ok")
             self._sweep_scratch_files()
             return {"ok": True, "home": home, "cwd": start, "transport": ti}
@@ -1429,10 +1435,11 @@ class Api:
         return {"known": True, "host": host, "entries": entries}
 
     def _transport_info(self, client=None):
+        # Key exchange is not reported: paramiko discards the agreed method,
+        # and the server offer it was chosen from, once the handshake ends.
         try:
             t = (client or self.client).get_transport()
-            return {"cipher": t.remote_cipher, "kex": getattr(t, "kex_engine", ""),
-                    "mac": t.remote_mac}
+            return {"cipher": t.remote_cipher, "mac": t.remote_mac}
         except Exception:
             return {}
 
