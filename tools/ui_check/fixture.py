@@ -1,13 +1,14 @@
 """ui_drive fixture for the "smoke" scenario (tools/ui_check/ui_drive.json).
 
 Builds a small server folder and a small local folder, both under
-UI_DRIVE_OUT_DIR (drive.py deletes that whole folder once the run ends, so
-this fixture never has to clean up its own files), starts the same
-in-process test SFTP server the pytest fixtures use (tools/sftp_server_core.py)
-on 127.0.0.1, then prints one line of JSON with everything the scenario
-needs: the port, the login, the local folder to point the app's local pane
-at, the file names on each side, and a second port that was briefly bound
-and released so a connect to it is refused (used for the error-path check).
+UI_DRIVE_OUT_DIR (the whole run folder is deleted afterward by
+`drive.py cleanup`, not by drive.py itself at the end of the run, so this
+fixture never has to clean up its own files), starts the same in-process
+test SFTP server the pytest fixtures use (tools/sftp_server_core.py) on
+127.0.0.1, then prints one line of JSON with everything the scenario needs:
+the port, the login, the local folder to point the app's local pane at, the
+file names on each side, and a second port that was briefly bound and
+released so a connect to it is refused (used for the error-path check).
 
 Stays running (does nothing) until drive.py tears down the job.
 """

@@ -6,7 +6,7 @@
   "scenarios": {
     "smoke": {
       "script": "tools/ui_check/smoke.js",
-      "fixture": "tools/ui_check/sftp_fixture.py",
+      "fixture": "tools/ui_check/fixture.py",
       "timeout_s": 180
     }
   }

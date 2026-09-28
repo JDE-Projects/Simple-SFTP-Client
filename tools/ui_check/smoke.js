@@ -1,6 +1,6 @@
 // ui_drive scenario for Simple SFTP Client (see build-tools/ui_drive/README.md
 // for the helpers and how this is launched). Drives the real pywebview
-// window against tools/ui_check/sftp_fixture.py's throwaway in-process SFTP
+// window against tools/ui_check/fixture.py's throwaway in-process SFTP
 // server, over the app's real connect path: host, port, username and
 // password are typed into the form, and the host-key prompt is accepted
 // through the UI, the same way a person would.
