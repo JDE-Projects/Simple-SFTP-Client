@@ -1,5 +1,5 @@
 """Api service modules."""
 
-from app.services import updates, window
+from app.services import keys, updates, window
 
-__all__ = ["updates", "window"]
+__all__ = ["keys", "updates", "window"]
