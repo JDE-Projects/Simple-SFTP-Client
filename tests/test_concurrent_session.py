@@ -222,7 +222,7 @@ def test_shutdown_discards_pending_watch_refresh(sftp_env, wait_until):
     (local_dir / "disconnect.txt").write_bytes(b"done")
     wait_until(lambda: (server_root / "disconnect.txt").exists())
 
-    assert api.shutdown()["ok"] is True
+    assert api._shutdown()["ok"] is True
     assert api.poll_queue()["watch_refresh"] == []
 
 
@@ -252,7 +252,7 @@ def test_shutdown_blocks_a_straggling_watcher_from_readding_refresh(
     wait_until(gate_entered.is_set)
     thread = api._watch_thread
 
-    assert api.shutdown()["ok"] is True
+    assert api._shutdown()["ok"] is True
     release_gate.set()
     thread.join(5)
 

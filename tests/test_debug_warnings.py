@@ -49,7 +49,7 @@ def test_on_warning_never_calls_evaluate_js():
             raise AssertionError("evaluate_js must never be called from on_warning")
 
     fake_window = FakeWindow()
-    api.set_window(fake_window)
+    api._set_window(fake_window)
 
     api._on_debug_warning("Debug log: write failed.")
 

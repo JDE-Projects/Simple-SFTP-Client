@@ -113,18 +113,30 @@ def test_pywebview_version_matches_copied_discovery_rules():
     )
 
 
-def test_html_bridge_calls_are_exposed():
+def _html_called_names():
+    """Return every Api method name the page calls."""
     html = HTML_PATH.read_text(encoding="utf-8")
     api_calls = set(re.findall(r"\bAPI\.([A-Za-z_]\w*)", html))
     direct_calls = set(re.findall(
         r"\bwindow\.pywebview\.api\.([A-Za-z_]\w*)", html
     ))
-    called_names = api_calls | direct_calls
+    return api_calls | direct_calls
+
+
+def test_html_bridge_calls_are_exposed():
+    called_names = _html_called_names()
 
     assert called_names
     assert {"connect", "save_theme"} <= called_names
     missing = sorted(called_names - set(build_manifest()))
     assert not missing, f"HTML bridge calls missing from manifest: {missing}"
+
+
+def test_every_exposed_name_is_called_by_the_page():
+    uncalled = sorted(set(build_manifest()) - _html_called_names())
+    assert not uncalled, (
+        f"Exposed to the page but never called by it (prefix with _): {uncalled}"
+    )
 
 
 if __name__ == "__main__":

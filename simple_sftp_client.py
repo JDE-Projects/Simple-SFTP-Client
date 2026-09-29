@@ -205,14 +205,14 @@ def main():
         "Simple SFTP Client", url=resource_path("simple_sftp_client-UI.html"),
         js_api=api, width=1480, height=980, min_size=(1000, 700),
         background_color="#0a0e14")
-    api.set_window(window)
+    api._set_window(window)
 
     def _wire_external_drop():
         # Let users drag files in from Windows Explorer onto the remote pane.
         try:
             pane = window.dom.get_element("#paneRemote")
             if pane:
-                pane.events.drop += api.on_external_drop
+                pane.events.drop += api._on_external_drop
                 debug.log("External drop wired on remote pane")
         except Exception as e:
             debug.log("wire external drop failed", str(e))
@@ -239,7 +239,7 @@ def main():
         if api._transfers_active() and not api._quit_confirmed:
             threading.Thread(target=lambda: api._emit("quit-confirm", {}), daemon=True).start()
             return False
-        api.shutdown()
+        api._shutdown()
         _save_geometry(window)
         return True
     window.events.closing += _on_closing

@@ -184,6 +184,6 @@ def test_disconnect_cleanup_leaves_compares_empty(sftp_env, wait_for_compare):
     wait_for_compare(api, kind="sync")
     assert api._compares != {}
 
-    api.shutdown()
+    api._shutdown()
 
     assert api._compares == {}

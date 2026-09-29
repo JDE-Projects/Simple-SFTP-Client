@@ -63,9 +63,6 @@
   ],
   "list_remote": [],
   "make_dir": [],
-  "on_external_drop": [
-    "event"
-  ],
   "open_local": [
     "path",
     "name"
@@ -91,10 +88,6 @@
   "set_debug": [
     "on"
   ],
-  "set_window": [
-    "w"
-  ],
-  "shutdown": [],
   "start_sync": [
     "token",
     "on_conflict"

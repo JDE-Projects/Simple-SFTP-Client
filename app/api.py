@@ -76,7 +76,7 @@ class Api:
         # key (see _mtime_fallback_key) to the file size recorded at transfer
         # time, so a later same-size compare on this connection still reads
         # the file as unchanged instead of newer_local/newer_remote forever.
-        # Cleared on disconnect (see shutdown()): it does not survive a
+        # Cleared on disconnect (see _shutdown()): it does not survive a
         # reconnect.
         self._mtime_fallback = {}
         self._mtime_fallback_lock = threading.Lock()
@@ -103,7 +103,7 @@ class Api:
         self._compare_lock = threading.Lock()
         self._compares = {}
         self._compare_next_id = 1
-        # One idempotent teardown path (see shutdown()): guards Disconnect,
+        # One idempotent teardown path (see _shutdown()): guards Disconnect,
         # window close, and a plain process exit from ever running the close
         # sequence twice. Cleared again on the next successful connect() so a
         # later disconnect runs the full sequence again.
@@ -128,7 +128,7 @@ class Api:
         self._debug_warnings = []
         self._debug_warnings_lock = threading.Lock()
 
-    def set_window(self, w):
+    def _set_window(self, w):
         return services.window.set_window(self, w)
 
     def get_meta(self):
@@ -214,7 +214,7 @@ class Api:
     def disconnect(self):
         return services.connections.disconnect(self)
 
-    def shutdown(self):
+    def _shutdown(self):
         return services.window.shutdown(self)
 
     def _transfers_active(self):
@@ -338,7 +338,7 @@ class Api:
     def _normalize_drop_path(p):
         return services.transfers._normalize_drop_path(p)
 
-    def on_external_drop(self, event):
+    def _on_external_drop(self, event):
         return services.transfers.on_external_drop(self, event)
 
     def _one(self, direction, lp, rp, name, idx, total, on_conflict, sftp,

@@ -194,7 +194,7 @@ def main(argv):
         subprocess.run(["taskkill", "/PID", str(edge.pid), "/T", "/F"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            api.shutdown()
+            api._shutdown()
         except Exception:
             pass
         httpd.shutdown()

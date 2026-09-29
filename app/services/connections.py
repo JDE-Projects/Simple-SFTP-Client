@@ -319,10 +319,10 @@ def test_connection(api, p):
 
 
 def disconnect(api):
-    """Wired to the Disconnect button. shutdown() is the one teardown
+    """Wired to the Disconnect button. _shutdown() is the one teardown
     path; this just runs it and gives the UI the return shape it
     expects."""
-    api.shutdown()
+    api._shutdown()
     debug.log("DISCONNECTED")
     return {"ok": True}
 
