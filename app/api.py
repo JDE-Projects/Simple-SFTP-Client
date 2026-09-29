@@ -345,11 +345,11 @@ class Api:
              cancel_check, progress_key=None, dir_cache=None):
         return services.transfers._one(self, direction, lp, rp, name, idx, total, on_conflict, sftp, cancel_check, progress_key, dir_cache)
 
-    def _put_resume(self, sftp, lp, rp, offset, cb, cancel_check):
-        return services.transfer_io._put_resume(self, sftp, lp, rp, offset, cb, cancel_check)
+    def _put_file(self, sftp, lp, rp, cb, cancel_check):
+        return services.transfer_io._put_file(self, sftp, lp, rp, cb, cancel_check)
 
-    def _get_resume(self, sftp, rp, lp, offset, cb, cancel_check):
-        return services.transfer_io._get_resume(self, sftp, rp, lp, offset, cb, cancel_check)
+    def _get_file(self, sftp, rp, lp, cb, cancel_check):
+        return services.transfer_io._get_file(self, sftp, rp, lp, cb, cancel_check)
 
     def _progress(self, name, idx, total, sent, size, elapsed, progress_key=None):
         return services.transfers._progress(self, name, idx, total, sent, size, elapsed, progress_key)
