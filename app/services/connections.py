@@ -71,7 +71,7 @@ def _open(api, host, port, username, password, key_path, passphrase):
         # policy raises back through connect(), can still leave a
         # partially opened transport on this freshly created client.
         # Close it before the exception reaches connect(), which never
-        # touches self.client/self.sftp on failure (see _close_partial).
+        # touches self._client/self._sftp on failure (see _close_partial).
         try:
             client.close()
         except Exception:
@@ -82,7 +82,7 @@ def _open(api, host, port, username, password, key_path, passphrase):
 
 def _close_partial(api, client, sftp):
     """Close a client/sftp pair from a connect attempt that did not fully
-    succeed, without ever touching self.client/self.sftp. Used so a
+    succeed, without ever touching self._client/self._sftp. Used so a
     failed connect (or a failed reconnect while a prior attempt's
     resources are still being torn down) can never leak a socket or
     clobber a still-good prior connection's state."""
@@ -132,9 +132,9 @@ def connect(api, p):
         except Exception:
             start = home
         # Commit only now that all setup has fully succeeded.
-        api.client = new_client
-        api.sftp = new_sftp
-        api.connected = True
+        api._client = new_client
+        api._sftp = new_sftp
+        api._connected = True
         api._shutdown_done = False
         api._conn_dead_reported = False
         # Cache the password only now that the login has fully succeeded,
@@ -279,7 +279,7 @@ def _transport_info(api, client=None):
     # Key exchange is not reported: paramiko discards the agreed method,
     # and the server offer it was chosen from, once the handshake ends.
     try:
-        t = (client or api.client).get_transport()
+        t = (client or api._client).get_transport()
         return {"cipher": t.remote_cipher, "mac": t.remote_mac}
     except Exception:
         return {}
@@ -335,7 +335,7 @@ def _connection_dead(api, sftp):
     _worker_loop to stop a whole batch at once instead of retrying every
     remaining item into a wall of per-file errors."""
     try:
-        transport = api.client.get_transport() if api.client else None
+        transport = api._client.get_transport() if api._client else None
         if transport is None or not transport.is_active():
             return True
     except Exception:
@@ -363,6 +363,6 @@ def _report_dead_connection(api):
         api._conn_dead_reported = True
     api._stop_all_scans()
     api._stop_all_compares()
-    stranded = api.queue.fail_waiting("Connection lost")
+    stranded = api._queue.fail_waiting("Connection lost")
     suffix = f" ({stranded} queued item(s) failed)" if stranded else ""
     api._worker_log(f"Connection lost. Remaining transfers stopped.{suffix}", "error")

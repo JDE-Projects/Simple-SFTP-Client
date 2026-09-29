@@ -33,8 +33,8 @@ def test_browsing_calls_never_overlap_on_the_shared_session(sftp_env):
 
     active = {"n": 0, "max": 0}
     track_lock = threading.Lock()
-    orig_list = api.sftp.listdir_attr
-    orig_stat = api.sftp.stat
+    orig_list = api._sftp.listdir_attr
+    orig_stat = api._sftp.stat
 
     def instrument(orig):
         def wrapped(*a, **k):
@@ -49,8 +49,8 @@ def test_browsing_calls_never_overlap_on_the_shared_session(sftp_env):
                     active["n"] -= 1
         return wrapped
 
-    api.sftp.listdir_attr = instrument(orig_list)
-    api.sftp.stat = instrument(orig_stat)
+    api._sftp.listdir_attr = instrument(orig_list)
+    api._sftp.stat = instrument(orig_stat)
 
     threads = []
     for _ in range(4):
@@ -297,14 +297,14 @@ def test_watch_waits_for_a_file_to_stop_changing_before_uploading(sftp_env, wait
     publish path commits to a given version of the file."""
     api, server_root, local_dir = sftp_env
     uploaded = []
-    real_rename = api.sftp.posix_rename
+    real_rename = api._sftp.posix_rename
 
     def recording_rename(oldpath, newpath):
-        with api.sftp.open(oldpath, "rb") as f:
+        with api._sftp.open(oldpath, "rb") as f:
             uploaded.append(f.read())
         return real_rename(oldpath, newpath)
 
-    api.sftp.posix_rename = recording_rename
+    api._sftp.posix_rename = recording_rename
     api._watch_interval = 0.1  # slower than local_watch so we can change it mid-gate
 
     f = local_dir / "grow.txt"

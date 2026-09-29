@@ -118,7 +118,7 @@ def shutdown(api):
             return {"ok": True}
         api._shutdown_done = True
 
-    # Halt any background scan promptly: it also checks self.connected on
+    # Halt any background scan promptly: it also checks self._connected on
     # its own, but the explicit stop makes it exit immediately rather than
     # waiting for its next loop check.
     api._stop_all_scans()
@@ -139,7 +139,7 @@ def shutdown(api):
     # Cancel every queued/active transfer so the worker pool drains
     # promptly instead of grinding through retries against a session
     # about to be closed.
-    api.queue.cancel_all()
+    api._queue.cancel_all()
     api._cancel.set()
 
     # Snapshot the worker threads under the lock, then join outside it:
@@ -166,22 +166,22 @@ def shutdown(api):
     # cancelled above; this closes the shared session/transport that
     # workers open new sessions against and that the file browser uses.
     close_errors = []
-    if api.sftp is not None:
+    if api._sftp is not None:
         try:
-            api.sftp.close()
+            api._sftp.close()
         except Exception as e:
             close_errors.append(str(e))
-    if api.client is not None:
+    if api._client is not None:
         try:
-            api.client.close()
+            api._client.close()
         except Exception as e:
             close_errors.append(str(e))
     if close_errors:
         debug.log("SHUTDOWN: close error(s)", close_errors)
 
-    api.connected = False
-    api.client = None
-    api.sftp = None
+    api._connected = False
+    api._client = None
+    api._sftp = None
     api._cred_pass = ""
     api._cred_identity = None
     api._pending_host_key = None

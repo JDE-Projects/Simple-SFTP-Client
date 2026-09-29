@@ -20,7 +20,7 @@ Bound numbers referenced throughout:
   (capped at 64) plus a few items claimed as ACTIVE.
 - RETAIN_FINISHED (200, in transfer_queue.py): once more than this many items
   have completed/skipped, the oldest ones collapse into counters instead of
-  staying as objects in api.queue._items, which is what keeps a huge job's
+  staying as objects in api._queue._items, which is what keeps a huge job's
   memory flat.
 """
 import time
@@ -56,7 +56,7 @@ def _drive_synthetic_upload(api, monkeypatch, n, path_fn):
     single top-level folder, then run the pipeline to completion.
 
     Returns (max_waiting, max_items): the highest values seen for
-    api.queue.waiting() and len(api.queue._items) while the scan and the
+    api._queue.waiting() and len(api._queue._items) while the scan and the
     drain were both running. Sampling continues until the scan has stopped
     and nothing is left waiting or active, i.e. a true drain, not just an
     instant where the queue happens to look empty.
@@ -78,9 +78,9 @@ def _drive_synthetic_upload(api, monkeypatch, n, path_fn):
     max_items = 0
     deadline = time.time() + 30
     while time.time() < deadline:
-        max_waiting = max(max_waiting, api.queue.waiting())
-        max_items = max(max_items, len(api.queue._items))
-        if not api._scan_active() and api.queue.pending() == 0:
+        max_waiting = max(max_waiting, api._queue.waiting())
+        max_items = max(max_items, len(api._queue._items))
+        if not api._scan_active() and api._queue.pending() == 0:
             break
         # A short sleep, not a tight spin: a busy-looping sampler starves the
         # scanner/worker threads of the GIL and makes the whole batch far
@@ -108,7 +108,7 @@ def test_flat_directory_scan_holds_backpressure_and_completes_all(sftp_env, wait
     assert max_waiting <= SCAN_QUEUE_HIGH_WATER + 200
     # counts() folds pruned items back in, so this is accurate even though
     # most of the 50,000 completed items no longer exist as objects.
-    assert api.queue.counts()["completed"] == n
+    assert api._queue.counts()["completed"] == n
     # Bounded regardless of n: at most ~high-water items in flight plus at
     # most RETAIN_FINISHED finished ones kept as objects at any moment.
     assert max_items <= RETAIN_FINISHED + SCAN_QUEUE_HIGH_WATER + 300
@@ -126,7 +126,7 @@ def test_deep_tree_scan_holds_backpressure_and_completes_all(sftp_env, wait_for_
     wait_for_drain(api)
 
     assert max_waiting <= SCAN_QUEUE_HIGH_WATER + 200
-    assert api.queue.counts()["completed"] == n
+    assert api._queue.counts()["completed"] == n
     assert max_items <= RETAIN_FINISHED + SCAN_QUEUE_HIGH_WATER + 300
 
 
@@ -134,7 +134,7 @@ def test_bounded_memory_does_not_grow_with_batch_size(sftp_env, wait_for_drain, 
     """The core BLUEPRINT claim: the live item count is bounded by
     RETAIN_FINISHED plus the high-water mark, not by how many files the job
     has. Run the same bounded pipeline at two very different sizes and check
-    the peak object count barely moves between them; len(api.queue._items)
+    the peak object count barely moves between them; len(api._queue._items)
     is a robust, deterministic proxy for memory here; a wall-memory
     assertion would be flaky across machines and Python builds.
 
@@ -148,14 +148,14 @@ def test_bounded_memory_does_not_grow_with_batch_size(sftp_env, wait_for_drain, 
 
     _, small_peak = _drive_synthetic_upload(api, monkeypatch, n_small, _flat_path)
     wait_for_drain(api)
-    assert api.queue.counts()["completed"] == n_small
+    assert api._queue.counts()["completed"] == n_small
     # Clean slate before the second run: otherwise its peak would be
     # inflated by finished items still sitting in _items from the first run.
-    api.queue.clear_finished()
+    api._queue.clear_finished()
 
     _, large_peak = _drive_synthetic_upload(api, monkeypatch, n_large, _flat_path)
     wait_for_drain(api)
-    assert api.queue.counts()["completed"] == n_large
+    assert api._queue.counts()["completed"] == n_large
 
     # A few hundred items of slack, nowhere near the ~46,000-item gap there
     # would be if the item count scaled with n.
@@ -178,7 +178,7 @@ def test_runtime_scales_about_linearly_not_worse(sftp_env, monkeypatch):
     start = time.time()
     _drive_synthetic_upload(api, monkeypatch, n_small, _flat_path)
     small_elapsed = time.time() - start
-    api.queue.clear_finished()
+    api._queue.clear_finished()
 
     start = time.time()
     _drive_synthetic_upload(api, monkeypatch, n_large, _flat_path)
@@ -229,7 +229,7 @@ def test_cancel_all_stops_a_large_scan_before_it_finishes(sftp_env, monkeypatch)
         # in whatever state (waiting/active/cancelled/completed): well under
         # n is what proves the scan actually stopped early instead of
         # queuing the whole batch and only noticing cancel afterward.
-        counts = api.queue.counts()
+        counts = api._queue.counts()
         total_ever_queued = sum(counts.values())
         assert total_ever_queued < n
     finally:

@@ -117,7 +117,7 @@ def main(argv):
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect("127.0.0.1", port=port, username=USER, password=PASSWORD,
                        look_for_keys=False, allow_agent=False)
-        api.client, api.sftp, api.connected = client, client.open_sftp(), True
+        api._client, api._sftp, api._connected = client, client.open_sftp(), True
         return {"ok": True, "cwd": "/"}
 
     version = APP_VERSION

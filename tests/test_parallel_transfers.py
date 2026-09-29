@@ -27,7 +27,7 @@ def test_two_files_both_complete_with_matching_bytes(sftp_env, wait_for_drain, s
 
     wait_for_drain(api)
 
-    snap = {e["name"]: e for e in api.queue.snapshot()}
+    snap = {e["name"]: e for e in api._queue.snapshot()}
     assert snap["up.bin"]["state"] == COMPLETED
     assert snap["down.bin"]["state"] == COMPLETED
     assert (server_root / "up.bin").read_bytes() == up_data
@@ -66,7 +66,7 @@ def test_five_files_never_more_than_two_active_at_once(sftp_env, wait_for_drain)
     wait_for_drain(api)
 
     assert tracker["max"] == 2  # exactly WORKER_COUNT, not less, never more
-    snap = api.queue.snapshot()
+    snap = api._queue.snapshot()
     assert len(snap) == 5
     assert all(e["state"] == COMPLETED for e in snap)
 
@@ -78,14 +78,14 @@ def test_each_worker_uses_its_own_session_never_the_shared_one(sftp_env, wait_fo
         (local_dir / name).write_bytes(os.urandom(1024 * 1024))
 
     sessions = []
-    real_open_sftp = api.client.open_sftp
+    real_open_sftp = api._client.open_sftp
 
     def tracking_open_sftp(*args, **kwargs):
         s = real_open_sftp(*args, **kwargs)
         sessions.append(s)
         return s
 
-    api.client.open_sftp = tracking_open_sftp
+    api._client.open_sftp = tracking_open_sftp
 
     result = api.enqueue([{"name": n, "is_dir": False} for n in names], "upload",
                           str(local_dir), "/", "overwrite")
@@ -96,7 +96,7 @@ def test_each_worker_uses_its_own_session_never_the_shared_one(sftp_env, wait_fo
     assert len(sessions) == 2
     assert sessions[0] is not sessions[1]
     for s in sessions:
-        assert s is not api.sftp
+        assert s is not api._sftp
 
 
 def test_cancel_one_active_item_leaves_the_other_to_complete(
@@ -113,7 +113,7 @@ def test_cancel_one_active_item_leaves_the_other_to_complete(
     assert result["ok"] is True
 
     wait_for_queue_count(api, len(jobs))
-    snap = api.queue.snapshot()
+    snap = api._queue.snapshot()
     victim_id = next(e["id"] for e in snap if e["name"] == "victim.bin")
     survivor_id = next(e["id"] for e in snap if e["name"] == "survivor.bin")
 
@@ -143,7 +143,7 @@ def test_cancel_all_stops_both_active_items(sftp_env, wait_for_drain, wait_for_q
     assert result["ok"] is True
 
     wait_for_queue_count(api, len(names))
-    snap = api.queue.snapshot()
+    snap = api._queue.snapshot()
     ids = {e["name"]: e["id"] for e in snap}
 
     deadline = time.time() + 15
@@ -175,7 +175,7 @@ def test_mixed_upload_and_download_run_concurrently(sftp_env, wait_for_drain, st
 
     wait_for_drain(api)
 
-    snap = {e["name"]: e for e in api.queue.snapshot()}
+    snap = {e["name"]: e for e in api._queue.snapshot()}
     assert snap["mix_up.bin"]["state"] == COMPLETED
     assert snap["mix_down.bin"]["state"] == COMPLETED
     assert (server_root / "mix_up.bin").read_bytes() == up_data
@@ -198,7 +198,7 @@ def test_fully_sent_transfer_completes_even_if_cancel_arrives_right_at_the_end(s
         return calls["n"] > 1
 
     res = api._one("upload", str(local_dir / "onelast.bin"), "/onelast.bin", "onelast.bin",
-                    0, 1, "overwrite", api.sftp, cancel_check=cancel_check)
+                    0, 1, "overwrite", api._sftp, cancel_check=cancel_check)
 
     assert res == "ok"  # not "cancelled": every byte was already sent
     assert (server_root / "onelast.bin").read_bytes() == data
@@ -212,12 +212,12 @@ def test_queued_items_fail_visibly_when_no_worker_can_open_a_session(sftp_env, w
     for name in ["a.bin", "b.bin", "c.bin"]:
         (local_dir / name).write_bytes(os.urandom(1024))
 
-    # Make every worker's open_sftp() raise; the browsing session (api.sftp) is
+    # Make every worker's open_sftp() raise; the browsing session (api._sftp) is
     # already open and untouched by this.
     def boom():
         raise OSError("channel open refused")
 
-    api.client.open_sftp = boom
+    api._client.open_sftp = boom
 
     result = api.enqueue([{"name": n, "is_dir": False} for n in ["a.bin", "b.bin", "c.bin"]],
                           "upload", str(local_dir), "/", "overwrite")
@@ -225,7 +225,7 @@ def test_queued_items_fail_visibly_when_no_worker_can_open_a_session(sftp_env, w
 
     wait_for_drain(api)  # pending() hits 0 only because they went to FAILED
 
-    snap = api.queue.snapshot()
+    snap = api._queue.snapshot()
     assert all(e["state"] == FAILED for e in snap)
     assert all(e["error"] for e in snap)  # a visible reason on each
 
@@ -242,11 +242,11 @@ def test_snapshot_and_pending_agree_with_themselves(sftp_env, wait_for_drain):
 
     # Read the combined method and the two separate ones back to back; on a
     # single lock grab they must describe the same moment.
-    items, pending = api.queue.snapshot_and_pending()
+    items, pending = api._queue.snapshot_and_pending()
     assert pending == sum(1 for it in items if it["state"] in ("waiting", "active"))
 
     wait_for_drain(api)
 
-    items, pending = api.queue.snapshot_and_pending()
+    items, pending = api._queue.snapshot_and_pending()
     assert pending == 0
     assert all(it["state"] == COMPLETED for it in items)

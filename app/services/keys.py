@@ -204,28 +204,28 @@ def generate_key(api, key_type, out_path, passphrase, overwrite=False):
 
 
 def install_pubkey(api, pubtext):
-    if not api.connected:
+    if not api._connected:
         return {"ok": False, "error": "Not connected."}
     try:
-        home = api.sftp.normalize(".")
+        home = api._sftp.normalize(".")
         ssh_dir = posixpath.join(home, ".ssh")
         try:
-            api.sftp.stat(ssh_dir)
+            api._sftp.stat(ssh_dir)
         except Exception:
-            api.sftp.mkdir(ssh_dir)
-            api.sftp.chmod(ssh_dir, 0o700)
+            api._sftp.mkdir(ssh_dir)
+            api._sftp.chmod(ssh_dir, 0o700)
         ak = posixpath.join(ssh_dir, "authorized_keys")
         existing = ""
         try:
-            with api.sftp.open(ak, "r") as f:
+            with api._sftp.open(ak, "r") as f:
                 existing = f.read().decode()
         except Exception:
             pass
         if pubtext.split()[1] in existing:
             return {"ok": True, "already": True}
-        with api.sftp.open(ak, "a") as f:
+        with api._sftp.open(ak, "a") as f:
             f.write(("" if existing.endswith("\n") or not existing else "\n") + pubtext + "\n")
-        api.sftp.chmod(ak, 0o600)
+        api._sftp.chmod(ak, 0o600)
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": friendly_error(e)}

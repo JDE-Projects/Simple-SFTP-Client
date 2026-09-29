@@ -61,11 +61,11 @@ def _scan_wait_for_room(api, stop_event):
     has too many WAITING items, or is paused, so a huge scan cannot flood
     memory faster than the worker pool can drain it. Returns as soon as
     there is room, the scan is stopped, or the connection drops."""
-    while not stop_event.is_set() and api.connected:
-        if api.queue.waiting() >= constants.SCAN_QUEUE_HIGH_WATER:
+    while not stop_event.is_set() and api._connected:
+        if api._queue.waiting() >= constants.SCAN_QUEUE_HIGH_WATER:
             time.sleep(0.05)
             continue
-        if api.queue.is_paused():
+        if api._queue.is_paused():
             time.sleep(0.05)
             continue
         break
@@ -143,7 +143,7 @@ def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=Fa
     """Same as _iter_local but over an sftp session for a remote file or
     folder, again without creating any directories. sftp must be a
     session owned by the caller (the scanner opens its own, never
-    self.sftp, which stays reserved for the file browser). root is the
+    self._sftp, which stays reserved for the file browser). root is the
     local folder the user selected for this download; it stays fixed
     across the whole recursive walk so every level, however deep, is
     checked against the same boundary rather than its immediate parent.
@@ -230,7 +230,7 @@ def _scan_and_queue(api, roots, direction, on_conflict, scan_id, stop_event, loc
     try:
         if direction == "download":
             try:
-                sftp = api.client.open_sftp()
+                sftp = api._client.open_sftp()
             except Exception as e:
                 api._worker_log(
                     f"scan: could not open a transfer session: {friendly_error(e)}", "error")
@@ -241,7 +241,7 @@ def _scan_and_queue(api, roots, direction, on_conflict, scan_id, stop_event, loc
             if not batch:
                 return
             api._scan_wait_for_room(stop_event)
-            if stop_event.is_set() or not api.connected:
+            if stop_event.is_set() or not api._connected:
                 return
             found += len(batch)
             api._bump_scan_found(scan_id, len(batch))
@@ -250,20 +250,20 @@ def _scan_and_queue(api, roots, direction, on_conflict, scan_id, stop_event, loc
 
         stopped_early = False
         for lp, rp, is_dir in roots:
-            if stop_event.is_set() or not api.connected:
+            if stop_event.is_set() or not api._connected:
                 stopped_early = True
                 break
             gen = api._iter_local(lp, rp, is_dir, include_dirs=True) if direction == "upload" \
                 else api._iter_remote(sftp, rp, lp, is_dir, local_root, include_dirs=True)
             for triple in gen:
-                if stop_event.is_set() or not api.connected:
+                if stop_event.is_set() or not api._connected:
                     stopped_early = True
                     break
                 batch.append(triple)
                 batch_cap = min(64, constants.SCAN_QUEUE_HIGH_WATER) or 64
                 if len(batch) >= batch_cap:
                     flush()
-                    if stop_event.is_set() or not api.connected:
+                    if stop_event.is_set() or not api._connected:
                         stopped_early = True
                         break
             if stopped_early:
@@ -271,7 +271,7 @@ def _scan_and_queue(api, roots, direction, on_conflict, scan_id, stop_event, loc
         flush()
         if stop_event.is_set():
             api._worker_log(f"Scan stopped ({found} file(s) queued before stopping)", "warn")
-        elif not api.connected:
+        elif not api._connected:
             api._worker_log(f"Scan halted: disconnected ({found} file(s) queued)", "warn")
         elif found:
             api._worker_log(f"Scan complete: {found} file(s) queued")

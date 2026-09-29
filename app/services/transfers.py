@@ -21,7 +21,7 @@ def cancel(api):
     which is not on the per-item flag."""
     api._stop_all_scans()
     api._stop_all_compares()
-    api.queue.cancel_all()
+    api._queue.cancel_all()
     api._cancel.set()
     return {"ok": True}
 
@@ -41,7 +41,7 @@ def poll_queue(api):
                     and api._watch_thread.is_alive()
                     and api._watch_stop is not None
                     and not api._watch_stop.is_set())
-    items, pending = api.queue.snapshot_and_pending()
+    items, pending = api._queue.snapshot_and_pending()
     active_ids = [it["id"] for it in items if it["state"] == "active"]
     with api._progress_lock:
         progress = {str(k): v for k, v in api._progress_by_id.items()}
@@ -79,7 +79,7 @@ def poll_queue(api):
         "console": lines,
         "watch_refresh": watch_refresh,
         "watching": watching,
-        "paused": api.queue.is_paused(),
+        "paused": api._queue.is_paused(),
         # A background scan (enqueue/upload_paths) queues files as it
         # finds them, so the UI needs its own signal to show "Scanning…
         # N found" and read accurate totals even after old items have
@@ -92,7 +92,7 @@ def poll_queue(api):
         "comparing": api._compare_active(),
         "compare_found": api._compare_found_total(),
         "compare_done": compare_done,
-        "counts": api.queue.counts(),
+        "counts": api._queue.counts(),
         "debug_warnings": api._drain_debug_warnings(),
         "debug_enabled": debug.is_enabled(),
     }
@@ -102,24 +102,24 @@ def cancel_item(api, item_id):
     """Cancel a single queued item. Waiting items go straight to cancelled;
     an active item is flagged (TransferItem.cancel_requested) so whichever
     worker owns it interrupts its byte loop and finalizes it."""
-    api.queue.cancel(item_id)
+    api._queue.cancel(item_id)
     return {"ok": True}
 
 
 def clear_finished(api):
     """Remove completed/failed/cancelled/skipped items so the window can
     re-render the queue without the clutter of finished transfers."""
-    api.queue.clear_finished()
-    items, pending = api.queue.snapshot_and_pending()
+    api._queue.clear_finished()
+    items, pending = api._queue.snapshot_and_pending()
     return {"items": items, "pending": pending}
 
 
 def retry_item(api, item_id):
     """One-click retry: put a failed or cancelled queue item back in line and
     wake the worker pool. Wired to the ↻ control on failed/cancelled rows."""
-    if not api.connected:
+    if not api._connected:
         return {"ok": False, "error": "Not connected."}
-    if not api.queue.requeue(item_id):
+    if not api._queue.requeue(item_id):
         return {"ok": False, "error": "That item can't be retried."}
     api._ensure_worker()
     return {"ok": True}
@@ -128,9 +128,9 @@ def retry_item(api, item_id):
 def retry_all_failed(api):
     """Put every FAILED item back in line and wake the worker pool.
     Wired to a footer "retry all failed" control."""
-    if not api.connected:
+    if not api._connected:
         return {"ok": False, "error": "Not connected."}
-    n = api.queue.retry_all_failed()
+    n = api._queue.retry_all_failed()
     api._ensure_worker()
     return {"ok": True, "requeued": n}
 
@@ -139,7 +139,7 @@ def pause_queue(api):
     """Pause the queue: stop claiming new items. Files already mid-transfer
     are left to finish; the worker pool winds down once they do. Wired to the
     footer Pause control."""
-    api.queue.pause()
+    api._queue.pause()
     api._worker_log("Pausing queue…")
     return {"ok": True}
 
@@ -147,9 +147,9 @@ def pause_queue(api):
 def resume_queue(api):
     """Resume a paused queue and wake the worker pool to drain the waiting
     items in order."""
-    if not api.connected:
+    if not api._connected:
         return {"ok": False, "error": "Not connected."}
-    api.queue.resume()
+    api._queue.resume()
     api._worker_log("Resuming queue")
     api._ensure_worker()
     return {"ok": True}
@@ -165,7 +165,7 @@ def enqueue(api, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"
     time, with backpressure so the queue never balloons ahead of what the
     worker pool can drain. See _scan_and_queue and poll_queue's
     "scanning"/"scan_found" keys for how the UI observes progress."""
-    if not api.connected:
+    if not api._connected:
         return {"ok": False, "error": "Not connected."}
     if api._legacy_active.is_set():
         return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}
@@ -215,7 +215,7 @@ def _enqueue_files(api, files, direction, on_conflict):
         name = os.path.basename(lp)
         sizes.append(size)
         queue_size = size if size and size > 0 else 0
-        api.queue.append(direction, lp, rp, name, size=queue_size, on_conflict=on_conflict,
+        api._queue.append(direction, lp, rp, name, size=queue_size, on_conflict=on_conflict,
                            is_dir=is_dir)
     batch_target = worker_target(sizes)
     with api._worker_lock:
@@ -233,10 +233,10 @@ def _ensure_worker(api):
     same lock a worker retires itself with, so starting and stopping
     workers can never overlap and leave the pool in the wrong state."""
     with api._worker_lock:
-        if api.queue.is_paused():
+        if api._queue.is_paused():
             return
         api._workers = [w for w in api._workers if w.is_alive()]
-        while len(api._workers) < api._target_workers and api.queue.waiting() > 0:
+        while len(api._workers) < api._target_workers and api._queue.waiting() > 0:
             w = threading.Thread(target=api._worker_loop, daemon=True)
             api._workers.append(w)
             w.start()
@@ -247,7 +247,7 @@ def _worker_loop(api):
     self._target_workers (WORKER_COUNT by default, up to WORKER_COUNT_MAX
     for a batch of many small files) workers running concurrently. Each
     worker opens its own SFTP session
-    here and closes it on exit; workers never touch self.sftp, that stays
+    here and closes it on exit; workers never touch self._sftp, that stays
     reserved for the file browser. done_count/total are only for the
     progress display, an approximation is fine there (each worker only
     knows its own done_count).
@@ -258,12 +258,12 @@ def _worker_loop(api):
     for the window to pull via poll_queue()."""
     me = threading.current_thread()
     try:
-        if not api.connected or api.client is None:
+        if not api._connected or api._client is None:
             # Disconnected before this worker could start. Give a plain
             # reason instead of leaking a raw "'NoneType' has no attribute
             # open_sftp" from the line below.
             raise ConnectionError("disconnected before the transfer started")
-        sftp = api.client.open_sftp()
+        sftp = api._client.open_sftp()
     except Exception as e:
         reason = str(e).strip() or e.__class__.__name__
         # No silent failure: surface it in the console log and let this
@@ -279,7 +279,7 @@ def _worker_loop(api):
                 # Last worker out and none could open a session: don't leave
                 # queued items sitting as WAITING with nothing to drain them.
                 # Mark them failed so the failure is visible in the queue.
-                stranded = api.queue.fail_waiting(f"transfer session unavailable: {reason}")
+                stranded = api._queue.fail_waiting(f"transfer session unavailable: {reason}")
                 if stranded:
                     api._worker_log(
                         f"{stranded} queued item(s) marked failed: no transfer session",
@@ -292,7 +292,7 @@ def _worker_loop(api):
     try:
         done_count = 0
         while True:
-            item = api.queue.claim()
+            item = api._queue.claim()
             if item is None:
                 # Decide whether to stop under the same lock _ensure_worker
                 # starts workers with, and re-check the queue while holding
@@ -308,8 +308,8 @@ def _worker_loop(api):
                 # the worker would just busy-loop on those items instead
                 # of winding down.
                 with api._worker_lock:
-                    paused = api.queue.is_paused()
-                    if api.queue.waiting() == 0 or paused:
+                    paused = api._queue.is_paused()
+                    if api._queue.waiting() == 0 or paused:
                         if me in api._workers:
                             api._workers.remove(me)
                         # Only the last worker to leave clears pool-wide
@@ -318,12 +318,12 @@ def _worker_loop(api):
                         if not api._workers:
                             with api._progress_lock:
                                 api._progress_by_id = {}
-                            if api.queue.is_paused() and api.queue.waiting() > 0:
+                            if api._queue.is_paused() and api._queue.waiting() > 0:
                                 # Paused with items still held: leave the target
                                 # alone so a resume drains the rest at the count
                                 # this batch was scaled to, not the default.
                                 api._worker_log(
-                                    f"Queue paused ({api.queue.waiting()} still waiting)")
+                                    f"Queue paused ({api._queue.waiting()} still waiting)")
                             else:
                                 # Reached the empty queue (paused with nothing
                                 # left, or a normal drain). Reset the pool target
@@ -332,19 +332,19 @@ def _worker_loop(api):
                                 # the next batch is not held back by a pause that
                                 # belonged to a queue now emptied.
                                 api._target_workers = WORKER_COUNT
-                                api.queue.resume()
-                                counts = api.queue.counts()
+                                api._queue.resume()
+                                counts = api._queue.counts()
                                 api._worker_log(
                                     f"Queue drained: {counts.get('completed', 0)} completed, "
                                     f"{counts.get('failed', 0)} failed, {counts.get('cancelled', 0)} cancelled, "
                                     f"{counts.get('skipped', 0)} skipped")
                         break
                 continue
-            total = done_count + api.queue.pending()
+            total = done_count + api._queue.pending()
             if item.cancel_requested:
                 # cancel() on a waiting item goes straight to CANCELLED, so this
                 # should not happen in practice, but guard anyway.
-                api.queue.mark_cancelled(item.id)
+                api._queue.mark_cancelled(item.id)
                 api._worker_log(f"cancelled {item.name}", "warn")
                 done_count += 1
                 continue
@@ -389,13 +389,13 @@ def _worker_loop(api):
                 # of truth here, not a flag re-check after the fact, which
                 # could mislabel a file that finished sending its very last
                 # byte the instant cancel arrived.
-                api.queue.mark_cancelled(item.id)
+                api._queue.mark_cancelled(item.id)
                 api._worker_log(f"cancelled {item.name}", "warn")
             elif res == "skip":
-                api.queue.mark_skipped(item.id)
+                api._queue.mark_skipped(item.id)
                 api._worker_log(f"skip {item.name} (already up to date)")
             elif ok:
-                api.queue.mark_completed(item.id)
+                api._queue.mark_completed(item.id)
                 if item.is_dir:
                     if item.direction == "upload":
                         api._worker_log(f"{arrow} folder {item.remote_path}", "ok")
@@ -404,7 +404,7 @@ def _worker_loop(api):
                 else:
                     api._worker_log(f"{arrow} {(item.remote_path if item.direction == 'upload' else item.name)}", "ok")
             else:
-                api.queue.mark_failed(item.id, last_err or "transfer failed")
+                api._queue.mark_failed(item.id, last_err or "transfer failed")
                 api._worker_log(f"failed {item.name}", "error")
             done_count += 1
             with api._progress_lock:
@@ -423,7 +423,7 @@ def _worker_loop(api):
             if not api._workers:
                 # Leave the target alone during a pause-hold so a resume drains
                 # the rest at the scaled count; any real drain resets it.
-                if not (api.queue.is_paused() and api.queue.waiting() > 0):
+                if not (api._queue.is_paused() and api._queue.waiting() > 0):
                     api._target_workers = WORKER_COUNT
                 with api._progress_lock:
                     api._progress_by_id = {}
@@ -435,7 +435,7 @@ def upload_paths(api, paths, remote_dir, on_conflict="overwrite"):
     here (cheap: one isdir check each); the actual folder contents stream
     in via the same background scan as enqueue(), so a huge dropped folder
     does not block this call."""
-    if not api.connected:
+    if not api._connected:
         return {"ok": False, "error": "Not connected."}
     if api._legacy_active.is_set():
         return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}
@@ -583,7 +583,7 @@ def _transfers_active(api):
     (see transfers_active()). True when the queue has waiting or active
     items, a background scan is still walking a folder, or any worker
     thread is alive."""
-    if api.queue.pending() > 0:
+    if api._queue.pending() > 0:
         return True
     if api._scan_active():
         return True
@@ -649,9 +649,9 @@ def _make_dir(api, direction, local_path, remote_path, sftp, dir_cache=None):
 
 def _ensure_remote_dir(api, path, sftp=None):
     """Create path and any missing parents over sftp (defaults to
-    self.sftp, which the folder watcher uses under _sftp_lock; a worker
+    self._sftp, which the folder watcher uses under _sftp_lock; a worker
     passes its own session, never the shared browsing one)."""
-    sftp = api.sftp if sftp is None else sftp
+    sftp = api._sftp if sftp is None else sftp
     parts = path.strip("/").split("/")
     cur = "/"
     for part in parts:

@@ -13,12 +13,12 @@ from app.transfer_queue import COMPLETED, SKIPPED
 
 
 def _enqueue_one(api, direction, local_dir, remote_dir, name, on_conflict, wait_for_queue_count):
-    before = len(api.queue.snapshot())
+    before = len(api._queue.snapshot())
     result = api.enqueue([{"name": name, "is_dir": False}], direction,
                           str(local_dir), remote_dir, on_conflict)
     assert result["ok"] is True
     wait_for_queue_count(api, before + 1)
-    return api.queue.snapshot()[-1]["id"]
+    return api._queue.snapshot()[-1]["id"]
 
 
 def test_download_preserves_remote_mtime(sftp_env, wait_for_queue_count, wait_for_drain, state_of):
@@ -126,7 +126,7 @@ def test_upload_fallback_makes_compare_read_same(
     wait_for_drain(api)
     assert state_of(api, item_id)["state"] == COMPLETED
 
-    result = api._compute_compare(api.sftp, str(local_dir), "/")
+    result = api._compute_compare(api._sftp, str(local_dir), "/")
     assert result["files"][name] == "same"
 
 
@@ -166,12 +166,12 @@ def test_upload_fallback_invalidated_by_real_size_change(
     assert state_of(api, item_id)["state"] == COMPLETED
 
     # Confirm the fallback is in play before the edit.
-    result = api._compute_compare(api.sftp, str(local_dir), "/")
+    result = api._compute_compare(api._sftp, str(local_dir), "/")
     assert result["files"][name] == "same"
 
     local_path.write_bytes(data + os.urandom(128))
 
-    result2 = api._compute_compare(api.sftp, str(local_dir), "/")
+    result2 = api._compute_compare(api._sftp, str(local_dir), "/")
     assert result2["files"][name] == "newer_local"
 
 
@@ -206,7 +206,7 @@ def test_download_without_remote_time_makes_compare_read_same(
     name = "down.bin"
     _download_without_remote_time(api, server_root, local_dir, name,
                                   wait_for_queue_count, wait_for_drain, state_of)
-    result = api._compute_compare(api.sftp, str(local_dir), "/")
+    result = api._compute_compare(api._sftp, str(local_dir), "/")
     assert result["files"][name] == "same"
 
 
@@ -230,12 +230,12 @@ def test_download_without_remote_time_invalidated_by_real_size_change(
     name = "down.bin"
     data = _download_without_remote_time(api, server_root, local_dir, name,
                                          wait_for_queue_count, wait_for_drain, state_of)
-    result = api._compute_compare(api.sftp, str(local_dir), "/")
+    result = api._compute_compare(api._sftp, str(local_dir), "/")
     assert result["files"][name] == "same"
 
     (server_root / name).write_bytes(data + os.urandom(128))
 
-    result2 = api._compute_compare(api.sftp, str(local_dir), "/")
+    result2 = api._compute_compare(api._sftp, str(local_dir), "/")
     assert result2["files"][name] != "same"
 
 

@@ -81,7 +81,7 @@ def test_paused_scaled_batch_keeps_its_target_then_resets_on_drain(
     # eight small files in the batch -> the pool scales to the max
     assert api._target_workers == WORKER_COUNT_MAX
 
-    snap = api.queue.snapshot()
+    snap = api._queue.snapshot()
     big_ids = [next(e["id"] for e in snap if e["name"] == n) for n in bigs]
 
     # wait until both bigs are active, then pause while smalls sit behind them
@@ -101,14 +101,14 @@ def test_paused_scaled_batch_keeps_its_target_then_resets_on_drain(
             break
         time.sleep(0.02)
 
-    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    states = {e["name"]: e["state"] for e in api._queue.snapshot()}
     assert any(states[n] == WAITING for n in smalls)
     # the pause-hold left the target alone: a resume will use the scaled count
     assert api._target_workers == WORKER_COUNT_MAX
 
     assert api.resume_queue() == {"ok": True}
     wait_for_drain(api)
-    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    states = {e["name"]: e["state"] for e in api._queue.snapshot()}
     for name in smalls:
         assert states[name] == COMPLETED
     # a genuine drain resets the target back to the default

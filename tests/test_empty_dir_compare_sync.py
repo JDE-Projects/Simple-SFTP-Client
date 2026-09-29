@@ -33,7 +33,7 @@ def _by_name(plan):
 
 
 def _sync(api, local_dir, direction, changed_only=True):
-    return api._compute_sync(api.sftp, str(local_dir), "/", direction, changed_only)
+    return api._compute_sync(api._sftp, str(local_dir), "/", direction, changed_only)
 
 
 # ───────────── compare: empty folders ─────────────
@@ -42,7 +42,7 @@ def test_local_only_empty_folder_appears_in_folders_map(sftp_env):
     api, _server_root, local_dir = sftp_env
     (local_dir / "empty_local").mkdir()
 
-    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert data["folders"]["empty_local"] == "local_only"
     assert "empty_local" not in data["files"]
 
@@ -51,7 +51,7 @@ def test_remote_only_empty_folder_appears_in_folders_map(sftp_env):
     api, server_root, local_dir = sftp_env
     (server_root / "empty_remote").mkdir()
 
-    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert data["folders"]["empty_remote"] == "remote_only"
     assert "empty_remote" not in data["files"]
 
@@ -61,7 +61,7 @@ def test_empty_folder_on_both_sides_is_same_and_not_reported(sftp_env):
     (local_dir / "both_empty").mkdir()
     (server_root / "both_empty").mkdir()
 
-    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert "both_empty" not in data["folders"]
     assert "both_empty" not in data["files"]
 
@@ -70,14 +70,14 @@ def test_nested_empty_folders_are_represented(sftp_env):
     api, _server_root, local_dir = sftp_env
     (local_dir / "top" / "mid" / "leaf").mkdir(parents=True)
 
-    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert data["folders"]["top/mid/leaf"] == "local_only"
 
 
 def test_compared_root_itself_never_appears_in_either_map(sftp_env):
     api, _server_root, local_dir = sftp_env
     # both sides of the compared root are empty: "." must never be a key
-    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert "." not in data["files"]
     assert "." not in data["folders"]
 
@@ -158,7 +158,7 @@ def test_file_on_one_side_folder_on_other_classifies_as_conflict(sftp_env):
     _put_local(local_dir, "clash", b"a local file")
     (server_root / "clash").mkdir()
 
-    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert data["files"]["clash"] == "conflict"
     assert data["folders"]["clash"] == "conflict"
 
@@ -209,7 +209,7 @@ def test_file_only_compare_and_sync_are_unaffected(sftp_env):
     _put_local(local_dir, "top/same.txt", data_bytes)
     _put_remote(api, server_root, "top/same.txt", data_bytes)
 
-    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert data["files"]["top/new.txt"] == "local_only"
     assert data["files"]["top/same.txt"] == "same"
     assert data["folders"]["top"] == "has_changes"

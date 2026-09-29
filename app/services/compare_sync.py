@@ -277,7 +277,7 @@ def _compare_found_total(api):
 def _run_compare(api, cid, local_dir, remote_dir, stop_event, direction=None, changed_only=True):
     """Runs a compare or a sync-plan computation entirely on its own
     daemon thread, never the pywebview bridge thread, over its own sftp
-    session (self.sftp stays reserved for the file browser). kind is
+    session (self._sftp stays reserved for the file browser). kind is
     read off the registered entry: "compare" stores the recursive
     files/folders result; "sync" stores a plan summary and stashes the
     full transfer list on the entry for start_sync() to stream later.
@@ -300,7 +300,7 @@ def _run_compare(api, cid, local_dir, remote_dir, stop_event, direction=None, ch
     sftp = None
     try:
         try:
-            sftp = api.client.open_sftp()
+            sftp = api._client.open_sftp()
         except Exception as e:
             reason = friendly_error(e)
             api._worker_log(f"compare: could not open a transfer session: {reason}", "error")
@@ -354,7 +354,7 @@ def compare(api, local_dir, remote_dir):
     Deliberately not @_browsing: it must not hold the shared browsing
     session lock, since it walks over its own sftp session and can take
     a long time on a big tree."""
-    if not api.connected:
+    if not api._connected:
         return {"ok": False, "error": "Not connected."}
     if api._compare_active():
         return {"ok": False, "error": "A compare or sync is already running."}
@@ -377,7 +377,7 @@ def sync_plan(api, local_dir, remote_dir, direction, changed_only=True):
     discard_sync()), but if the page never gets the chance (a reload
     while a plan is still on screen), this keeps at most one unconsumed
     plan around instead of piling one up per sync attempt."""
-    if not api.connected:
+    if not api._connected:
         return {"ok": False, "error": "Not connected."}
     if api._legacy_active.is_set():
         return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}
@@ -412,7 +412,7 @@ def _stream_sync_transfers(api, transfers, direction, on_conflict, scan_id, stop
             if not batch:
                 return
             api._scan_wait_for_room(stop_event)
-            if stop_event.is_set() or not api.connected:
+            if stop_event.is_set() or not api._connected:
                 return
             found += len(batch)
             api._bump_scan_found(scan_id, len(batch))
@@ -421,17 +421,17 @@ def _stream_sync_transfers(api, transfers, direction, on_conflict, scan_id, stop
 
         batch_cap = min(64, constants.SCAN_QUEUE_HIGH_WATER) or 64
         for lp, rp, size, is_dir in transfers:
-            if stop_event.is_set() or not api.connected:
+            if stop_event.is_set() or not api._connected:
                 break
             batch.append((lp, rp, size, 0, is_dir))
             if len(batch) >= batch_cap:
                 flush()
-                if stop_event.is_set() or not api.connected:
+                if stop_event.is_set() or not api._connected:
                     break
         flush()
         if stop_event.is_set():
             api._worker_log(f"Sync stopped ({found} item(s) queued before stopping)", "warn")
-        elif not api.connected:
+        elif not api._connected:
             api._worker_log(f"Sync halted: disconnected ({found} item(s) queued)", "warn")
         elif found:
             api._worker_log(f"Sync: {found} item(s) queued")
@@ -457,7 +457,7 @@ def start_sync(api, token, on_conflict="overwrite"):
     the "no longer available" error instead of re-queuing the same
     files. If not connected or another legacy sync/watch is running, the
     plan is left untouched: the caller can retry the same token."""
-    if not api.connected:
+    if not api._connected:
         return {"ok": False, "error": "Not connected."}
     if api._legacy_active.is_set():
         return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}

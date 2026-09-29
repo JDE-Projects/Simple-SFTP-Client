@@ -16,21 +16,21 @@ from app.transfer_queue import COMPLETED, SKIPPED
 
 
 def _download_one(api, local_dir, name):
-    before = len(api.queue.snapshot())
+    before = len(api._queue.snapshot())
     result = api.enqueue([{"name": name, "is_dir": False}], "download",
                          str(local_dir), "/", "overwrite")
     assert result["ok"] is True
     _wait_for_new_item(api, before)
-    return api.queue.snapshot()[-1]["id"]
+    return api._queue.snapshot()[-1]["id"]
 
 
 def _upload_one(api, local_dir, name, on_conflict):
-    before = len(api.queue.snapshot())
+    before = len(api._queue.snapshot())
     result = api.enqueue([{"name": name, "is_dir": False}], "upload",
                           str(local_dir), "/", on_conflict)
     assert result["ok"] is True
     _wait_for_new_item(api, before)
-    return api.queue.snapshot()[-1]["id"]
+    return api._queue.snapshot()[-1]["id"]
 
 
 def _wait_for_new_item(api, before, timeout=15):
@@ -38,7 +38,7 @@ def _wait_for_new_item(api, before, timeout=15):
     than assuming it is already there the instant enqueue() returns."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if len(api.queue.snapshot()) > before:
+        if len(api._queue.snapshot()) > before:
             return
         time.sleep(0.02)
     raise AssertionError(f"no new queue item appeared within {timeout}s")
@@ -138,7 +138,7 @@ def test_skip_reruns_folder_download_skipping_matching_files(sftp_env, wait_for_
     assert result["ok"] is True
     wait_for_drain(api)
 
-    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    states = {e["name"]: e["state"] for e in api._queue.snapshot()}
     assert states["same.bin"] == COMPLETED
     assert states["changed.bin"] == COMPLETED
 
@@ -147,13 +147,13 @@ def test_skip_reruns_folder_download_skipping_matching_files(sftp_env, wait_for_
     # catch up on
     (server_root / "top" / "changed.bin").write_bytes(b"c" * 10)
 
-    before = len(api.queue.snapshot())
+    before = len(api._queue.snapshot())
     result = api.enqueue([{"name": "top", "is_dir": True}], "download",
                           str(local_dir), "/", "skip")
     assert result["ok"] is True
     wait_for_drain(api)
 
-    new_states = {e["name"]: e["state"] for e in api.queue.snapshot()[before:]}
+    new_states = {e["name"]: e["state"] for e in api._queue.snapshot()[before:]}
     assert new_states["same.bin"] == SKIPPED
     assert new_states["changed.bin"] == COMPLETED
     assert (local_dir / "top" / "same.bin").read_bytes() == b"S" * 4096
@@ -180,7 +180,7 @@ def test_skip_transfers_everything_into_a_fresh_empty_local_folder(sftp_env, wai
     assert result["ok"] is True
     wait_for_drain(api)
 
-    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    states = {e["name"]: e["state"] for e in api._queue.snapshot()}
     assert states["a.bin"] == COMPLETED
     assert states["b.bin"] == COMPLETED
     assert states["c.bin"] == COMPLETED

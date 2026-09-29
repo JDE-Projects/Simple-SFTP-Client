@@ -91,6 +91,20 @@ def test_manifest_matches_checked_in_contract():
     )
 
 
+def test_manifest_has_no_nested_object_methods():
+    nested = [name for name in build_manifest() if "." in name]
+    assert not nested, f"Page can reach nested object methods: {nested}"
+
+
+def test_fresh_api_has_only_underscore_instance_attributes():
+    api_module = import_module("app.api")
+    launcher = import_module("simple_sftp_client")
+    api = api_module.Api(launcher.APP_VERSION)
+
+    public = [name for name in vars(api) if not name.startswith("_")]
+    assert not public, f"Api has public instance attributes: {public}"
+
+
 def test_pywebview_version_matches_copied_discovery_rules():
     version = metadata.version("pywebview")
     assert version == "6.2.1", (

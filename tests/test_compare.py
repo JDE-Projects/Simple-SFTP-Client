@@ -31,7 +31,7 @@ def test_recursive_compare_finds_a_deep_difference(sftp_env):
     _put_local(local_dir, "top/mid/deep/changed.txt", b"local version")
     _put_remote(api, server_root, "top/mid/deep/changed.txt", b"remote ver")
 
-    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert data is not None
     assert data["files"]["top/mid/deep/changed.txt"] in ("newer_local", "newer_remote")
 
@@ -41,7 +41,7 @@ def test_ancestor_folders_of_a_deep_change_are_marked_has_changes(sftp_env):
     _put_local(local_dir, "top/mid/deep/changed.txt", b"local version")
     _put_remote(api, server_root, "top/mid/deep/changed.txt", b"remote ver")
 
-    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert data["folders"]["top"] == "has_changes"
     assert data["folders"]["top/mid"] == "has_changes"
     assert data["folders"]["top/mid/deep"] == "has_changes"
@@ -53,7 +53,7 @@ def test_all_identical_nested_tree_yields_no_changes_and_no_flagged_folders(sftp
     _put_local(local_dir, "top/mid/same.txt", data_bytes)
     _put_remote(api, server_root, "top/mid/same.txt", data_bytes)
 
-    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert all(status == "same" for status in data["files"].values())
     assert data["folders"] == {}
 
@@ -66,7 +66,7 @@ def test_equal_size_and_equal_mtime_is_same(sftp_env):
     _put_local(local_dir, "match.txt", b"identical bytes", mtime=mtime)
     _put_remote(api, server_root, "match.txt", b"identical bytes", mtime=mtime)
 
-    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert data["files"]["match.txt"] == "same"
 
 
@@ -77,7 +77,7 @@ def test_equal_size_but_mtimes_far_apart_is_not_same(sftp_env):
     _put_local(local_dir, "edited.txt", b"local edit bytes", mtime=base + 3600)
     _put_remote(api, server_root, "edited.txt", b"remote edit bytes", mtime=base)
 
-    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert data["files"]["edited.txt"] == "newer_local"
 
 
@@ -87,7 +87,7 @@ def test_equal_size_but_remote_mtime_newer_is_newer_remote(sftp_env):
     _put_local(local_dir, "edited.txt", b"local edit bytes", mtime=base)
     _put_remote(api, server_root, "edited.txt", b"remote edit bytes", mtime=base + 3600)
 
-    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert data["files"]["edited.txt"] == "newer_remote"
 
 
@@ -97,7 +97,7 @@ def test_equal_size_and_mtimes_within_tolerance_is_same(sftp_env):
     _put_local(local_dir, "close.txt", b"same length!", mtime=base)
     _put_remote(api, server_root, "close.txt", b"same length!", mtime=base + 2)
 
-    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert data["files"]["close.txt"] == "same"
 
 
