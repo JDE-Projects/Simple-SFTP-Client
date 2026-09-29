@@ -8,6 +8,9 @@ from app.errors import friendly_error
 from app.paths import local_temp_path, remote_temp_path
 
 
+DOWNLOAD_READV_BATCH_SIZE = 16 * 1024 * 1024
+
+
 def _put_resume(api, sftp, lp, rp, offset, cb, cancel_check):
     # Writes into a scratch file next to the real remote destination
     # (never rp itself), so the destination is only touched once the new
@@ -111,28 +114,52 @@ def _get_resume(api, sftp, rp, lp, offset, cb, cancel_check):
     # scratch file behind; the real destination is never opened for
     # writing until the new copy is proven complete.
     #
-    # Same ordering as _put_resume, for the same reason: only treat a
-    # cancel as having interrupted the transfer if there was still more
-    # to read when it was observed.
+    # Downloads use bounded readv batches instead of unlimited prefetch.
+    # Batching keeps a cancel's drain-and-close latency bounded: a bigger
+    # batch needs fewer idle round trips, but drains more data on cancel.
+    # As with _put_resume, a cancel only interrupts if a real chunk remains
+    # to be written when it is observed.
     temp = local_temp_path(lp)
     finished = True
     published = False
     try:
+        # Read the size once before downloading so every readv request is an
+        # exact 32 KB chunk within the known remote extent.
+        try:
+            expected_size = sftp.stat(rp).st_size
+        except Exception as e:
+            raise IOError(
+                f"download not verified: could not read the remote "
+                f"file size ({e}); existing file left in place") from e
         with sftp.open(rp, "r") as src:
-            src.prefetch()
-            src.seek(offset)
             with open(temp, "wb") as dst:
                 got = 0
-                while True:
-                    chunk = src.read(32768)
-                    if not chunk:
-                        break
+                batch_start = offset
+                while batch_start < expected_size:
                     if cancel_check():
                         finished = False
                         break
-                    dst.write(chunk)
-                    got += len(chunk)
-                    cb(got, 0)
+                    batch_end = min(
+                        batch_start + DOWNLOAD_READV_BATCH_SIZE, expected_size)
+                    chunks = [
+                        (chunk_start, min(32768, batch_end - chunk_start))
+                        for chunk_start in range(batch_start, batch_end, 32768)
+                    ]
+                    cancelled = False
+                    for chunk in src.readv(chunks):
+                        if not cancelled and chunk and cancel_check():
+                            finished = False
+                            cancelled = True
+                        if not cancelled and chunk:
+                            dst.write(chunk)
+                            got += len(chunk)
+                            cb(got, 0)
+                    # readv starts Paramiko's prefetch thread on its first
+                    # next(). Drain the generator after a cancel so that
+                    # thread has stopped issuing reads before src closes.
+                    if cancelled:
+                        break
+                    batch_start = batch_end
         if finished:
             # Confirm the remote size directly rather than through _rstat,
             # which hides a failed lookup as -1. A -1 there would skip the
