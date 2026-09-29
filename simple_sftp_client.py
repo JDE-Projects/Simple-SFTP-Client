@@ -57,7 +57,7 @@ from app.validation import INVALID_PORT_ERROR, _SESSION_AUTH_VALUES, _SESSION_ST
 from app.workers import worker_target  # noqa: F401
 
 
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.9.2"
 
 
 def _is_remote_debugging_switch(token):
