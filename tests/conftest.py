@@ -78,19 +78,21 @@ def isolate_app_data_files(tmp_path_factory, monkeypatch):
 
 
 # ───────────── fixtures ─────────────
-def _bring_up_server(tmp_path, fs_extra_attrs=None):
+def _bring_up_server(tmp_path, fs_extra_attrs=None, client_key=None):
     """Spin up the throwaway SFTP server rooted at tmp_path and return
     (port, server_root, local_dir, srv_sock). The caller owns closing
     srv_sock. Shared by the pre-connected sftp_env fixtures and the
     sftp_server fixture, which hands back connection params so a test can
-    drive the real Api.connect() (trust-on-first-use and all)."""
+    drive the real Api.connect() (trust-on-first-use and all). client_key, a
+    paramiko PKey, lets that one key log in as USER as well."""
     server_root = tmp_path / "server_root"
     server_root.mkdir()
     local_dir = tmp_path / "local"
     local_dir.mkdir()
 
     fs_cls = sftp_server_core.make_fs(server_root, **(fs_extra_attrs or {}))
-    srv_sock, port = sftp_server_core.start(fs_cls, paramiko.RSAKey.generate(2048))
+    srv_sock, port = sftp_server_core.start(
+        fs_cls, paramiko.RSAKey.generate(2048), client_key=client_key)
     return port, server_root, local_dir, srv_sock
 
 
