@@ -7,11 +7,46 @@ import paramiko
 from app import paths
 from app.constants import DISABLED_ALGORITHMS
 from app.debug import debug
-from app.errors import InvalidPort, KnownHostsUnreadable, UnknownHostKey, error_tips, friendly_error
+from app.errors import InvalidPort, KeyUnusable, KnownHostsUnreadable, UnknownHostKey, error_tips, friendly_error
 from app.formatting import negotiated_summary
 from app.hostkeys import _TofuPolicy, _known_hosts_readable_or_raise, _save_host_keys_atomic, fingerprint_sha256, hostkey_name, load_known_hosts
 from app.paths import is_temp_part
 from app.validation import INVALID_PORT_ERROR, missing_fields, parse_port
+
+
+def _load_private_key(key_path, passphrase):
+    """Load the private key for key login, or raise KeyUnusable saying why.
+
+    paramiko's own key_filename login tries each key type in turn and reports
+    only the last failure (a wrong passphrase on an RSA key reads "encountered
+    RSA key, expected OPENSSH key"), so the key is loaded here, where the cases
+    can be told apart. A wrong passphrase and a damaged key file raise the same error for
+    some key types, so a damaged file with a passphrase given reads as
+    bad_passphrase. A missing or unreadable file raises its OSError unchanged.
+    Loads a matching "-cert.pub" certificate if present, the same as paramiko's key_filename login."""
+    with open(key_path, "rb") as f:
+        data = f.read()
+    needs_passphrase = False
+    last = None
+    for cls in (paramiko.RSAKey, paramiko.ECDSAKey, paramiko.Ed25519Key):
+        try:
+            key = cls.from_private_key_file(key_path, password=passphrase or None)
+        except paramiko.PasswordRequiredException:
+            needs_passphrase = True
+            continue
+        except (paramiko.SSHException, ValueError) as e:
+            last = e
+            continue
+        cert_path = key_path + "-cert.pub"
+        if os.path.isfile(cert_path):
+            key.load_certificate(cert_path)
+        return key
+    debug.log("key load failed", f"{key_path}: {type(last).__name__}: {last}")
+    if needs_passphrase:
+        raise KeyUnusable("passphrase_needed", key_path)
+    if passphrase and b"PRIVATE KEY-----" in data:
+        raise KeyUnusable("bad_passphrase", key_path)
+    raise KeyUnusable("not_a_key", key_path)
 
 
 def _open(api, host, port, username, password, key_path, passphrase):
@@ -26,9 +61,7 @@ def _open(api, host, port, username, password, key_path, passphrase):
                   timeout=15, allow_agent=False, look_for_keys=False,
                   disabled_algorithms=DISABLED_ALGORITHMS)
     if key_path:
-        kwargs["key_filename"] = key_path
-        if passphrase:
-            kwargs["passphrase"] = passphrase
+        kwargs["pkey"] = _load_private_key(key_path, passphrase)
     else:
         kwargs["password"] = password
     try:
