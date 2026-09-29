@@ -7,7 +7,9 @@ simple_sftp_client.Api to it. Nothing is installed or left running: the server
 daemon thread bound to an ephemeral port on 127.0.0.1, with a throwaway
 in-memory host key, serving a pytest tmp_path.
 """
+import hashlib
 import time
+from pathlib import Path
 
 import paramiko
 import pytest
@@ -15,6 +17,61 @@ import pytest
 import simple_sftp_client
 from tools import sftp_server_core
 from tools.sftp_server_core import PASSWORD, USER
+
+
+# ───────── data-file isolation ─────────
+def _file_digest(path):
+    """Return a file SHA-256, or absent when path does not exist."""
+    if not path.is_file():
+        return "absent"
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _repo_data_snapshot():
+    """Capture app data files at the repository root for the session guard."""
+    repo_root = Path(__file__).resolve().parents[1]
+    named_files = (
+        "servers.json",
+        "known_hosts",
+        "simple_sftp_client.pref",
+    )
+    return {
+        "files": {name: _file_digest(repo_root / name) for name in named_files},
+        "debug_logs": {
+            path.name for path in repo_root.glob("Debug_Log_*.txt") if path.is_file()
+        },
+    }
+
+
+@pytest.fixture(scope="session", autouse=True)
+def protect_repo_data_files():
+    """Fail when a test changes app data in the repository root.
+
+    Running the app from source during a test run can trip this guard.
+    """
+    before = _repo_data_snapshot()
+    yield
+    after = _repo_data_snapshot()
+    changed = [
+        name for name, digest in before["files"].items()
+        if after["files"][name] != digest
+    ]
+    if after["debug_logs"] != before["debug_logs"]:
+        changed.extend(sorted(before["debug_logs"] ^ after["debug_logs"]))
+    if changed:
+        pytest.fail("Repository app data changed during tests: " + ", ".join(changed))
+
+
+@pytest.fixture(autouse=True)
+def isolate_app_data_files(tmp_path_factory, monkeypatch):
+    """Redirect application data writes to a per-test temporary folder."""
+    data_dir = tmp_path_factory.mktemp("app-data")
+    monkeypatch.setattr(simple_sftp_client, "SESSIONS_FILE", str(data_dir / "servers.json"))
+    monkeypatch.setattr(simple_sftp_client, "KNOWN_HOSTS_FILE", str(data_dir / "known_hosts"))
+    monkeypatch.setattr(simple_sftp_client, "_pref_path",
+                        lambda: str(data_dir / "simple_sftp_client.pref"))
+    monkeypatch.setattr(simple_sftp_client.debug, "log_dir", str(data_dir))
+    return data_dir
 
 
 # ───────────── fixtures ─────────────
