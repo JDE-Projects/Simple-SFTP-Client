@@ -1,7 +1,7 @@
 """Drive the real page against the real backend in headless Edge.
 
 Serves simple_sftp_client-UI.html to a hidden Edge window. Every bridge call
-the page makes is passed to a real simple_sftp_client.Api, connected to a
+the page makes is passed to a real Api (app/api.py), connected to a
 throwaway in-process SFTP server (tools/sftp_server_core.py). scenario.js
 then clicks through the page's own functions and reports each check back.
 
@@ -35,7 +35,9 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, REPO)
 import paramiko  # noqa: E402
 
-import simple_sftp_client  # noqa: E402
+from app.api import Api  # noqa: E402
+from app.debug import debug  # noqa: E402
+from simple_sftp_client import APP_VERSION  # noqa: E402
 from tools import sftp_server_core  # noqa: E402
 from tools.sftp_server_core import PASSWORD, USER  # noqa: E402
 
@@ -99,13 +101,13 @@ def main(argv):
     fs_cls = sftp_server_core.make_fs(server_root)
     srv_sock, port = sftp_server_core.start(fs_cls, paramiko.RSAKey.generate(2048))
 
-    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
-    simple_sftp_client.debug.on_warning = api._on_debug_warning
+    api = Api(APP_VERSION)
+    debug.on_warning = api._on_debug_warning
     # Point the debug log at a folder that doesn't exist, so toggling it on
     # always fails: this exercises the "write failed, warn, turn off" path
     # deterministically, and keeps a real debug log from ever landing in the
     # repo (the real log_dir is exe_dir(), the repo root, when run from source).
-    simple_sftp_client.debug.log_dir = os.path.join(work, "no_such_debug_folder")
+    debug.log_dir = os.path.join(work, "no_such_debug_folder")
     api._watch_interval = 0.5
     delay_once, calls, results = {}, {}, {}
     done = threading.Event()
@@ -118,7 +120,7 @@ def main(argv):
         api.client, api.sftp, api.connected = client, client.open_sftp(), True
         return {"ok": True, "cwd": "/"}
 
-    version = simple_sftp_client.APP_VERSION
+    version = APP_VERSION
     overrides = {
         "connect": fake_connect,
         "get_meta": lambda: {"version": version, "sessions": [], "key_types": ["Ed25519"]},
