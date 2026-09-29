@@ -61,21 +61,25 @@ def test_cancel_over_throttled_link_finishes_within_bound(sftp_env, monkeypatch)
     assert not any(is_temp_part(path.name) for path in local_dir.iterdir())
 
 
-def test_immediate_cancel_then_session_close_leaves_no_prefetch_thread_or_crash(sftp_env):
-    # Unthrottled and cancelled on the first chunk, so the download returns
-    # while paramiko would still be issuing read-ahead requests for the rest
-    # of a large file. The session then closes at once, which is when a
-    # still-running read-ahead thread dies with "Socket is closed".
+def test_cancel_after_first_chunk_then_session_close_leaves_no_prefetch_thread_or_crash(sftp_env):
+    # Unthrottled, and the cancel only turns true once the first chunk has
+    # been written. That lets the download reach readv and start paramiko's
+    # read-ahead thread, then stop while read-ahead requests for the rest of
+    # a large file are still in flight. The session then closes at once,
+    # which is when a still-running read-ahead thread dies with "Socket is
+    # closed".
     api, server_root, local_dir = sftp_env
     name = "cancel.bin"
     (server_root / name).write_bytes(os.urandom(64 * 1024 * 1024))
     exceptions = []
+    first_chunk_written = threading.Event()
     old_excepthook = threading.excepthook
     threading.excepthook = exceptions.append
     try:
         finished = transfer_io._get_file(
             api, api._sftp, f"/{name}", str(local_dir / name),
-            lambda _got, _total: None, lambda: True)
+            lambda _got, _total: first_chunk_written.set(),
+            first_chunk_written.is_set)
         leftover = _prefetch_threads()
         api._sftp.close()
         api._client.close()
