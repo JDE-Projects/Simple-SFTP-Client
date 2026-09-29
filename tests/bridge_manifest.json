@@ -1,0 +1,166 @@
+{
+  "browse_folder": [],
+  "browse_save_key": [
+    "suggested"
+  ],
+  "calc_remote_size": [],
+  "cancel": [],
+  "cancel_item": [
+    "item_id"
+  ],
+  "check_update": [],
+  "clear_finished": [],
+  "compare": [
+    "local_dir",
+    "remote_dir"
+  ],
+  "confirm_quit": [],
+  "connect": [
+    "p"
+  ],
+  "default_key_path": [
+    "key_type"
+  ],
+  "delete": [],
+  "delete_session": [
+    "name"
+  ],
+  "discard_sync": [
+    "token"
+  ],
+  "disconnect": [],
+  "drain_debug_warnings": [],
+  "enqueue": [
+    "jobs",
+    "direction",
+    "local_dir",
+    "remote_dir",
+    "on_conflict"
+  ],
+  "export_console": [
+    "text"
+  ],
+  "generate_key": [
+    "key_type",
+    "out_path",
+    "passphrase",
+    "overwrite"
+  ],
+  "get_host_key": [
+    "host",
+    "port"
+  ],
+  "get_meta": [],
+  "get_remembered": [
+    "host",
+    "username",
+    "port"
+  ],
+  "get_theme": [],
+  "install_pubkey": [],
+  "list_local": [
+    "path"
+  ],
+  "list_remote": [],
+  "make_dir": [],
+  "on_external_drop": [
+    "event"
+  ],
+  "open_local": [
+    "path",
+    "name"
+  ],
+  "open_url": [
+    "url"
+  ],
+  "pause_queue": [],
+  "ping": [],
+  "poll_queue": [],
+  "queue.append": [
+    "direction",
+    "local_path",
+    "remote_path",
+    "name",
+    "size",
+    "on_conflict",
+    "is_dir"
+  ],
+  "queue.cancel": [
+    "item_id"
+  ],
+  "queue.cancel_all": [],
+  "queue.claim": [],
+  "queue.clear_finished": [],
+  "queue.counts": [],
+  "queue.fail_waiting": [
+    "error"
+  ],
+  "queue.is_paused": [],
+  "queue.mark_cancelled": [
+    "item_id"
+  ],
+  "queue.mark_completed": [
+    "item_id"
+  ],
+  "queue.mark_failed": [
+    "item_id",
+    "error"
+  ],
+  "queue.mark_skipped": [
+    "item_id"
+  ],
+  "queue.pause": [],
+  "queue.pending": [],
+  "queue.requeue": [
+    "item_id"
+  ],
+  "queue.resume": [],
+  "queue.retry_all_failed": [],
+  "queue.snapshot": [],
+  "queue.snapshot_and_pending": [],
+  "queue.waiting": [],
+  "rename": [],
+  "resume_queue": [],
+  "retry_all_failed": [],
+  "retry_item": [
+    "item_id"
+  ],
+  "save_session": [
+    "s"
+  ],
+  "save_theme": [
+    "theme"
+  ],
+  "set_debug": [
+    "on"
+  ],
+  "set_window": [
+    "w"
+  ],
+  "shutdown": [],
+  "start_sync": [
+    "token",
+    "on_conflict"
+  ],
+  "start_watch": [
+    "local_dir",
+    "remote_dir"
+  ],
+  "stop_watch": [],
+  "sync_plan": [
+    "local_dir",
+    "remote_dir",
+    "direction",
+    "changed_only"
+  ],
+  "test_connection": [
+    "p"
+  ],
+  "transfers_active": [],
+  "trust_host_key": [],
+  "upload_paths": [
+    "paths",
+    "remote_dir",
+    "on_conflict"
+  ]
+}

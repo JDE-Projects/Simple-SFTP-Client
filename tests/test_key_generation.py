@@ -3,19 +3,23 @@
 import io
 import os
 import sys
+import tempfile
+import time
 
 import paramiko
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_ssh_private_key
 
-import simple_sftp_client as app
+from app.api import Api
+from app.keyfiles import _protect_private_key
+from simple_sftp_client import APP_VERSION
 
 
 def test_generate_encrypted_ed25519_key(tmp_path):
     private_path = tmp_path / "id_ed25519"
 
-    result = app.Api().generate_key(
+    result = Api(APP_VERSION).generate_key(
         "Ed25519", str(private_path), "test-passphrase"
     )
 
@@ -37,7 +41,7 @@ def test_generate_encrypted_ed25519_key(tmp_path):
 def test_generate_unencrypted_ed25519_key(tmp_path):
     private_path = tmp_path / "id_ed25519"
 
-    result = app.Api().generate_key("Ed25519", str(private_path), "")
+    result = Api(APP_VERSION).generate_key("Ed25519", str(private_path), "")
 
     assert result["ok"] is True
     private_key = load_ssh_private_key(private_path.read_bytes(), password=None)
@@ -47,7 +51,7 @@ def test_generate_unencrypted_ed25519_key(tmp_path):
 def test_generate_rsa_key(tmp_path):
     private_path = tmp_path / "id_rsa"
 
-    result = app.Api().generate_key("RSA", str(private_path), "")
+    result = Api(APP_VERSION).generate_key("RSA", str(private_path), "")
 
     assert result["ok"] is True
 
@@ -66,7 +70,7 @@ def test_generate_key_blocks_on_existing_private_file(tmp_path):
     original = b"not a real key, just a marker"
     private_path.write_bytes(original)
 
-    result = app.Api().generate_key("Ed25519", str(private_path), "")
+    result = Api(APP_VERSION).generate_key("Ed25519", str(private_path), "")
 
     assert result["ok"] is False
     assert result["needs_overwrite"] is True
@@ -80,7 +84,7 @@ def test_generate_key_blocks_on_existing_public_file(tmp_path):
     pub_path = tmp_path / "id_ed25519.pub"
     pub_path.write_text("old public key marker")
 
-    result = app.Api().generate_key("Ed25519", str(private_path), "")
+    result = Api(APP_VERSION).generate_key("Ed25519", str(private_path), "")
 
     assert result["ok"] is False
     assert result["needs_overwrite"] is True
@@ -95,7 +99,7 @@ def test_generate_key_overwrite_confirmed_replaces_pair(tmp_path):
     private_path.write_bytes(b"old private marker")
     pub_path.write_text("old public marker")
 
-    result = app.Api().generate_key(
+    result = Api(APP_VERSION).generate_key(
         "Ed25519", str(private_path), "test-passphrase", overwrite=True
     )
 
@@ -142,7 +146,7 @@ def test_generate_key_success_retries_backup_delete_on_transient_failure(tmp_pat
 
     monkeypatch.setattr(os, "remove", flaky_remove)
 
-    result = app.Api().generate_key(
+    result = Api(APP_VERSION).generate_key(
         "Ed25519", str(private_path), "test-passphrase", overwrite=True
     )
 
@@ -175,7 +179,7 @@ def test_generate_key_rollback_on_publish_failure(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os, "replace", flaky_replace)
 
-    result = app.Api().generate_key(
+    result = Api(APP_VERSION).generate_key(
         "Ed25519", str(private_path), "test-passphrase", overwrite=True
     )
 
@@ -213,7 +217,7 @@ def test_generate_key_rollback_retries_a_briefly_locked_restore(tmp_path, monkey
 
     monkeypatch.setattr(os, "replace", flaky_replace)
 
-    result = app.Api().generate_key(
+    result = Api(APP_VERSION).generate_key(
         "Ed25519", str(private_path), "test-passphrase", overwrite=True
     )
 
@@ -251,9 +255,9 @@ def test_generate_key_restore_failure_leaves_durable_backup(tmp_path, monkeypatc
         return real_replace(src, dst, *args, **kwargs)
 
     monkeypatch.setattr(os, "replace", flaky_replace)
-    monkeypatch.setattr(app.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
 
-    result = app.Api().generate_key(
+    result = Api(APP_VERSION).generate_key(
         "Ed25519", str(private_path), "test-passphrase", overwrite=True
     )
 
@@ -307,7 +311,7 @@ def test_generate_key_interrupted_between_swaps_leaves_durable_backup(tmp_path, 
     monkeypatch.setattr(os, "remove", remove_but_keep_backup)
 
     with pytest.raises(KeyboardInterrupt):
-        app.Api().generate_key(
+        Api(APP_VERSION).generate_key(
             "Ed25519", str(private_path), "test-passphrase", overwrite=True
         )
 
@@ -334,7 +338,7 @@ def test_generate_key_publish_failure_with_no_prior_key_removes_orphan(tmp_path,
 
     monkeypatch.setattr(os, "replace", flaky_replace)
 
-    result = app.Api().generate_key("Ed25519", str(private_path), "test-passphrase")
+    result = Api(APP_VERSION).generate_key("Ed25519", str(private_path), "test-passphrase")
 
     assert result["ok"] is False
     assert not private_path.exists()
@@ -350,9 +354,9 @@ def test_generate_key_permission_error_returns_friendly_message(tmp_path, monkey
     def raise_permission_error(*args, **kwargs):
         raise PermissionError("denied")
 
-    monkeypatch.setattr(app.tempfile, "mkstemp", raise_permission_error)
+    monkeypatch.setattr(tempfile, "mkstemp", raise_permission_error)
 
-    result = app.Api().generate_key("Ed25519", str(private_path), "")
+    result = Api(APP_VERSION).generate_key("Ed25519", str(private_path), "")
 
     assert result["ok"] is False
     assert "permission" in result["error"].lower()
@@ -363,7 +367,7 @@ def test_protect_private_key_does_not_raise(tmp_path):
     target = tmp_path / "id_ed25519"
     target.write_bytes(b"placeholder")
 
-    warning = app._protect_private_key(str(target))
+    warning = _protect_private_key(str(target))
 
     if sys.platform == "win32":
         assert warning is None

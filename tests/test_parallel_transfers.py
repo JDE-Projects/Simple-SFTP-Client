@@ -9,7 +9,7 @@ import os
 import threading
 import time
 
-from transfer_queue import CANCELLED, COMPLETED, FAILED, WAITING
+from app.transfer_queue import CANCELLED, COMPLETED, FAILED, WAITING
 
 
 def test_two_files_both_complete_with_matching_bytes(sftp_env, wait_for_drain, state_of):

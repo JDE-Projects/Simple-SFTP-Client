@@ -11,12 +11,13 @@ _ParamikoBridge pointed at a tmp_path.
 """
 import logging
 
-import simple_sftp_client
-from simple_sftp_client import AppDebugLog, Api, _scrub
+from app.api import Api
+from app.debug import AppDebugLog, _scrub, debug
+from simple_sftp_client import APP_VERSION
 
 
 def test_warning_reaches_api_buffer_and_drains_once():
-    api = Api()
+    api = Api(APP_VERSION)
     api._on_debug_warning("Debug log: something went wrong.")
 
     first = api.drain_debug_warnings()
@@ -29,15 +30,15 @@ def test_warning_reaches_api_buffer_and_drains_once():
 def test_drain_reports_whether_logging_is_on(monkeypatch):
     # The page uses this to untick the Debug switch after a failed write
     # turned logging off in the background.
-    api = Api()
-    monkeypatch.setattr(simple_sftp_client.debug, "_on", False)
+    api = Api(APP_VERSION)
+    monkeypatch.setattr(debug, "_on", False)
     assert api.drain_debug_warnings()["enabled"] is False
-    monkeypatch.setattr(simple_sftp_client.debug, "_on", True)
+    monkeypatch.setattr(debug, "_on", True)
     assert api.drain_debug_warnings()["enabled"] is True
 
 
 def test_on_warning_never_calls_evaluate_js():
-    api = Api()
+    api = Api(APP_VERSION)
 
     class FakeWindow:
         def __init__(self):
@@ -57,8 +58,8 @@ def test_on_warning_never_calls_evaluate_js():
 
 
 def test_set_debug_return_includes_and_drains_warnings(tmp_path, monkeypatch):
-    api = Api()
-    monkeypatch.setattr(simple_sftp_client.debug, "on_warning", api._on_debug_warning)
+    api = Api(APP_VERSION)
+    monkeypatch.setattr(debug, "on_warning", api._on_debug_warning)
     api._on_debug_warning("Debug log: an earlier warning.")
 
     result = api.set_debug(False)

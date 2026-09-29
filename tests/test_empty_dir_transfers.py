@@ -11,7 +11,7 @@ wait_for_drain fixtures as test_streaming_scan.py.
 """
 import os
 
-from transfer_queue import COMPLETED, FAILED
+from app.transfer_queue import COMPLETED, FAILED
 
 
 def test_upload_of_empty_selected_folder_creates_it_on_remote(sftp_env, wait_for_drain):

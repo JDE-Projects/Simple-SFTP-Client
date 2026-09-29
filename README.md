@@ -106,7 +106,7 @@ pipeline from this repo. You can also check the file against the published
 - Python 3 on PATH.
 - `pip install -r requirements.txt` (pinned versions: PySide6, pywebview,
   paramiko, cryptography, keyring, and PyInstaller)
-- Keep `simple_sftp_client.py`, `transfer_queue.py`, `debug_log.py`,
+- Keep `simple_sftp_client.py`, the `app/` folder,
   `simple_sftp_client-UI.html`, the `fonts/` folder, the `.ico`, and `.png`
   together.
 - Run from source: `python simple_sftp_client.py`

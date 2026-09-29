@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from simple_sftp_client import is_temp_part, local_temp_path, remote_temp_path
+from app.paths import is_temp_part, local_temp_path, remote_temp_path
 
 
 # Ordinary files that merely share the suffix, or partial shapes, are NOT ours.

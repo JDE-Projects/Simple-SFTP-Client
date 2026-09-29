@@ -9,7 +9,7 @@ import subprocess
 
 import pytest
 
-from simple_sftp_client import local_link_target
+from app.paths import local_link_target
 
 
 def _make_junction(link, target):

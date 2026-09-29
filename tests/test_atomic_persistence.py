@@ -8,12 +8,17 @@ none of them ever touches a real app file.
 import glob
 import json
 import os
+import tempfile
 
 import paramiko
 import pytest
 
-import simple_sftp_client as app
-from simple_sftp_client import Api, KnownHostsUnreadable
+from app import paths, prefs
+from app.api import Api
+from app.errors import KnownHostsUnreadable
+from app.hostkeys import load_known_hosts
+from app.prefs import load_prefs, save_prefs
+from simple_sftp_client import APP_VERSION
 
 
 # ───────────── prefs ─────────────
@@ -21,7 +26,7 @@ from simple_sftp_client import Api, KnownHostsUnreadable
 @pytest.fixture
 def pref_path(tmp_path, monkeypatch):
     path = str(tmp_path / "simple_sftp_client.pref")
-    monkeypatch.setattr(app, "_pref_path", lambda: path)
+    monkeypatch.setattr(prefs, "_pref_path", lambda: path)
     return path
 
 
@@ -29,7 +34,7 @@ def test_load_prefs_corrupt_file_preserved_aside(pref_path):
     with open(pref_path, "w", encoding="utf-8") as f:
         f.write("not valid json{{{")
 
-    result = app.load_prefs()
+    result = load_prefs()
 
     assert result == {}
     assert not os.path.exists(pref_path)
@@ -40,7 +45,7 @@ def test_load_prefs_corrupt_file_preserved_aside(pref_path):
 
 
 def test_save_prefs_missing_file_is_first_run(pref_path):
-    assert app.load_prefs() == {}
+    assert load_prefs() == {}
 
 
 def test_save_prefs_write_failure_returns_false_and_leaves_no_final_file(pref_path, monkeypatch):
@@ -49,7 +54,7 @@ def test_save_prefs_write_failure_returns_false_and_leaves_no_final_file(pref_pa
 
     monkeypatch.setattr(os, "replace", boom)
 
-    ok = app.save_prefs({"theme": "dark"})
+    ok = save_prefs({"theme": "dark"})
 
     assert ok is False
     assert not os.path.exists(pref_path)
@@ -61,15 +66,15 @@ def test_save_prefs_mkstemp_failure_returns_false(pref_path, monkeypatch):
     def boom(*a, **k):
         raise OSError("permission denied")
 
-    monkeypatch.setattr(app.tempfile, "mkstemp", boom)
+    monkeypatch.setattr(tempfile, "mkstemp", boom)
 
-    assert app.save_prefs({"theme": "dark"}) is False
+    assert save_prefs({"theme": "dark"}) is False
     assert not os.path.exists(pref_path)
 
 
 def test_save_prefs_round_trips(pref_path):
-    assert app.save_prefs({"theme": "light"}) is True
-    assert app.load_prefs() == {"theme": "light"}
+    assert save_prefs({"theme": "light"}) is True
+    assert load_prefs() == {"theme": "light"}
 
 
 # ───────────── sessions ─────────────
@@ -77,7 +82,7 @@ def test_save_prefs_round_trips(pref_path):
 @pytest.fixture
 def sessions_path(tmp_path, monkeypatch):
     path = str(tmp_path / "servers.json")
-    monkeypatch.setattr(app, "SESSIONS_FILE", path)
+    monkeypatch.setattr(paths, "SESSIONS_FILE", path)
     return path
 
 
@@ -85,7 +90,7 @@ def test_load_sessions_corrupt_file_preserved_aside(sessions_path):
     with open(sessions_path, "w", encoding="utf-8") as f:
         f.write("{not json")
 
-    api = Api()
+    api = Api(APP_VERSION)
     result = api._load_sessions()
 
     assert result == []
@@ -94,7 +99,7 @@ def test_load_sessions_corrupt_file_preserved_aside(sessions_path):
 
 
 def test_load_sessions_missing_file_is_empty_not_corrupt(sessions_path):
-    api = Api()
+    api = Api(APP_VERSION)
     assert api._load_sessions() == []
     assert glob.glob(sessions_path + ".corrupt-*") == []
 
@@ -105,7 +110,7 @@ def test_save_sessions_write_failure_returns_false_and_leaves_no_final_file(sess
 
     monkeypatch.setattr(os, "replace", boom)
 
-    api = Api()
+    api = Api(APP_VERSION)
     ok = api._save_sessions([{"name": "x"}])
 
     assert ok is False
@@ -117,15 +122,15 @@ def test_save_sessions_mkstemp_failure_returns_false(sessions_path, monkeypatch)
     def boom(*a, **k):
         raise OSError("permission denied")
 
-    monkeypatch.setattr(app.tempfile, "mkstemp", boom)
+    monkeypatch.setattr(tempfile, "mkstemp", boom)
 
-    api = Api()
+    api = Api(APP_VERSION)
     assert api._save_sessions([{"name": "x"}]) is False
     assert not os.path.exists(sessions_path)
 
 
 def test_save_sessions_round_trips(sessions_path):
-    api = Api()
+    api = Api(APP_VERSION)
     assert api._save_sessions([{"name": "x"}]) is True
     with open(sessions_path, encoding="utf-8") as f:
         data = json.load(f)
@@ -137,7 +142,7 @@ def test_save_sessions_round_trips(sessions_path):
 @pytest.fixture
 def known_hosts_path(tmp_path, monkeypatch):
     path = str(tmp_path / "known_hosts")
-    monkeypatch.setattr(app, "KNOWN_HOSTS_FILE", path)
+    monkeypatch.setattr(paths, "KNOWN_HOSTS_FILE", path)
     return path
 
 
@@ -147,7 +152,7 @@ def _valid_line(host="example.com"):
 
 
 def test_load_known_hosts_missing_file_is_clean_first_contact(known_hosts_path):
-    hk = app.load_known_hosts()
+    hk = load_known_hosts()
     assert len(hk) == 0
 
 
@@ -156,7 +161,7 @@ def test_load_known_hosts_all_valid_lines_loads_fine(known_hosts_path):
         f.write(_valid_line("a.example.com"))
         f.write(_valid_line("b.example.com"))
 
-    hk = app.load_known_hosts()
+    hk = load_known_hosts()
     assert hk.lookup("a.example.com") is not None
     assert hk.lookup("b.example.com") is not None
 
@@ -170,7 +175,7 @@ def test_load_known_hosts_one_bad_line_among_valid_raises_strictly(known_hosts_p
         f.write("this is not a valid known_hosts line\n")
 
     with pytest.raises(KnownHostsUnreadable):
-        app.load_known_hosts()
+        load_known_hosts()
 
 
 def test_load_known_hosts_blank_lines_and_comments_are_fine(known_hosts_path):
@@ -178,7 +183,7 @@ def test_load_known_hosts_blank_lines_and_comments_are_fine(known_hosts_path):
         f.write("# a comment\n\n")
         f.write(_valid_line("a.example.com"))
 
-    hk = app.load_known_hosts()
+    hk = load_known_hosts()
     assert hk.lookup("a.example.com") is not None
 
 
@@ -186,7 +191,7 @@ def test_connect_refuses_when_known_hosts_unreadable(known_hosts_path, monkeypat
     with open(known_hosts_path, "w", encoding="utf-8") as f:
         f.write("garbage garbage garbage\n")
 
-    api = Api()
+    api = Api(APP_VERSION)
     result = api.connect({"host": "example.com", "username": "u", "password": "p"})
 
     assert result["ok"] is False
@@ -200,7 +205,7 @@ def test_trust_host_key_on_corrupt_file_leaves_it_untouched(known_hosts_path):
     with open(known_hosts_path, "w", encoding="utf-8") as f:
         f.write(original)
 
-    api = Api()
+    api = Api(APP_VERSION)
     key = paramiko.RSAKey.generate(1024)
     api._pending_host_key = ("example.com", key)
 
@@ -215,7 +220,7 @@ def test_get_host_key_on_corrupt_file_reports_unreadable(known_hosts_path):
     with open(known_hosts_path, "w", encoding="utf-8") as f:
         f.write("garbage garbage garbage\n")
 
-    api = Api()
+    api = Api(APP_VERSION)
     result = api.get_host_key("example.com")
 
     assert result["known"] is False
@@ -223,19 +228,19 @@ def test_get_host_key_on_corrupt_file_reports_unreadable(known_hosts_path):
 
 
 def test_trust_host_key_succeeds_on_empty_file_and_key_is_present(known_hosts_path):
-    api = Api()
+    api = Api(APP_VERSION)
     key = paramiko.RSAKey.generate(1024)
     api._pending_host_key = ("example.com", key)
 
     result = api.trust_host_key()
 
     assert result["ok"] is True
-    hk = app.load_known_hosts()
+    hk = load_known_hosts()
     assert hk.lookup("example.com") is not None
 
 
 def test_trust_host_key_replace_failure_leaves_prior_file_intact(known_hosts_path, monkeypatch):
-    api = Api()
+    api = Api(APP_VERSION)
     first_key = paramiko.RSAKey.generate(1024)
     api._pending_host_key = ("example.com", first_key)
     assert api.trust_host_key()["ok"] is True

@@ -2,35 +2,97 @@
 Shared test setup.
 
 Hosts a throwaway, in-process SFTP server and the fixtures that wire a real
-simple_sftp_client.Api to it. Nothing is installed or left running: the server
+Api (app/api.py) to it. Nothing is installed or left running: the server
 (tools/sftp_server_core.py, shared with the manual test server) runs on a
 daemon thread bound to an ephemeral port on 127.0.0.1, with a throwaway
 in-memory host key, serving a pytest tmp_path.
 """
+import hashlib
 import time
+from pathlib import Path
 
 import paramiko
 import pytest
 
-import simple_sftp_client
+from app import paths, prefs
+from app.api import Api
+from app.debug import debug
+from simple_sftp_client import APP_VERSION
 from tools import sftp_server_core
 from tools.sftp_server_core import PASSWORD, USER
 
 
+# ───────── data-file isolation ─────────
+def _file_digest(path):
+    """Return a file SHA-256, or absent when path does not exist."""
+    if not path.is_file():
+        return "absent"
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _repo_data_snapshot():
+    """Capture app data files at the repository root for the session guard."""
+    repo_root = Path(__file__).resolve().parents[1]
+    named_files = (
+        "servers.json",
+        "known_hosts",
+        "simple_sftp_client.pref",
+    )
+    return {
+        "files": {name: _file_digest(repo_root / name) for name in named_files},
+        "debug_logs": {
+            path.name for path in repo_root.glob("Debug_Log_*.txt") if path.is_file()
+        },
+    }
+
+
+@pytest.fixture(scope="session", autouse=True)
+def protect_repo_data_files():
+    """Fail when a test changes app data in the repository root.
+
+    Running the app from source during a test run can trip this guard.
+    """
+    before = _repo_data_snapshot()
+    yield
+    after = _repo_data_snapshot()
+    changed = [
+        name for name, digest in before["files"].items()
+        if after["files"][name] != digest
+    ]
+    if after["debug_logs"] != before["debug_logs"]:
+        changed.extend(sorted(before["debug_logs"] ^ after["debug_logs"]))
+    if changed:
+        pytest.fail("Repository app data changed during tests: " + ", ".join(changed))
+
+
+@pytest.fixture(autouse=True)
+def isolate_app_data_files(tmp_path_factory, monkeypatch):
+    """Redirect application data writes to a per-test temporary folder."""
+    data_dir = tmp_path_factory.mktemp("app-data")
+    monkeypatch.setattr(paths, "SESSIONS_FILE", str(data_dir / "servers.json"))
+    monkeypatch.setattr(paths, "KNOWN_HOSTS_FILE", str(data_dir / "known_hosts"))
+    monkeypatch.setattr(prefs, "_pref_path",
+                        lambda: str(data_dir / "simple_sftp_client.pref"))
+    monkeypatch.setattr(debug, "log_dir", str(data_dir))
+    return data_dir
+
+
 # ───────────── fixtures ─────────────
-def _bring_up_server(tmp_path, fs_extra_attrs=None):
+def _bring_up_server(tmp_path, fs_extra_attrs=None, client_key=None):
     """Spin up the throwaway SFTP server rooted at tmp_path and return
     (port, server_root, local_dir, srv_sock). The caller owns closing
     srv_sock. Shared by the pre-connected sftp_env fixtures and the
     sftp_server fixture, which hands back connection params so a test can
-    drive the real Api.connect() (trust-on-first-use and all)."""
+    drive the real Api.connect() (trust-on-first-use and all). client_key, a
+    paramiko PKey, lets that one key log in as USER as well."""
     server_root = tmp_path / "server_root"
     server_root.mkdir()
     local_dir = tmp_path / "local"
     local_dir.mkdir()
 
     fs_cls = sftp_server_core.make_fs(server_root, **(fs_extra_attrs or {}))
-    srv_sock, port = sftp_server_core.start(fs_cls, paramiko.RSAKey.generate(2048))
+    srv_sock, port = sftp_server_core.start(
+        fs_cls, paramiko.RSAKey.generate(2048), client_key=client_key)
     return port, server_root, local_dir, srv_sock
 
 
@@ -47,7 +109,7 @@ def _start_sftp_env(tmp_path, fs_extra_attrs=None):
                     look_for_keys=False, allow_agent=False)
     sftp = client.open_sftp()
 
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     api.client = client
     api.sftp = sftp
     api.connected = True

@@ -25,7 +25,9 @@ import stat
 
 import pytest
 
-import simple_sftp_client
+from app.api import Api
+from app.errors import ScanIncomplete
+from simple_sftp_client import APP_VERSION
 
 
 class _FakeAttr:
@@ -100,46 +102,46 @@ def _unreadable_local_scandir(monkeypatch, bad_path):
 # ───────────── _compute_compare / _compute_sync refuse on an incomplete scan ─────────────
 
 def test_unreadable_local_root_refuses_compare(tmp_path):
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     missing = tmp_path / "does_not_exist"
     sftp = _FakeSftp({})
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete):
+    with pytest.raises(ScanIncomplete):
         api._compute_compare(sftp, str(missing), "/")
 
 
 def test_unreadable_local_root_refuses_sync(tmp_path):
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     missing = tmp_path / "does_not_exist"
     sftp = _FakeSftp({})
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete):
+    with pytest.raises(ScanIncomplete):
         api._compute_sync(sftp, str(missing), "/", "upload")
 
 
 def test_unreadable_remote_root_refuses_compare(tmp_path):
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     (local_dir / "kept.txt").write_bytes(b"hello")
     sftp = _RaisingSftp()
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete):
+    with pytest.raises(ScanIncomplete):
         api._compute_compare(sftp, str(local_dir), "/")
 
 
 def test_unreadable_remote_root_refuses_sync(tmp_path):
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     sftp = _RaisingSftp()
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete):
+    with pytest.raises(ScanIncomplete):
         api._compute_sync(sftp, str(local_dir), "/", "download")
 
 
 def test_unreadable_nested_local_subfolder_refuses_compare(tmp_path, monkeypatch):
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     (local_dir / "kept.txt").write_bytes(b"hello")
@@ -149,12 +151,12 @@ def test_unreadable_nested_local_subfolder_refuses_compare(tmp_path, monkeypatch
     _unreadable_local_scandir(monkeypatch, str(bad))
     sftp = _FakeSftp({})
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete):
+    with pytest.raises(ScanIncomplete):
         api._compute_compare(sftp, str(local_dir), "/")
 
 
 def test_unreadable_nested_local_subfolder_refuses_sync(tmp_path, monkeypatch):
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     bad = local_dir / "bad"
@@ -163,12 +165,12 @@ def test_unreadable_nested_local_subfolder_refuses_sync(tmp_path, monkeypatch):
     _unreadable_local_scandir(monkeypatch, str(bad))
     sftp = _FakeSftp({})
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete):
+    with pytest.raises(ScanIncomplete):
         api._compute_sync(sftp, str(local_dir), "/", "upload")
 
 
 def test_unreadable_nested_remote_subfolder_refuses_compare(tmp_path):
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     sftp = _PartialFailSftp(
@@ -176,12 +178,12 @@ def test_unreadable_nested_remote_subfolder_refuses_compare(tmp_path):
         fail_path="/bad",
     )
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete):
+    with pytest.raises(ScanIncomplete):
         api._compute_compare(sftp, str(local_dir), "/")
 
 
 def test_unreadable_nested_remote_subfolder_refuses_sync(tmp_path):
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     sftp = _PartialFailSftp(
@@ -189,14 +191,14 @@ def test_unreadable_nested_remote_subfolder_refuses_sync(tmp_path):
         fail_path="/bad",
     )
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete):
+    with pytest.raises(ScanIncomplete):
         api._compute_sync(sftp, str(local_dir), "/", "download")
 
 
 def test_server_loss_mid_listing_refuses_compare(tmp_path):
     """A listing that yields a couple of entries and then raises, as a
     dropped connection partway through a READDIR would look."""
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
 
@@ -207,12 +209,12 @@ def test_server_loss_mid_listing_refuses_compare(tmp_path):
                 raise EOFError("connection lost")
             return gen()
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete):
+    with pytest.raises(ScanIncomplete):
         api._compute_compare(_MidListingLossSftp(), str(local_dir), "/")
 
 
 def test_server_loss_mid_listing_refuses_sync(tmp_path):
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
 
@@ -223,7 +225,7 @@ def test_server_loss_mid_listing_refuses_sync(tmp_path):
                 raise EOFError("connection lost")
             return gen()
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete):
+    with pytest.raises(ScanIncomplete):
         api._compute_sync(_MidListingLossSftp(), str(local_dir), "/", "download")
 
 
@@ -231,7 +233,7 @@ def test_unsafe_remote_name_is_skipped_not_refused_compare(tmp_path):
     # An unsafe remote name can never be represented locally, so compare
     # skips and logs it (like the transfer scan) rather than refusing the
     # whole folder. Every other file still compares normally.
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     sftp = _FakeSftp({
@@ -249,7 +251,7 @@ def test_unsafe_remote_name_is_skipped_not_refused_compare(tmp_path):
 
 
 def test_unsafe_remote_name_is_skipped_not_refused_sync(tmp_path):
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     sftp = _FakeSftp({
@@ -301,31 +303,31 @@ def _stat_failing_scandir(monkeypatch, folder, bad_name):
 
 
 def test_unreadable_file_metadata_refuses_compare(tmp_path, monkeypatch):
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     _stat_failing_scandir(monkeypatch, str(local_dir), "locked.txt")
     sftp = _FakeSftp({})
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete):
+    with pytest.raises(ScanIncomplete):
         api._compute_compare(sftp, str(local_dir), "/")
 
 
 def test_unreadable_file_metadata_refuses_sync(tmp_path, monkeypatch):
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     _stat_failing_scandir(monkeypatch, str(local_dir), "locked.txt")
     sftp = _FakeSftp({})
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete):
+    with pytest.raises(ScanIncomplete):
         api._compute_sync(sftp, str(local_dir), "/", "upload")
 
 
 # ───────────── cancellation still wins over an incomplete-scan refusal ─────────────
 
 def test_cancellation_before_any_problem_check_returns_none_not_scan_incomplete(tmp_path):
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     stop_event = _AlreadySetEvent()
@@ -338,7 +340,7 @@ def test_cancellation_before_any_problem_check_returns_none_not_scan_incomplete(
 
 
 def test_cancellation_before_any_problem_check_returns_none_for_sync(tmp_path):
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     stop_event = _AlreadySetEvent()
@@ -360,7 +362,7 @@ class _AlreadySetEvent:
 # ───────────── an empty-but-readable tree still succeeds normally ─────────────
 
 def test_empty_readable_tree_succeeds_with_no_files_or_plan(tmp_path):
-    api = simple_sftp_client.Api()
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     sftp = _FakeSftp({})

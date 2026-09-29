@@ -172,6 +172,11 @@ class FS(paramiko.SFTPServerInterface):
 
 
 class Server(paramiko.ServerInterface):
+    def __init__(self, client_key=None):
+        # client_key: an optional paramiko PKey whose public half may log in
+        # as USER. With none, only the password login is offered.
+        self.client_key = client_key
+
     def check_channel_request(self, kind, chanid):
         return paramiko.OPEN_SUCCEEDED
 
@@ -180,7 +185,15 @@ class Server(paramiko.ServerInterface):
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
 
+    def check_auth_publickey(self, username, key):
+        if (self.client_key is not None and username == USER
+                and key.asbytes() == self.client_key.asbytes()):
+            return paramiko.AUTH_SUCCESSFUL
+        return paramiko.AUTH_FAILED
+
     def get_allowed_auths(self, username):
+        if self.client_key is not None:
+            return "password,publickey"
         return "password"
 
 
@@ -192,7 +205,7 @@ def make_fs(root, **switches):
     return type("FSServing", (FS,), attrs)
 
 
-def _serve(sock, host_key, fs_cls):
+def _serve(sock, host_key, fs_cls, client_key=None):
     while True:
         try:
             conn, _ = sock.accept()
@@ -202,15 +215,16 @@ def _serve(sock, host_key, fs_cls):
         t.add_server_key(host_key)
         t.set_subsystem_handler("sftp", paramiko.SFTPServer, fs_cls)
         try:
-            t.start_server(server=Server())
+            t.start_server(server=Server(client_key))
         except Exception:
             continue
 
 
-def start(fs_cls, host_key, host="127.0.0.1", port=0):
+def start(fs_cls, host_key, host="127.0.0.1", port=0, client_key=None):
     """Listen on host:port (0 picks a free port) and serve fs_cls on a daemon
     thread. Returns (listening socket, bound port). Closing the socket stops
-    new connections; the caller owns closing it."""
+    new connections; the caller owns closing it. client_key (a paramiko PKey)
+    also lets that one key log in as USER."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -219,5 +233,5 @@ def start(fs_cls, host_key, host="127.0.0.1", port=0):
     except OSError:
         sock.close()
         raise
-    threading.Thread(target=_serve, args=(sock, host_key, fs_cls), daemon=True).start()
+    threading.Thread(target=_serve, args=(sock, host_key, fs_cls, client_key), daemon=True).start()
     return sock, sock.getsockname()[1]

@@ -5,7 +5,7 @@ protocol logging). This covers the pattern-based scrub applied there: it
 masks passwords embedded in URLs and any private-key material, and leaves
 everything else untouched.
 """
-from simple_sftp_client import AppDebugLog, _scrub
+from app.debug import AppDebugLog, _scrub
 
 
 def test_scrub_masks_sftp_url_password():

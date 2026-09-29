@@ -14,9 +14,9 @@ import time
 
 import paramiko
 
-from transfer_queue import COMPLETED, CANCELLED, FAILED, WAITING
+from app.transfer_queue import COMPLETED, CANCELLED, FAILED, WAITING
 
-from simple_sftp_client import is_temp_part
+from app.paths import is_temp_part
 
 
 def _local_temp_files(folder):

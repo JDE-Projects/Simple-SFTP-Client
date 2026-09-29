@@ -8,10 +8,8 @@ set-time-unsupported variant, sftp_env_no_set_time).
 """
 import os
 
-import simple_sftp_client
-from transfer_queue import COMPLETED, SKIPPED
-
-from simple_sftp_client import MTIME_TOL
+from app.constants import MTIME_TOL
+from app.transfer_queue import COMPLETED, SKIPPED
 
 
 def _enqueue_one(api, direction, local_dir, remote_dir, name, on_conflict, wait_for_queue_count):
@@ -96,10 +94,10 @@ def test_download_completes_when_local_stamp_fails(
             raise OSError("simulated: cannot set local file time")
         return real_utime(path, *args, **kwargs)
 
-    # Patch narrowly on the module simple_sftp_client actually uses (its own
-    # `import os`), and only for the one path being downloaded, so nothing
+    # Patch os.utime (the same os module the transfer code imports), failing
+    # only for the one path being downloaded, so nothing
     # else in the test (fixture teardown, etc.) is affected.
-    monkeypatch.setattr(simple_sftp_client.os, "utime", _raise_only_for_target)
+    monkeypatch.setattr(os, "utime", _raise_only_for_target)
 
     item_id = _enqueue_one(api, "download", local_dir, "/", name, "overwrite", wait_for_queue_count)
     wait_for_drain(api)

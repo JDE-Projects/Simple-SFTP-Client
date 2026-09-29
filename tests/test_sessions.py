@@ -1,5 +1,5 @@
 """
-Tests for save_session / delete_session in simple_sftp_client.py.
+Tests for save_session / delete_session in app/services/sessions.py.
 
 keyring is mocked throughout: set_password / get_password / delete_password
 are monkeypatched on the real `keyring` module (imported locally inside the
@@ -12,14 +12,18 @@ import json
 import keyring
 import pytest
 
-import simple_sftp_client as app
+from app import paths
+from app.api import Api
+from app.errors import UnknownHostKey
+from app.validation import cred_key
+from simple_sftp_client import APP_VERSION
 
 
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     """A fresh Api instance with servers.json redirected to a tmp file."""
-    monkeypatch.setattr(app, "SESSIONS_FILE", str(tmp_path / "servers.json"))
-    return app.Api()
+    monkeypatch.setattr(paths, "SESSIONS_FILE", str(tmp_path / "servers.json"))
+    return Api(APP_VERSION)
 
 
 def base_session(**overrides):
@@ -148,13 +152,13 @@ def test_save_session_different_port_writes_under_port_aware_key(api, monkeypatc
 
 
 def test_cred_key_naming():
-    assert app.cred_key("h", 22, "u") == "h|u"
-    assert app.cred_key("h", 2222, "u") == "h|2222|u"
+    assert cred_key("h", 22, "u") == "h|u"
+    assert cred_key("h", 2222, "u") == "h|2222|u"
 
 
 def test_delete_session_removes_keyring_credential_when_remembered(api, monkeypatch):
     # Seed servers.json directly with a session that has a saved password.
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session()]}, f)
 
     deleted = []
@@ -172,7 +176,7 @@ def test_delete_session_removes_keyring_credential_when_remembered(api, monkeypa
 
 
 def test_delete_session_does_not_touch_keyring_when_no_saved_password(api, monkeypatch):
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session(remember=False)]}, f)
 
     calls = []
@@ -193,7 +197,7 @@ def test_delete_session_non_default_port_deletes_both_names(api, monkeypatch):
     # A session remembered on a non-22 port may have been saved before the
     # port-aware naming (legacy port-less entry) or after (port-aware
     # entry). Delete both so nothing is left behind either way.
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session(port="2222")]}, f)
 
     deleted = []
@@ -210,7 +214,7 @@ def test_delete_session_non_default_port_deletes_both_names(api, monkeypatch):
 
 
 def test_delete_session_real_failure_sets_pw_warning(api, monkeypatch):
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session()]}, f)
 
     def failing_delete_password(service, key):
@@ -229,7 +233,7 @@ def test_delete_session_real_failure_sets_pw_warning(api, monkeypatch):
 def test_delete_session_password_delete_error_is_harmless(api, monkeypatch):
     # PasswordDeleteError means "no such entry", which is fine: the
     # credential was never there (or was already removed).
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session()]}, f)
 
     def missing_entry_delete_password(service, key):
@@ -245,7 +249,7 @@ def test_delete_session_password_delete_error_is_harmless(api, monkeypatch):
 
 
 def test_delete_session_non_default_port_one_name_missing_is_harmless(api, monkeypatch):
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session(port="2222")]}, f)
 
     attempted = []
@@ -265,7 +269,7 @@ def test_delete_session_non_default_port_one_name_missing_is_harmless(api, monke
 
 
 def test_delete_session_non_default_port_one_name_fails_for_real(api, monkeypatch):
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session(port="2222")]}, f)
 
     def delete_password(service, key):
@@ -306,7 +310,7 @@ def test_failed_connect_does_not_cache_password(api, monkeypatch):
     def boom(self, host, port, username, password, key_path, passphrase):
         raise RuntimeError("connection refused")
 
-    monkeypatch.setattr(app.Api, "_open", boom)
+    monkeypatch.setattr(Api, "_open", boom)
 
     result = api.connect({"host": "example.com", "port": "22", "username": "alice",
                            "password": "hunter2", "key_path": "", "passphrase": ""})
@@ -322,9 +326,9 @@ def test_cancelled_host_key_prompt_does_not_cache_password(api, monkeypatch):
     key = paramiko.RSAKey.generate(1024)
 
     def raise_unknown(self, host, port, username, password, key_path, passphrase):
-        raise app.UnknownHostKey(host, key)
+        raise UnknownHostKey(host, key)
 
-    monkeypatch.setattr(app.Api, "_open", raise_unknown)
+    monkeypatch.setattr(Api, "_open", raise_unknown)
 
     result = api.connect({"host": "example.com", "port": "22", "username": "alice",
                            "password": "hunter2", "key_path": "", "passphrase": ""})
@@ -347,7 +351,7 @@ def test_save_session_write_failure_rolls_back_keyring_write(api, monkeypatch):
                         lambda service, key, pw: set_calls.append((service, key, pw)))
     monkeypatch.setattr(keyring, "delete_password",
                         lambda service, key: deleted.append((service, key)))
-    monkeypatch.setattr(app.Api, "_save_sessions", lambda self, sessions: False)
+    monkeypatch.setattr(Api, "_save_sessions", lambda self, sessions: False)
 
     api._cred_pass = "hunter2"
     api._cred_identity = ("example.com", 22, "alice", "password")
@@ -374,7 +378,7 @@ def test_save_session_write_failure_restores_prior_password(api, monkeypatch):
                         lambda service, key, pw: set_calls.append((service, key, pw)))
     monkeypatch.setattr(keyring, "delete_password",
                         lambda service, key: deleted.append((service, key)))
-    monkeypatch.setattr(app.Api, "_save_sessions", lambda self, sessions: False)
+    monkeypatch.setattr(Api, "_save_sessions", lambda self, sessions: False)
 
     api._cred_pass = "newpw"
     api._cred_identity = ("example.com", 22, "alice", "password")
@@ -402,7 +406,7 @@ def test_save_session_write_failure_restore_failure_reports_uncertain_state(api,
 
     monkeypatch.setattr(keyring, "get_password", lambda service, key: "oldpw")
     monkeypatch.setattr(keyring, "set_password", flaky_set_password)
-    monkeypatch.setattr(app.Api, "_save_sessions", lambda self, sessions: False)
+    monkeypatch.setattr(Api, "_save_sessions", lambda self, sessions: False)
 
     api._cred_pass = "newpw"
     api._cred_identity = ("example.com", 22, "alice", "password")
@@ -416,7 +420,7 @@ def test_save_session_write_failure_without_password_does_not_touch_keyring(api,
     deleted = []
     monkeypatch.setattr(keyring, "delete_password",
                         lambda service, key: deleted.append((service, key)))
-    monkeypatch.setattr(app.Api, "_save_sessions", lambda self, sessions: False)
+    monkeypatch.setattr(Api, "_save_sessions", lambda self, sessions: False)
 
     api._cred_pass = ""
     result = api.save_session(base_session(remember=False, auth="key"))
@@ -426,13 +430,13 @@ def test_save_session_write_failure_without_password_does_not_touch_keyring(api,
 
 
 def test_delete_session_write_failure_does_not_touch_keyring(api, monkeypatch):
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session()]}, f)
 
     deleted = []
     monkeypatch.setattr(keyring, "delete_password",
                         lambda service, key: deleted.append((service, key)))
-    monkeypatch.setattr(app.Api, "_save_sessions", lambda self, sessions: False)
+    monkeypatch.setattr(Api, "_save_sessions", lambda self, sessions: False)
 
     result = api.delete_session("test-session")
 
@@ -455,9 +459,9 @@ def test_successful_password_login_stamps_identity(api, monkeypatch):
     def fake_open(self, host, port, username, password, key_path, passphrase):
         return FakeClient()
 
-    monkeypatch.setattr(app.Api, "_open", fake_open)
-    monkeypatch.setattr(app.Api, "_transport_info", lambda self, client=None: {})
-    monkeypatch.setattr(app.Api, "_sweep_scratch_files", lambda self: None)
+    monkeypatch.setattr(Api, "_open", fake_open)
+    monkeypatch.setattr(Api, "_transport_info", lambda self, client=None: {})
+    monkeypatch.setattr(Api, "_sweep_scratch_files", lambda self: None)
 
     result = api.connect({"host": " example.com ", "port": "22", "username": " alice ",
                            "password": "hunter2", "key_path": "", "passphrase": ""})
