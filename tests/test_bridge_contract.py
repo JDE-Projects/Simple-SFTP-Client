@@ -57,7 +57,7 @@ def build_manifest():
 
         return functions
 
-    return dict(sorted(get_functions(app.Api()).items()))
+    return dict(sorted(get_functions(app.Api(app.APP_VERSION)).items()))
 
 
 def _manifest_difference(expected, actual):

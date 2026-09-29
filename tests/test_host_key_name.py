@@ -11,7 +11,7 @@ server is involved. hostkey_name(host, port) is the source of truth for the name
 import paramiko
 import pytest
 
-from simple_sftp_client import Api, UnknownHostKey, hostkey_name
+from simple_sftp_client import APP_VERSION, Api, UnknownHostKey, hostkey_name
 
 HOST = "example.com"
 PORT = 2222  # non-standard, so the name must be bracketed: [example.com]:2222
@@ -34,7 +34,7 @@ def test_unknown_host_key_pins_port_aware_name(monkeypatch, keys):
         # a bare host in the exception, on purpose: the fix must ignore it
         raise UnknownHostKey(HOST, offered)
 
-    api = Api()
+    api = Api(APP_VERSION)
     monkeypatch.setattr(api, "_open", fake_open)
 
     result = api.connect(_payload())
@@ -52,7 +52,7 @@ def test_changed_host_key_pins_port_aware_name(monkeypatch, keys):
         # BadHostKeyException carries the bare host on this path
         raise paramiko.BadHostKeyException(HOST, offered, expected)
 
-    api = Api()
+    api = Api(APP_VERSION)
     monkeypatch.setattr(api, "_open", fake_open)
 
     result = api.connect(_payload())
@@ -69,7 +69,7 @@ def test_default_port_name_is_bare(monkeypatch, keys):
     def fake_open(*a, **k):
         raise UnknownHostKey(HOST, offered)
 
-    api = Api()
+    api = Api(APP_VERSION)
     monkeypatch.setattr(api, "_open", fake_open)
 
     payload = _payload()

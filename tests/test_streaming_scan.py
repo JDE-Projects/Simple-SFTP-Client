@@ -193,7 +193,7 @@ def test_backpressure_holds_queue_waiting_at_the_high_water_mark(sftp_env, monke
 def test_iter_local_yields_every_file_in_a_nested_tree_in_any_order(tmp_path):
     # _iter_local no longer sorts each directory level, so its order is
     # arbitrary; compare the results as a set instead of a list.
-    api = simple_sftp_client.Api()
+    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
     root = tmp_path / "top"
     root.mkdir()
     (root / "a.bin").write_bytes(b"a" * 10)
@@ -227,7 +227,7 @@ def test_iter_local_yields_every_file_in_a_nested_tree_in_any_order(tmp_path):
 
 
 def test_iter_local_logs_and_stops_on_unlistable_dir(tmp_path):
-    api = simple_sftp_client.Api()
+    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
     missing = tmp_path / "does_not_exist"
 
     results = list(api._iter_local(str(missing), "/top", True))
@@ -239,7 +239,7 @@ def test_iter_local_logs_and_stops_on_unlistable_dir(tmp_path):
 
 
 def test_iter_remote_yields_every_file_in_a_nested_tree_in_any_order(tmp_path):
-    api = simple_sftp_client.Api()
+    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
     root = str(tmp_path)
     sftp = _FakeSftp({
         "/top": [
@@ -267,7 +267,7 @@ def test_iter_remote_yields_every_file_in_a_nested_tree_in_any_order(tmp_path):
 
 
 def test_iter_remote_skips_temp_parts_and_confines_hostile_names(tmp_path):
-    api = simple_sftp_client.Api()
+    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
     root = str(tmp_path)
     sftp = _FakeSftp({
         "/top": [
@@ -286,7 +286,7 @@ def test_iter_remote_skips_temp_parts_and_confines_hostile_names(tmp_path):
 
 
 def test_iter_remote_logs_and_stops_when_listing_raises():
-    api = simple_sftp_client.Api()
+    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
 
     class RaisingSftp:
         def listdir_iter(self, rp):

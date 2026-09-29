@@ -129,7 +129,8 @@ def _browsing(method):
 
 
 class Api:
-    def __init__(self):
+    def __init__(self, app_version):
+        self._app_version = app_version
         self._window = None
         self.connected = False
         self.client = None
@@ -234,7 +235,7 @@ class Api:
 
     def get_meta(self):
         return {
-            "version": APP_VERSION,
+            "version": self._app_version,
             "key_types": ["Ed25519", "RSA-4096"],
             "sessions": self._load_sessions(),
         }
@@ -3075,7 +3076,7 @@ class Api:
     def check_update(self):
         """Compare the latest published release to APP_VERSION. Quiet in the UI on
         failure (see _update_error_reason), but always logged when debug is on."""
-        result = {"current": APP_VERSION, "version": None, "update": False, "offline": False}
+        result = {"current": self._app_version, "version": None, "update": False, "offline": False}
         try:
             url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
             req = Request(url, headers={"User-Agent": "Simple-SFTP-Client",
@@ -3084,9 +3085,9 @@ class Api:
                 data = json.loads(r.read().decode())
             latest = (data.get("tag_name") or "").lstrip("v")
             result["version"] = latest
-            if latest and self._is_newer(latest, APP_VERSION):
+            if latest and self._is_newer(latest, self._app_version):
                 result["update"] = True
-            debug.log(f"check_update: found v{latest}, current v{APP_VERSION}")
+            debug.log(f"check_update: found v{latest}, current v{self._app_version}")
         except Exception as e:
             result["offline"] = True
             result["reason"] = _update_error_reason(e)
@@ -3226,7 +3227,7 @@ def main():
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("JDEProjects.SimpleSFTPClient")
         except Exception:
             pass
-    api = Api()
+    api = Api(APP_VERSION)
     debug.on_warning = api._on_debug_warning
     debug.prune()  # catches anything already over the cap from a previous run
     window = webview.create_window(

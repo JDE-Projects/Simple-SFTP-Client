@@ -20,7 +20,7 @@ from app import paths
 def api(tmp_path, monkeypatch):
     """A fresh Api instance with servers.json redirected to a tmp file."""
     monkeypatch.setattr(paths, "SESSIONS_FILE", str(tmp_path / "servers.json"))
-    return app.Api()
+    return app.Api(app.APP_VERSION)
 
 
 def base_session(**overrides):

@@ -26,7 +26,7 @@ from app import paths
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "SESSIONS_FILE", str(tmp_path / "servers.json"))
-    return app.Api()
+    return app.Api(app.APP_VERSION)
 
 
 def _write_raw(path, text):

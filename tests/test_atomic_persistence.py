@@ -14,7 +14,7 @@ import pytest
 
 import simple_sftp_client as app
 from app import paths, prefs
-from simple_sftp_client import Api, KnownHostsUnreadable
+from simple_sftp_client import APP_VERSION, Api, KnownHostsUnreadable
 
 
 # ───────────── prefs ─────────────
@@ -86,7 +86,7 @@ def test_load_sessions_corrupt_file_preserved_aside(sessions_path):
     with open(sessions_path, "w", encoding="utf-8") as f:
         f.write("{not json")
 
-    api = Api()
+    api = Api(APP_VERSION)
     result = api._load_sessions()
 
     assert result == []
@@ -95,7 +95,7 @@ def test_load_sessions_corrupt_file_preserved_aside(sessions_path):
 
 
 def test_load_sessions_missing_file_is_empty_not_corrupt(sessions_path):
-    api = Api()
+    api = Api(APP_VERSION)
     assert api._load_sessions() == []
     assert glob.glob(sessions_path + ".corrupt-*") == []
 
@@ -106,7 +106,7 @@ def test_save_sessions_write_failure_returns_false_and_leaves_no_final_file(sess
 
     monkeypatch.setattr(os, "replace", boom)
 
-    api = Api()
+    api = Api(APP_VERSION)
     ok = api._save_sessions([{"name": "x"}])
 
     assert ok is False
@@ -120,13 +120,13 @@ def test_save_sessions_mkstemp_failure_returns_false(sessions_path, monkeypatch)
 
     monkeypatch.setattr(app.tempfile, "mkstemp", boom)
 
-    api = Api()
+    api = Api(APP_VERSION)
     assert api._save_sessions([{"name": "x"}]) is False
     assert not os.path.exists(sessions_path)
 
 
 def test_save_sessions_round_trips(sessions_path):
-    api = Api()
+    api = Api(APP_VERSION)
     assert api._save_sessions([{"name": "x"}]) is True
     with open(sessions_path, encoding="utf-8") as f:
         data = json.load(f)
@@ -187,7 +187,7 @@ def test_connect_refuses_when_known_hosts_unreadable(known_hosts_path, monkeypat
     with open(known_hosts_path, "w", encoding="utf-8") as f:
         f.write("garbage garbage garbage\n")
 
-    api = Api()
+    api = Api(APP_VERSION)
     result = api.connect({"host": "example.com", "username": "u", "password": "p"})
 
     assert result["ok"] is False
@@ -201,7 +201,7 @@ def test_trust_host_key_on_corrupt_file_leaves_it_untouched(known_hosts_path):
     with open(known_hosts_path, "w", encoding="utf-8") as f:
         f.write(original)
 
-    api = Api()
+    api = Api(APP_VERSION)
     key = paramiko.RSAKey.generate(1024)
     api._pending_host_key = ("example.com", key)
 
@@ -216,7 +216,7 @@ def test_get_host_key_on_corrupt_file_reports_unreadable(known_hosts_path):
     with open(known_hosts_path, "w", encoding="utf-8") as f:
         f.write("garbage garbage garbage\n")
 
-    api = Api()
+    api = Api(APP_VERSION)
     result = api.get_host_key("example.com")
 
     assert result["known"] is False
@@ -224,7 +224,7 @@ def test_get_host_key_on_corrupt_file_reports_unreadable(known_hosts_path):
 
 
 def test_trust_host_key_succeeds_on_empty_file_and_key_is_present(known_hosts_path):
-    api = Api()
+    api = Api(APP_VERSION)
     key = paramiko.RSAKey.generate(1024)
     api._pending_host_key = ("example.com", key)
 
@@ -236,7 +236,7 @@ def test_trust_host_key_succeeds_on_empty_file_and_key_is_present(known_hosts_pa
 
 
 def test_trust_host_key_replace_failure_leaves_prior_file_intact(known_hosts_path, monkeypatch):
-    api = Api()
+    api = Api(APP_VERSION)
     first_key = paramiko.RSAKey.generate(1024)
     api._pending_host_key = ("example.com", first_key)
     assert api.trust_host_key()["ok"] is True

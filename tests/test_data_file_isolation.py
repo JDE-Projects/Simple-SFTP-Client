@@ -12,7 +12,7 @@ def test_app_save_paths_use_the_isolated_data_folder(isolate_app_data_files):
     repo_root = Path(__file__).resolve().parents[1]
 
     assert app.save_prefs({"theme": "light"}) is True
-    result = app.Api().save_session({
+    result = app.Api(app.APP_VERSION).save_session({
         "name": "isolated",
         "host": "example.com",
         "port": "22",

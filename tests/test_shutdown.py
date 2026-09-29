@@ -10,7 +10,7 @@ touch only this app's own scratch files, and shutdown() must be safe to call
 more than once.
 
 Runs against the in-process SFTP server from conftest.py (sftp_env) plus a
-few pure Api() instances with a stubbed _open for the connect-only cases.
+few pure Api(APP_VERSION) instances with a stubbed _open for the connect-only cases.
 """
 import os
 import threading
@@ -19,7 +19,7 @@ import time
 from app import paths
 from app.transfer_queue import FAILED, WAITING
 
-from simple_sftp_client import Api, is_temp_part
+from simple_sftp_client import APP_VERSION, Api, is_temp_part
 
 
 def _remote_temp_files(server_root):
@@ -164,7 +164,7 @@ class _FakeClientNormalizeFail:
 
 
 def test_connect_failure_then_success_leaves_no_dangling_client(monkeypatch, tmp_path):
-    api = Api()
+    api = Api(APP_VERSION)
     # Keep the post-connect scratch sweep off the real home directory.
     api._local_cwd = str(tmp_path)
     calls = []
@@ -198,7 +198,7 @@ def test_connect_normalize_failure_leaves_state_unpublished(monkeypatch, tmp_pat
     # session must be torn down rather than left holding a closed transport
     # while the app reports "connected". Fails against the pre-fix code, which
     # set self.client/sftp/connected before normalizing and left them set.
-    api = Api()
+    api = Api(APP_VERSION)
     api._local_cwd = str(tmp_path)
     calls = []
     monkeypatch.setattr(api, "_open", lambda *a, **k: _FakeClientNormalizeFail(calls))
@@ -217,7 +217,7 @@ def test_connect_normalize_failure_leaves_state_unpublished(monkeypatch, tmp_pat
 
 
 def test_connect_normalize_failure_then_success(monkeypatch, tmp_path):
-    api = Api()
+    api = Api(APP_VERSION)
     api._local_cwd = str(tmp_path)
     calls = []
     attempts = [_FakeClientNormalizeFail(calls), _FakeClientOk(calls)]
@@ -238,7 +238,7 @@ def test_connect_normalize_failure_then_success(monkeypatch, tmp_path):
 
 
 def test_disconnect_after_normalize_failure_is_clean(monkeypatch, tmp_path):
-    api = Api()
+    api = Api(APP_VERSION)
     api._local_cwd = str(tmp_path)
     calls = []
     monkeypatch.setattr(api, "_open", lambda *a, **k: _FakeClientNormalizeFail(calls))
@@ -252,7 +252,7 @@ def test_disconnect_after_normalize_failure_is_clean(monkeypatch, tmp_path):
 
 
 def test_failed_reconnect_preserves_prior_good_connection(monkeypatch, tmp_path):
-    api = Api()
+    api = Api(APP_VERSION)
     api._local_cwd = str(tmp_path)
     calls = []
     attempts = [_FakeClientOk(calls), _FakeClientNormalizeFail(calls)]
@@ -341,7 +341,7 @@ def test_scratch_sweep_on_connect_removes_only_matching_files(monkeypatch, tmp_p
     (local_dir / ".foo.bin.deadbeef.sxtpart").write_bytes(b"partial")
     (local_dir / ".bar.bin.cafebabe.sxtpart").write_bytes(b"partial2")
 
-    api = Api()
+    api = Api(APP_VERSION)
     api._local_cwd = str(local_dir)
     calls = []
     monkeypatch.setattr(api, "_open", lambda *a, **k: _FakeClientOk(calls))
@@ -375,7 +375,7 @@ def test_real_connect_lifecycle_sweeps_scratch_and_shuts_down(
     monkeypatch.setattr(paths, "KNOWN_HOSTS_FILE",
                         str(tmp_path / "known_hosts"))
 
-    api = Api()
+    api = Api(APP_VERSION)
     # Browse the local folder first so the sweep is scoped to it, then drop a
     # leftover scratch file there for connect() to clean up.
     api.list_local(str(local_dir))

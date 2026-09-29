@@ -99,7 +99,7 @@ def main(argv):
     fs_cls = sftp_server_core.make_fs(server_root)
     srv_sock, port = sftp_server_core.start(fs_cls, paramiko.RSAKey.generate(2048))
 
-    api = simple_sftp_client.Api()
+    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
     simple_sftp_client.debug.on_warning = api._on_debug_warning
     # Point the debug log at a folder that doesn't exist, so toggling it on
     # always fails: this exercises the "write failed, warn, turn off" path

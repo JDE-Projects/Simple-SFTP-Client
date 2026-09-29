@@ -65,7 +65,7 @@ def _remote_tree(n):
 # ───────────── local side over the limit refuses before the remote walk starts ─────────────
 
 def test_compare_refuses_when_local_passes_limit_remote_never_entered(tmp_path):
-    api = simple_sftp_client.Api()
+    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     _make_local_files(local_dir, LIMIT + 1)
@@ -76,7 +76,7 @@ def test_compare_refuses_when_local_passes_limit_remote_never_entered(tmp_path):
 
 
 def test_sync_refuses_when_local_passes_limit_remote_never_entered(tmp_path):
-    api = simple_sftp_client.Api()
+    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     _make_local_files(local_dir, LIMIT + 1)
@@ -89,7 +89,7 @@ def test_sync_refuses_when_local_passes_limit_remote_never_entered(tmp_path):
 # ───────────── remote side over the limit also refuses ─────────────
 
 def test_compare_refuses_when_remote_passes_limit(tmp_path):
-    api = simple_sftp_client.Api()
+    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     _make_local_files(local_dir, LIMIT)
@@ -100,7 +100,7 @@ def test_compare_refuses_when_remote_passes_limit(tmp_path):
 
 
 def test_sync_refuses_when_remote_passes_limit(tmp_path):
-    api = simple_sftp_client.Api()
+    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     _make_local_files(local_dir, LIMIT)
@@ -113,7 +113,7 @@ def test_sync_refuses_when_remote_passes_limit(tmp_path):
 # ───────────── exactly at the limit on both sides still succeeds ─────────────
 
 def test_exactly_at_limit_on_both_sides_succeeds_for_compare(tmp_path):
-    api = simple_sftp_client.Api()
+    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     _make_local_files(local_dir, LIMIT)
@@ -126,7 +126,7 @@ def test_exactly_at_limit_on_both_sides_succeeds_for_compare(tmp_path):
 
 
 def test_exactly_at_limit_on_both_sides_succeeds_for_sync(tmp_path):
-    api = simple_sftp_client.Api()
+    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     _make_local_files(local_dir, LIMIT)
