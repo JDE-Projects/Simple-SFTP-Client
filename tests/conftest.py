@@ -2,7 +2,7 @@
 Shared test setup.
 
 Hosts a throwaway, in-process SFTP server and the fixtures that wire a real
-simple_sftp_client.Api to it. Nothing is installed or left running: the server
+Api (app/api.py) to it. Nothing is installed or left running: the server
 (tools/sftp_server_core.py, shared with the manual test server) runs on a
 daemon thread bound to an ephemeral port on 127.0.0.1, with a throwaway
 in-memory host key, serving a pytest tmp_path.
@@ -14,8 +14,10 @@ from pathlib import Path
 import paramiko
 import pytest
 
-import simple_sftp_client
 from app import paths, prefs
+from app.api import Api
+from app.debug import debug
+from simple_sftp_client import APP_VERSION
 from tools import sftp_server_core
 from tools.sftp_server_core import PASSWORD, USER
 
@@ -71,7 +73,7 @@ def isolate_app_data_files(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(paths, "KNOWN_HOSTS_FILE", str(data_dir / "known_hosts"))
     monkeypatch.setattr(prefs, "_pref_path",
                         lambda: str(data_dir / "simple_sftp_client.pref"))
-    monkeypatch.setattr(simple_sftp_client.debug, "log_dir", str(data_dir))
+    monkeypatch.setattr(debug, "log_dir", str(data_dir))
     return data_dir
 
 
@@ -105,7 +107,7 @@ def _start_sftp_env(tmp_path, fs_extra_attrs=None):
                     look_for_keys=False, allow_agent=False)
     sftp = client.open_sftp()
 
-    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
+    api = Api(APP_VERSION)
     api.client = client
     api.sftp = sftp
     api.connected = True

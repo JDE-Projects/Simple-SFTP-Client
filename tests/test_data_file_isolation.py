@@ -2,8 +2,10 @@
 import json
 from pathlib import Path
 
-import simple_sftp_client as app
 from app import paths, prefs
+from app.api import Api
+from app.prefs import save_prefs
+from simple_sftp_client import APP_VERSION
 
 
 def test_app_save_paths_use_the_isolated_data_folder(isolate_app_data_files):
@@ -11,8 +13,8 @@ def test_app_save_paths_use_the_isolated_data_folder(isolate_app_data_files):
     data_dir = isolate_app_data_files
     repo_root = Path(__file__).resolve().parents[1]
 
-    assert app.save_prefs({"theme": "light"}) is True
-    result = app.Api(app.APP_VERSION).save_session({
+    assert save_prefs({"theme": "light"}) is True
+    result = Api(APP_VERSION).save_session({
         "name": "isolated",
         "host": "example.com",
         "port": "22",

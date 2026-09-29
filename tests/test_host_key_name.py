@@ -11,7 +11,10 @@ server is involved. hostkey_name(host, port) is the source of truth for the name
 import paramiko
 import pytest
 
-from simple_sftp_client import APP_VERSION, Api, UnknownHostKey, hostkey_name
+from app.api import Api
+from app.errors import UnknownHostKey
+from app.hostkeys import hostkey_name
+from simple_sftp_client import APP_VERSION
 
 HOST = "example.com"
 PORT = 2222  # non-standard, so the name must be bracketed: [example.com]:2222

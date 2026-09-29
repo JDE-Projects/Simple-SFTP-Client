@@ -1,6 +1,6 @@
 """
 Integration tests for the transfer queue backend (transfer_queue.py wired
-into simple_sftp_client.Api) against a real, in-process paramiko SFTP server.
+into Api in app/api.py) against a real, in-process paramiko SFTP server.
 
 The server, the connected Api, and the small polling helpers all come from
 fixtures in conftest.py (sftp_env, wait_for_drain, state_of). Nothing is

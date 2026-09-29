@@ -19,7 +19,9 @@ import time
 from app import paths
 from app.transfer_queue import FAILED, WAITING
 
-from simple_sftp_client import APP_VERSION, Api, is_temp_part
+from app.api import Api
+from app.paths import is_temp_part
+from simple_sftp_client import APP_VERSION
 
 
 def _remote_temp_files(server_root):

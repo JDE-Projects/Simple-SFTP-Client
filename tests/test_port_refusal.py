@@ -9,10 +9,13 @@ silently test port 22 instead of refusing. These tests demonstrate that
 regression is gone: for an invalid port, the socket layer (and, for
 connect(), _open()) must never be reached at all.
 """
+import socket
+
 import pytest
 
-import simple_sftp_client as app
 from app import paths
+from app.api import Api
+from simple_sftp_client import APP_VERSION
 
 INVALID_PORTS = ["0", "65536", "-1", "abc", "22 ", " 22", "999999", "1.5"]
 
@@ -20,7 +23,7 @@ INVALID_PORTS = ["0", "65536", "-1", "abc", "22 ", " 22", "999999", "1.5"]
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "SESSIONS_FILE", str(tmp_path / "servers.json"))
-    return app.Api(app.APP_VERSION)
+    return Api(APP_VERSION)
 
 
 # ───────────── test_connection ─────────────
@@ -33,7 +36,7 @@ def test_test_connection_refuses_invalid_port_without_connecting(api, port, monk
         calls.append(addr)
         raise OSError("should not be reached")
 
-    monkeypatch.setattr(app.socket, "create_connection", spy_create_connection)
+    monkeypatch.setattr(socket, "create_connection", spy_create_connection)
 
     result = api.test_connection({"host": "example.com", "port": port})
 
@@ -49,7 +52,7 @@ def test_test_connection_blank_port_defaults_to_22(api, monkeypatch):
         seen["addr"] = addr
         raise OSError("refused")
 
-    monkeypatch.setattr(app.socket, "create_connection", fake_create_connection)
+    monkeypatch.setattr(socket, "create_connection", fake_create_connection)
 
     api.test_connection({"host": "example.com", "port": ""})
 
@@ -63,7 +66,7 @@ def test_test_connection_valid_nondefault_port_used_as_given(api, monkeypatch):
         seen["addr"] = addr
         raise OSError("refused")
 
-    monkeypatch.setattr(app.socket, "create_connection", fake_create_connection)
+    monkeypatch.setattr(socket, "create_connection", fake_create_connection)
 
     api.test_connection({"host": "example.com", "port": "2222"})
 
@@ -77,7 +80,7 @@ def test_connect_refuses_invalid_port_before_opening(api, port, monkeypatch):
     def must_not_be_called(*a, **k):
         raise AssertionError("_open must not be reached for an invalid port")
 
-    monkeypatch.setattr(app.Api, "_open", must_not_be_called)
+    monkeypatch.setattr(Api, "_open", must_not_be_called)
 
     result = api.connect({"host": "example.com", "username": "u", "password": "pw", "port": port})
 
@@ -103,9 +106,9 @@ def test_connect_blank_port_defaults_to_22(api, monkeypatch):
         seen["port"] = port
         return FakeClient()
 
-    monkeypatch.setattr(app.Api, "_open", fake_open)
-    monkeypatch.setattr(app.Api, "_transport_info", lambda self, client=None: {})
-    monkeypatch.setattr(app.Api, "_sweep_scratch_files", lambda self: None)
+    monkeypatch.setattr(Api, "_open", fake_open)
+    monkeypatch.setattr(Api, "_transport_info", lambda self, client=None: {})
+    monkeypatch.setattr(Api, "_sweep_scratch_files", lambda self: None)
 
     result = api.connect({"host": "example.com", "username": "u", "password": "pw", "port": ""})
 

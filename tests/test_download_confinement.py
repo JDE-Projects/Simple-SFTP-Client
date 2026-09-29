@@ -8,7 +8,7 @@ import os
 
 import pytest
 
-from simple_sftp_client import safe_local_child
+from app.paths import safe_local_child
 
 
 # ───────────── unit tests: safe_local_child ─────────────

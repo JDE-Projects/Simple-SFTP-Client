@@ -17,7 +17,7 @@ import time
 
 import paramiko
 
-from simple_sftp_client import is_temp_part
+from app.paths import is_temp_part
 
 
 # ───────────── shared browsing session serialization ─────────────

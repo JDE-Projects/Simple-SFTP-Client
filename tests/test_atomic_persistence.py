@@ -8,13 +8,17 @@ none of them ever touches a real app file.
 import glob
 import json
 import os
+import tempfile
 
 import paramiko
 import pytest
 
-import simple_sftp_client as app
 from app import paths, prefs
-from simple_sftp_client import APP_VERSION, Api, KnownHostsUnreadable
+from app.api import Api
+from app.errors import KnownHostsUnreadable
+from app.hostkeys import load_known_hosts
+from app.prefs import load_prefs, save_prefs
+from simple_sftp_client import APP_VERSION
 
 
 # ───────────── prefs ─────────────
@@ -30,7 +34,7 @@ def test_load_prefs_corrupt_file_preserved_aside(pref_path):
     with open(pref_path, "w", encoding="utf-8") as f:
         f.write("not valid json{{{")
 
-    result = app.load_prefs()
+    result = load_prefs()
 
     assert result == {}
     assert not os.path.exists(pref_path)
@@ -41,7 +45,7 @@ def test_load_prefs_corrupt_file_preserved_aside(pref_path):
 
 
 def test_save_prefs_missing_file_is_first_run(pref_path):
-    assert app.load_prefs() == {}
+    assert load_prefs() == {}
 
 
 def test_save_prefs_write_failure_returns_false_and_leaves_no_final_file(pref_path, monkeypatch):
@@ -50,7 +54,7 @@ def test_save_prefs_write_failure_returns_false_and_leaves_no_final_file(pref_pa
 
     monkeypatch.setattr(os, "replace", boom)
 
-    ok = app.save_prefs({"theme": "dark"})
+    ok = save_prefs({"theme": "dark"})
 
     assert ok is False
     assert not os.path.exists(pref_path)
@@ -62,15 +66,15 @@ def test_save_prefs_mkstemp_failure_returns_false(pref_path, monkeypatch):
     def boom(*a, **k):
         raise OSError("permission denied")
 
-    monkeypatch.setattr(app.tempfile, "mkstemp", boom)
+    monkeypatch.setattr(tempfile, "mkstemp", boom)
 
-    assert app.save_prefs({"theme": "dark"}) is False
+    assert save_prefs({"theme": "dark"}) is False
     assert not os.path.exists(pref_path)
 
 
 def test_save_prefs_round_trips(pref_path):
-    assert app.save_prefs({"theme": "light"}) is True
-    assert app.load_prefs() == {"theme": "light"}
+    assert save_prefs({"theme": "light"}) is True
+    assert load_prefs() == {"theme": "light"}
 
 
 # ───────────── sessions ─────────────
@@ -118,7 +122,7 @@ def test_save_sessions_mkstemp_failure_returns_false(sessions_path, monkeypatch)
     def boom(*a, **k):
         raise OSError("permission denied")
 
-    monkeypatch.setattr(app.tempfile, "mkstemp", boom)
+    monkeypatch.setattr(tempfile, "mkstemp", boom)
 
     api = Api(APP_VERSION)
     assert api._save_sessions([{"name": "x"}]) is False
@@ -148,7 +152,7 @@ def _valid_line(host="example.com"):
 
 
 def test_load_known_hosts_missing_file_is_clean_first_contact(known_hosts_path):
-    hk = app.load_known_hosts()
+    hk = load_known_hosts()
     assert len(hk) == 0
 
 
@@ -157,7 +161,7 @@ def test_load_known_hosts_all_valid_lines_loads_fine(known_hosts_path):
         f.write(_valid_line("a.example.com"))
         f.write(_valid_line("b.example.com"))
 
-    hk = app.load_known_hosts()
+    hk = load_known_hosts()
     assert hk.lookup("a.example.com") is not None
     assert hk.lookup("b.example.com") is not None
 
@@ -171,7 +175,7 @@ def test_load_known_hosts_one_bad_line_among_valid_raises_strictly(known_hosts_p
         f.write("this is not a valid known_hosts line\n")
 
     with pytest.raises(KnownHostsUnreadable):
-        app.load_known_hosts()
+        load_known_hosts()
 
 
 def test_load_known_hosts_blank_lines_and_comments_are_fine(known_hosts_path):
@@ -179,7 +183,7 @@ def test_load_known_hosts_blank_lines_and_comments_are_fine(known_hosts_path):
         f.write("# a comment\n\n")
         f.write(_valid_line("a.example.com"))
 
-    hk = app.load_known_hosts()
+    hk = load_known_hosts()
     assert hk.lookup("a.example.com") is not None
 
 
@@ -231,7 +235,7 @@ def test_trust_host_key_succeeds_on_empty_file_and_key_is_present(known_hosts_pa
     result = api.trust_host_key()
 
     assert result["ok"] is True
-    hk = app.load_known_hosts()
+    hk = load_known_hosts()
     assert hk.lookup("example.com") is not None
 
 

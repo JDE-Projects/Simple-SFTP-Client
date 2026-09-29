@@ -19,14 +19,15 @@ import json
 
 import pytest
 
-import simple_sftp_client as app
 from app import paths
+from app.api import Api
+from simple_sftp_client import APP_VERSION
 
 
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "SESSIONS_FILE", str(tmp_path / "servers.json"))
-    return app.Api(app.APP_VERSION)
+    return Api(APP_VERSION)
 
 
 def _write_raw(path, text):

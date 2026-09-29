@@ -6,7 +6,8 @@ the Api resets back to the default once the pool empties.
 import os
 import time
 
-from simple_sftp_client import WORKER_COUNT, WORKER_COUNT_MAX, worker_target
+from app.constants import WORKER_COUNT, WORKER_COUNT_MAX
+from app.workers import worker_target
 from app.transfer_queue import ACTIVE, COMPLETED, WAITING
 
 

@@ -3,7 +3,8 @@ The connect log's "Negotiated:" line lists only algorithms the connection
 actually reports. Key exchange is never listed: paramiko discards the agreed
 method once the handshake ends, so the line used to read "kex None".
 """
-from simple_sftp_client import Api, negotiated_summary
+from app.api import Api
+from app.formatting import negotiated_summary
 
 
 class FakeTransport:

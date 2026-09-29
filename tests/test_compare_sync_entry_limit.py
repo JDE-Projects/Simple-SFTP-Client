@@ -13,8 +13,10 @@ import stat
 
 import pytest
 
-import simple_sftp_client
 from app import constants
+from app.api import Api
+from app.errors import ScanIncomplete
+from simple_sftp_client import APP_VERSION
 
 
 LIMIT = 3
@@ -65,55 +67,55 @@ def _remote_tree(n):
 # ───────────── local side over the limit refuses before the remote walk starts ─────────────
 
 def test_compare_refuses_when_local_passes_limit_remote_never_entered(tmp_path):
-    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     _make_local_files(local_dir, LIMIT + 1)
     sftp = _NeverCalledSftp()
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete, match="Too many files to compare"):
+    with pytest.raises(ScanIncomplete, match="Too many files to compare"):
         api._compute_compare(sftp, str(local_dir), "/")
 
 
 def test_sync_refuses_when_local_passes_limit_remote_never_entered(tmp_path):
-    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     _make_local_files(local_dir, LIMIT + 1)
     sftp = _NeverCalledSftp()
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete, match="Too many files to compare"):
+    with pytest.raises(ScanIncomplete, match="Too many files to compare"):
         api._compute_sync(sftp, str(local_dir), "/", "upload")
 
 
 # ───────────── remote side over the limit also refuses ─────────────
 
 def test_compare_refuses_when_remote_passes_limit(tmp_path):
-    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     _make_local_files(local_dir, LIMIT)
     sftp = _FakeSftp(_remote_tree(LIMIT + 1))
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete, match="Too many files to compare"):
+    with pytest.raises(ScanIncomplete, match="Too many files to compare"):
         api._compute_compare(sftp, str(local_dir), "/")
 
 
 def test_sync_refuses_when_remote_passes_limit(tmp_path):
-    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     _make_local_files(local_dir, LIMIT)
     sftp = _FakeSftp(_remote_tree(LIMIT + 1))
 
-    with pytest.raises(simple_sftp_client.ScanIncomplete, match="Too many files to compare"):
+    with pytest.raises(ScanIncomplete, match="Too many files to compare"):
         api._compute_sync(sftp, str(local_dir), "/", "download")
 
 
 # ───────────── exactly at the limit on both sides still succeeds ─────────────
 
 def test_exactly_at_limit_on_both_sides_succeeds_for_compare(tmp_path):
-    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     _make_local_files(local_dir, LIMIT)
@@ -126,7 +128,7 @@ def test_exactly_at_limit_on_both_sides_succeeds_for_compare(tmp_path):
 
 
 def test_exactly_at_limit_on_both_sides_succeeds_for_sync(tmp_path):
-    api = simple_sftp_client.Api(simple_sftp_client.APP_VERSION)
+    api = Api(APP_VERSION)
     local_dir = tmp_path / "local"
     local_dir.mkdir()
     _make_local_files(local_dir, LIMIT)

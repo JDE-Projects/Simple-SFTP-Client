@@ -16,7 +16,8 @@ HTML_PATH = Path(__file__).resolve().parents[1] / "simple_sftp_client-UI.html"
 
 def build_manifest():
     """Return the API names and parameters pywebview exposes from a fresh Api."""
-    app = import_module("simple_sftp_client")
+    api_module = import_module("app.api")
+    launcher = import_module("simple_sftp_client")
     exposed_objects = []
 
     # Copied from pywebview 6.2.1 webview/util.py inject_pywebview's nested
@@ -57,7 +58,7 @@ def build_manifest():
 
         return functions
 
-    return dict(sorted(get_functions(app.Api(app.APP_VERSION)).items()))
+    return dict(sorted(get_functions(api_module.Api(launcher.APP_VERSION)).items()))
 
 
 def _manifest_difference(expected, actual):

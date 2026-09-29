@@ -8,7 +8,8 @@ non-blank value.
 """
 import pytest
 
-from simple_sftp_client import InvalidPort, parse_port
+from app.errors import InvalidPort
+from app.validation import parse_port
 
 
 @pytest.mark.parametrize("value", [None, "", "   "])
