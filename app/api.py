@@ -4,13 +4,11 @@ import os
 import stat
 import errno
 import time
-import shutil
 import threading
 import functools
 import traceback
 import posixpath
 
-import webview
 
 from app import constants
 from app import services
@@ -255,125 +253,34 @@ class Api:
 
     @_browsing
     def ping(self):
-        # latency for the health indicator
-        if not self.connected:
-            return {"ok": False}
-        try:
-            t0 = time.time()
-            self.sftp.stat(".")
-            return {"ok": True, "ms": int((time.time() - t0) * 1000)}
-        except Exception:
-            self.connected = False
-            return {"ok": False}
+        return services.browsing.ping(self)
 
     # ───────────── listing ─────────────
     def list_local(self, path):
-        if path in ("", "DRIVES") and os.name == "nt":
-            import string
-            drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
-            return {"ok": True, "cwd": "DRIVES", "parent": None,
-                    "entries": [{"name": d, "is_dir": True, "size": 0, "mtime": 0} for d in drives]}
-        path = path or os.path.expanduser("~")
-        try:
-            entries = []
-            for name in os.listdir(path):
-                if is_temp_part(name):
-                    continue
-                full = os.path.join(path, name)
-                try:
-                    st = os.stat(full)
-                    entries.append({"name": name, "is_dir": os.path.isdir(full),
-                                    "size": st.st_size, "mtime": int(st.st_mtime)})
-                except Exception:
-                    continue
-            parent = os.path.dirname(path.rstrip("\\/")) or ("DRIVES" if os.name == "nt" else "/")
-            if os.name == "nt" and len(path.rstrip("\\/")) <= 2:
-                parent = "DRIVES"
-            # Remembered so a later connect() knows which real folder to
-            # sweep for leftover scratch files (see _sweep_scratch_files).
-            # Never set from the DRIVES branch above, which isn't one.
-            self._local_cwd = path
-            return {"ok": True, "cwd": path, "parent": parent, "entries": entries}
-        except Exception as e:
-            return {"ok": False, "error": friendly_error(e)}
+        return services.browsing.list_local(self, path)
 
     @_browsing
     def list_remote(self, path):
-        if not self.connected:
-            return {"ok": False, "error": "Not connected."}
-        try:
-            path = self.sftp.normalize(path or ".")
-            entries = []
-            for a in self.sftp.listdir_attr(path):
-                if is_temp_part(a.filename):
-                    continue
-                entries.append({"name": a.filename, "is_dir": stat.S_ISDIR(a.st_mode),
-                                "size": a.st_size, "mtime": int(a.st_mtime or 0)})
-            parent = posixpath.dirname(path.rstrip("/")) or "/"
-            self._vlog(f"ls {path} → {len(entries)} item(s)")
-            return {"ok": True, "cwd": path, "parent": parent, "entries": entries}
-        except Exception as e:
-            return {"ok": False, "error": friendly_error(e)}
+        return services.browsing.list_remote(self, path)
 
     # ───────────── file ops ─────────────
     @_browsing
     def make_dir(self, side, path, name):
-        try:
-            if side == "local":
-                os.makedirs(os.path.join(path, name), exist_ok=False)
-            else:
-                target = posixpath.join(path, name)
-                self.sftp.mkdir(target)
-                self._vlog(f"mkdir {target}")
-            return {"ok": True}
-        except Exception as e:
-            return {"ok": False, "error": friendly_error(e)}
+        return services.browsing.make_dir(self, side, path, name)
 
     @_browsing
     def rename(self, side, path, old, new):
-        try:
-            if side == "local":
-                os.rename(os.path.join(path, old), os.path.join(path, new))
-            else:
-                self.sftp.rename(posixpath.join(path, old), posixpath.join(path, new))
-                self._vlog(f"rename {posixpath.join(path, old)} → {new}")
-            return {"ok": True}
-        except Exception as e:
-            return {"ok": False, "error": friendly_error(e)}
+        return services.browsing.rename(self, side, path, old, new)
 
     @_browsing
     def delete(self, side, path, items):
-        errs = []
-        for it in items:
-            try:
-                if side == "local":
-                    full = os.path.join(path, it["name"])
-                    shutil.rmtree(full) if it["is_dir"] else os.remove(full)
-                else:
-                    full = posixpath.join(path, it["name"])
-                    self._rremove(full) if it["is_dir"] else self.sftp.remove(full)
-                    if not it["is_dir"]:
-                        self._vlog(f"remove {full}")
-            except Exception as e:
-                errs.append(f"{it['name']}: {e}")
-        return {"ok": True, "errors": errs}
+        return services.browsing.delete(self, side, path, items)
 
     def _rremove(self, path):
-        # Deleting a folder removes everything in it, including any leftover
-        # scratch file from an interrupted transfer: skipping those would
-        # leave the directory non-empty and make the final rmdir fail.
-        for a in self.sftp.listdir_attr(path):
-            child = posixpath.join(path, a.filename)
-            self._rremove(child) if stat.S_ISDIR(a.st_mode) else self.sftp.remove(child)
-        self.sftp.rmdir(path)
-        self._vlog(f"rmdir {path}")
+        return services.browsing._rremove(self, path)
 
     def open_local(self, path, name):
-        try:
-            os.startfile(os.path.join(path, name))  # noqa (Windows)
-            return {"ok": True}
-        except Exception as e:
-            return {"ok": False, "error": friendly_error(e)}
+        return services.browsing.open_local(self, path, name)
 
     # ───────────── background scans (streaming enqueue) ─────────────
     def _register_scan(self):
@@ -1911,38 +1818,7 @@ class Api:
 
     @_browsing
     def calc_remote_size(self, remote_dir, name):
-        if not self.connected:
-            return {"ok": False, "error": "Not connected."}
-        target = posixpath.join(remote_dir, name)
-        total = {"bytes": 0, "files": 0}
-        self._cancel.clear()
-
-        def walk(p):
-            if self._cancel.is_set():
-                return
-            try:
-                attrs = self.sftp.listdir_attr(p)
-            except Exception:
-                return
-            for a in attrs:
-                if self._cancel.is_set():
-                    return
-                if is_temp_part(a.filename):
-                    continue
-                if stat.S_ISDIR(a.st_mode):
-                    walk(posixpath.join(p, a.filename))
-                else:
-                    total["bytes"] += a.st_size or 0
-                    total["files"] += 1
-                    if total["files"] % 50 == 0:
-                        self._emit("size_progress", {"files": total["files"],
-                                                     "bytes": human_size(total["bytes"])})
-        try:
-            walk(target)
-            return {"ok": True, "bytes": total["bytes"], "human": human_size(total["bytes"]),
-                    "files": total["files"]}
-        except Exception as e:
-            return {"ok": False, "error": friendly_error(e)}
+        return services.browsing.calc_remote_size(self, remote_dir, name)
 
     # ───────────── keygen / install key ─────────────
     def default_key_path(self, key_type):
@@ -1952,16 +1828,7 @@ class Api:
         return services.keys.browse_save_key(self, suggested)
 
     def browse_folder(self):
-        if not self._window:
-            return ""
-        try:
-            dlg = webview.FileDialog.FOLDER
-        except AttributeError:  # older pywebview
-            dlg = webview.FOLDER_DIALOG
-        res = self._window.create_file_dialog(dlg)
-        if not res:
-            return ""
-        return res if isinstance(res, str) else res[0]
+        return services.browsing.browse_folder(self)
 
     def generate_key(self, key_type, out_path, passphrase, overwrite=False):
         return services.keys.generate_key(self, key_type, out_path, passphrase, overwrite)
