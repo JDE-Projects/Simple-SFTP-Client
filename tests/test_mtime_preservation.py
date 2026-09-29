@@ -241,7 +241,7 @@ def test_download_without_remote_time_invalidated_by_real_size_change(
 
 def test_mtime_fallback_cleared_on_disconnect(
         sftp_env_no_set_time, wait_for_queue_count, wait_for_drain, state_of):
-    """The fallback store is scoped to one connection: shutdown() must clear
+    """The fallback store is scoped to one connection: _shutdown() must clear
     it, so a fresh connection never inherits a stale memory from a previous
     session."""
     api, _server_root, local_dir = sftp_env_no_set_time
@@ -254,7 +254,7 @@ def test_mtime_fallback_cleared_on_disconnect(
     assert state_of(api, item_id)["state"] == COMPLETED
     assert api._mtime_fallback
 
-    api.shutdown()
+    api._shutdown()
     assert api._mtime_fallback == {}
 
 

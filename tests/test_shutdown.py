@@ -6,7 +6,7 @@ real destination untouched and stop worker threads within a bounded time, a
 failed connect() must never leak a client or corrupt state for the next
 attempt, a mid-batch server drop must stop the queue promptly and report the
 failure once (not once per remaining file), the scratch sweep on connect must
-touch only this app's own scratch files, and shutdown() must be safe to call
+touch only this app's own scratch files, and _shutdown() must be safe to call
 more than once.
 
 Runs against the in-process SFTP server from conftest.py (sftp_env) plus a
@@ -82,7 +82,7 @@ def test_shutdown_mid_transfer_leaves_destination_intact_and_threads_stop(
     _wait_until_not_waiting(api, item_id)
 
     start = time.time()
-    assert api.shutdown() == {"ok": True}
+    assert api._shutdown() == {"ok": True}
     elapsed = time.time() - start
 
     assert elapsed < 8
@@ -419,8 +419,8 @@ def test_real_connect_lifecycle_sweeps_scratch_and_shuts_down(
 
 def test_shutdown_is_safe_to_call_twice(sftp_env):
     api, server_root, local_dir = sftp_env
-    assert api.shutdown() == {"ok": True}
-    assert api.shutdown() == {"ok": True}
+    assert api._shutdown() == {"ok": True}
+    assert api._shutdown() == {"ok": True}
     assert api._connected is False
     assert api._client is None
     assert api._sftp is None
