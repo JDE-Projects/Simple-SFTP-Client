@@ -9,7 +9,7 @@ set-time-unsupported variant, sftp_env_no_set_time).
 import os
 
 import simple_sftp_client
-from transfer_queue import COMPLETED, SKIPPED
+from app.transfer_queue import COMPLETED, SKIPPED
 
 from simple_sftp_client import MTIME_TOL
 

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import simple_sftp_client as app
+from app import paths, prefs
 
 
 def test_app_save_paths_use_the_isolated_data_folder(isolate_app_data_files):
@@ -23,9 +24,9 @@ def test_app_save_paths_use_the_isolated_data_folder(isolate_app_data_files):
     })
 
     assert result["ok"] is True
-    assert Path(app._pref_path()).parent == data_dir
-    assert Path(app.SESSIONS_FILE).parent == data_dir
+    assert Path(prefs._pref_path()).parent == data_dir
+    assert Path(paths.SESSIONS_FILE).parent == data_dir
     assert (data_dir / "simple_sftp_client.pref").is_file()
     assert json.loads((data_dir / "servers.json").read_text(encoding="utf-8"))["sessions"]
-    assert Path(app._pref_path()) != repo_root / "simple_sftp_client.pref"
-    assert Path(app.SESSIONS_FILE) != repo_root / "servers.json"
+    assert Path(prefs._pref_path()) != repo_root / "simple_sftp_client.pref"
+    assert Path(paths.SESSIONS_FILE) != repo_root / "servers.json"

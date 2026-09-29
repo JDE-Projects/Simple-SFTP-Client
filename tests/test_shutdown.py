@@ -16,8 +16,8 @@ import os
 import threading
 import time
 
-import simple_sftp_client
-from transfer_queue import FAILED, WAITING
+from app import paths
+from app.transfer_queue import FAILED, WAITING
 
 from simple_sftp_client import Api, is_temp_part
 
@@ -372,7 +372,7 @@ def test_real_connect_lifecycle_sweeps_scratch_and_shuts_down(
     params, server_root, local_dir = sftp_server
     # Never touch the user's real known_hosts: point the trust store at a
     # throwaway file for this test.
-    monkeypatch.setattr(simple_sftp_client, "KNOWN_HOSTS_FILE",
+    monkeypatch.setattr(paths, "KNOWN_HOSTS_FILE",
                         str(tmp_path / "known_hosts"))
 
     api = Api()

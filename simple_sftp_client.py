@@ -24,69 +24,39 @@ import ctypes
 from ctypes import wintypes
 import errno
 import json
-import re
-import logging
-import base64
-import hashlib
-import ssl
 import time
 import shutil
-import subprocess
 import tempfile
-import getpass
 import threading
 import functools
 import traceback
 import webbrowser
 import socket
 import posixpath
-import ntpath
-import urllib.error
 from datetime import datetime
 from urllib.request import Request, urlopen
 
 import webview
 import paramiko
 
-from transfer_queue import TransferQueue
-import debug_log
+from app import constants, paths
+# These names are kept for existing callers.
+from app.atomic import _atomic_write_json, _preserve_corrupt  # noqa: F401
+from app.constants import DISABLED_ALGORITHMS, GITHUB_REPO, MTIME_TOL, WORKER_COUNT, WORKER_COUNT_MAX  # noqa: F401
+from app.debug import AppDebugLog, _ParamikoBridge, _PRIVATE_KEY_RE, _URL_CREDS_RE, _scrub, debug  # noqa: F401
+from app.errors import InvalidPort, KnownHostsUnreadable, ScanIncomplete, UnknownHostKey, _update_error_reason, error_tips, friendly_error  # noqa: F401
+from app.formatting import fmt_time, human_size, negotiated_summary  # noqa: F401
+from app.geometry import _own_window_handle, _restore_geometry, _save_geometry, _win32  # noqa: F401
+from app.hostkeys import _TofuPolicy, _known_hosts_readable_or_raise, _save_host_keys_atomic, fingerprint_sha256, hostkey_name, load_known_hosts  # noqa: F401
+from app.keyfiles import _PROTECT_WARNING, _protect_private_key  # noqa: F401
+from app.paths import TEMP_PART_SUFFIX, _TEMP_PART_RE, exe_dir, is_temp_part, local_link_target, local_temp_path, remote_temp_path, resource_path, safe_local_child  # noqa: F401
+from app.prefs import load_prefs, save_prefs  # noqa: F401
+from app.transfer_queue import TransferQueue
+from app.validation import INVALID_PORT_ERROR, _SESSION_AUTH_VALUES, _SESSION_STR_FIELDS, _valid_session_entry, cred_key, missing_fields, parse_port  # noqa: F401
+from app.workers import worker_target  # noqa: F401
+
 
 APP_VERSION = "1.9.1"
-GITHUB_REPO = "JDE-Projects/Simple-SFTP-Client"   # owner/repo for update checks
-WORKER_COUNT = 2   # transfer queue workers by default, each its own SFTP session
-# Ceiling for a batch of many small files. Every worker opens its own SFTP
-# channel on the one SSH connection, alongside the browsing channel (which the
-# folder watcher shares) and any Compare, Sync, or folder-scan channel.
-# OpenSSH servers allow 10 sessions per connection by default (MaxSessions),
-# so 5 leaves headroom under that common limit.
-WORKER_COUNT_MAX = 5
-# A background scan pauses queuing new files once this many are still WAITING,
-# and resumes once the worker pool has drained enough of them. This is what
-# keeps memory bounded while a 200GB / 1M-file folder is being scanned: the
-# queue never grows past roughly this many items ahead of what the workers
-# can drain.
-SCAN_QUEUE_HIGH_WATER = 3000
-# Two files count as the "same" for compare/sync only when their sizes and
-# modification times both match. MTIME_TOL is the slack allowed on the time
-# match (seconds): it absorbs whole-second rounding over the wire and the
-# 2-second timestamp granularity of FAT/exFAT volumes, while staying tight
-# enough that a real edit is never mistaken for unchanged.
-MTIME_TOL = 2
-# Compare and Sync build an in-memory map of every file and empty-folder
-# marker on each side before they can classify anything, unlike the ordinary
-# transfer scan which streams. COMPARE_SYNC_ENTRY_LIMIT caps entries added to
-# each side's map, so a folder too large to hold in memory is refused with a
-# clear message instead of running out of memory partway through.
-COMPARE_SYNC_ENTRY_LIMIT = 500_000
-
-
-def worker_target(sizes):
-    """Decide the worker-pool size for a batch from its file sizes (bytes).
-    Returns WORKER_COUNT_MAX when the batch has enough small files to make
-    extra channels pay off, else the WORKER_COUNT default. Sizes below zero
-    are unknown and never count as small."""
-    small = sum(1 for s in sizes if 0 <= s < 1024 * 1024)
-    return WORKER_COUNT_MAX if small >= 8 else WORKER_COUNT
 
 
 def _is_remote_debugging_switch(token):
@@ -139,762 +109,6 @@ def strip_remote_debugging(environ, argv, frozen):
             del environ["QTWEBENGINE_CHROMIUM_FLAGS"]
 
     argv[1:] = _drop_remote_debugging(argv[1:])
-
-
-# Weak / deprecated / CVE-prone algorithms we refuse (secure-or-fail).
-DISABLED_ALGORITHMS = {
-    "kex": ["diffie-hellman-group1-sha1", "diffie-hellman-group14-sha1",
-            "diffie-hellman-group-exchange-sha1"],
-    "ciphers": ["3des-cbc", "aes128-cbc", "aes192-cbc", "aes256-cbc",
-                "blowfish-cbc", "cast128-cbc", "arcfour", "arcfour128", "arcfour256"],
-    "macs": ["hmac-md5", "hmac-md5-96", "hmac-sha1-96", "hmac-sha1"],
-    "keys": ["ssh-dss"],
-}
-
-
-# ───────────── paths ─────────────
-def resource_path(rel):
-    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, rel)
-
-
-def exe_dir():
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
-
-
-def safe_local_child(parent: str, name: str, root: str) -> str:
-    """Validate a single server-supplied filename before it becomes part of a
-    local path, and confirm the result stays under root (the local folder the
-    user selected for this transfer). Rejects anything that looks like path
-    traversal, or an absolute/UNC/drive path smuggled in as a "filename" by a
-    hostile or broken server, by raising ValueError. Does not resolve
-    symlinks (abspath + commonpath only); parent must already be under root.
-    A symlink or junction the user created locally is followed: the server
-    cannot create one, and a download into it is the user's own choice."""
-    if not name or name in (".", ".."):
-        raise ValueError(f"unsafe name {name!r}")
-    if "/" in name or "\\" in name or os.sep in name or (os.altsep and os.altsep in name):
-        raise ValueError(f"unsafe name {name!r}")
-    if os.path.isabs(name) or os.path.splitdrive(name)[0] or ntpath.splitdrive(name)[0]:
-        raise ValueError(f"unsafe name {name!r}")
-    candidate = os.path.join(parent, name)
-    root_abs = os.path.abspath(root)
-    try:
-        common = os.path.commonpath([root_abs, os.path.abspath(candidate)])
-    except ValueError:
-        raise ValueError(f"unsafe name {name!r}") from None
-    if common != root_abs:
-        raise ValueError(f"unsafe name {name!r}")
-    return candidate
-
-
-def local_link_target(path: str):
-    """Return the real location of path when it is a symlink or junction,
-    else None. Used to warn before a download is written through one."""
-    try:
-        if os.path.islink(path) or os.path.isjunction(path):
-            return os.path.realpath(path)
-    except OSError:
-        pass
-    return None
-
-
-def negotiated_summary(ti: dict) -> str:
-    """Format the connect log's negotiated algorithms, e.g. "cipher X · mac Y".
-    Lists only fields that have a real value; returns "" when none do."""
-    return " · ".join(f"{k} {ti[k]}" for k in ("cipher", "mac") if ti and ti.get(k))
-
-
-TEMP_PART_SUFFIX = ".sxtpart"
-
-# Match only the exact shape local_temp_path / remote_temp_path build:
-# a leading dot, the original name, a dot, 8 lowercase hex characters from
-# os.urandom(4).hex(), then the suffix. Matching a bare ".sxtpart" suffix
-# would hide and later delete an ordinary user file that happened to end
-# that way; the full convention is what marks a file as ours to remove.
-# fullmatch (not match + "$") so a name ending in a literal newline before
-# the suffix cannot slip through: "$" would anchor before that newline.
-_TEMP_PART_RE = re.compile(r"\..+\.[0-9a-f]{8}" + re.escape(TEMP_PART_SUFFIX))
-
-
-def is_temp_part(name: str) -> bool:
-    """True for one of this app's own in-progress transfer scratch files, so
-    every place that lists a folder can hide a file still being written
-    (download or upload) instead of showing it, picking it up as a transfer
-    target, or letting it skew a Compare/Sync. Recognizing our own reserved
-    name shape is not a claim of ownership over any file matching it."""
-    return bool(name) and _TEMP_PART_RE.fullmatch(name) is not None
-
-
-def local_temp_path(final_path: str) -> str:
-    """Build the local scratch path a download streams into before the
-    atomic swap: a sibling of final_path in the same folder (so the final
-    os.replace stays on one drive), named so is_temp_part recognizes it."""
-    folder = os.path.dirname(final_path)
-    name = os.path.basename(final_path)
-    return os.path.join(folder, f".{name}.{os.urandom(4).hex()}{TEMP_PART_SUFFIX}")
-
-
-def remote_temp_path(final_path: str) -> str:
-    """Same idea as local_temp_path, but posix-style for the remote side."""
-    folder = posixpath.dirname(final_path)
-    name = posixpath.basename(final_path)
-    temp_name = f".{name}.{os.urandom(4).hex()}{TEMP_PART_SUFFIX}"
-    return posixpath.join(folder, temp_name) if folder else temp_name
-
-
-SESSIONS_FILE = os.path.join(exe_dir(), "servers.json")
-KNOWN_HOSTS_FILE = os.path.join(exe_dir(), "known_hosts")
-
-
-# ----------------------------------------------------------------------------
-# Local prefs store. One JSON file next to the app holds EVERY persisted
-# setting: theme, window geometry, and anything added later. Always read-
-# merge-write through load_prefs / save_prefs. Never overwrite the file with
-# a single key, or the next setting you add silently wipes the others.
-# ----------------------------------------------------------------------------
-
-def _pref_path() -> str:
-    return os.path.join(exe_dir(), "simple_sftp_client.pref")
-
-
-def load_prefs() -> dict:
-    """Full prefs dict. Missing file: first run. Corrupt file: kept aside, logged."""
-    path = _pref_path()
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-        raise ValueError("prefs root is not an object")
-    except FileNotFoundError:
-        return {}
-    except Exception as e:
-        _preserve_corrupt(path, e)
-        return {}
-
-
-def save_prefs(prefs: dict) -> bool:
-    """Write atomically. False result must surface a visible error, not silence."""
-    return _atomic_write_json(_pref_path(), prefs)
-
-
-def _atomic_write_json(path, obj, **dump_kwargs) -> bool:
-    """Write obj as JSON to path atomically: write to a temp file in the same
-    folder, fsync it, then os.replace over the real path so a reader never
-    sees a half-written file and a crash mid-write never corrupts it. False
-    result must surface a visible error, not silence."""
-    tmp = None
-    try:
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
-                                   prefix=".tmp_", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(obj, f, **dump_kwargs)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-        return True
-    except Exception as e:
-        if tmp:
-            try:
-                os.remove(tmp)
-            except Exception:
-                pass
-        try:
-            debug.log(f"Could not write {os.path.basename(path)}: {e}")
-        except Exception:
-            pass
-        return False
-
-
-def _preserve_corrupt(path, error) -> None:
-    """A file failed to parse: move it aside with a timestamped suffix instead
-    of silently discarding it, and log what happened. Never raises."""
-    try:
-        if os.path.exists(path):
-            aside = f"{path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
-            os.replace(path, aside)
-            debug.log(f"{os.path.basename(path)} unreadable, kept as {aside}: {error}")
-        else:
-            debug.log(f"{os.path.basename(path)} unreadable: {error}")
-    except Exception:
-        pass
-
-
-# Window geometry persistence. Save and restore the ABSOLUTE window frame
-# rectangle via Win32, found by the window title. GetWindowRect (save) and
-# SetWindowPos (restore) share one frame-based, physical-pixel coordinate
-# space, so the rect round-trips exactly at any DPI or monitor layout. Do NOT
-# pass x/y into create_window and do NOT use window.move: pywebview's Qt
-# backend applies those pre-show and relative to the primary screen, so the
-# window lands on the wrong monitor, drifts down by the title-bar height each
-# launch, and slides sideways at non-100% scaling.
-
-def _win32():
-    u = ctypes.windll.user32
-    u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-    u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
-                               ctypes.c_int, ctypes.c_int, wintypes.UINT]
-    return u
-
-
-def _own_window_handle(title):
-    """HWND of our own top-level window with this title.
-
-    FindWindowW matches by title across the whole desktop, so with a second
-    instance open it can return the other copy's window. Enumerate instead and
-    keep only a window owned by this process.
-    """
-    try:
-        u = ctypes.windll.user32
-        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-        u.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
-        u.EnumWindows.restype = wintypes.BOOL
-        u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-        u.GetWindowThreadProcessId.restype = wintypes.DWORD
-        u.GetWindowTextLengthW.argtypes = [wintypes.HWND]
-        u.GetWindowTextLengthW.restype = ctypes.c_int
-        u.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-        u.GetWindowTextW.restype = ctypes.c_int
-        u.IsWindowVisible.argtypes = [wintypes.HWND]
-        u.IsWindowVisible.restype = wintypes.BOOL
-
-        own_pid = os.getpid()
-        found = {"hwnd": None}
-
-        def _callback(hwnd, lparam):
-            if not u.IsWindowVisible(hwnd):
-                return True
-            pid = wintypes.DWORD()
-            u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if pid.value != own_pid:
-                return True
-            length = u.GetWindowTextLengthW(hwnd)
-            if length <= 0:
-                return True
-            buf = ctypes.create_unicode_buffer(length + 1)
-            u.GetWindowTextW(hwnd, buf, length + 1)
-            if buf.value != title:
-                return True
-            found["hwnd"] = hwnd
-            return False   # stop enumerating, we found it
-
-        proc = WNDENUMPROC(_callback)   # kept alive for the duration of the call below
-        u.EnumWindows(proc, 0)
-        return found["hwnd"]
-    except Exception:
-        return None
-
-
-def _save_geometry(win) -> None:
-    """Save the absolute frame rect (physical px) via Win32. Wire to `closing`.
-    Wrapped end to end so a failure here can never block the window from closing."""
-    try:
-        u = _win32()
-        hwnd = _own_window_handle(win.title)
-        if not hwnd:
-            return
-        r = wintypes.RECT()
-        if not u.GetWindowRect(hwnd, ctypes.byref(r)):
-            return
-        x, y, w, h = r.left, r.top, r.right - r.left, r.bottom - r.top
-        if x <= -30000 or y <= -30000:   # minimized sentinel, not a real spot
-            return
-        if w <= 0 or h <= 0:
-            return
-        prefs = load_prefs()
-        prefs["window"] = {"x": x, "y": y, "width": w, "height": h}
-        save_prefs(prefs)
-    except Exception:
-        pass
-
-
-def _restore_geometry(win) -> None:
-    """Restore the saved frame rect via Win32. Wire to `shown` (after the OS
-    window exists). Validate before applying; never raise."""
-    try:
-        geo = load_prefs().get("window")
-        if not isinstance(geo, dict):
-            return
-        x, y, w, h = geo.get("x"), geo.get("y"), geo.get("width"), geo.get("height")
-        for v in (x, y, w, h):
-            if not isinstance(v, int) or isinstance(v, bool):
-                return
-        if w <= 0 or h <= 0:
-            return
-        # Is a point in the title bar still on a connected monitor?
-        point = wintypes.POINT(x + 100, y + 30)
-        user32 = ctypes.windll.user32
-        user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
-        user32.MonitorFromPoint.restype = wintypes.HMONITOR
-        if not user32.MonitorFromPoint(point, 0):   # MONITOR_DEFAULTTONULL
-            return
-        u = _win32()
-        hwnd = _own_window_handle(win.title)
-        if not hwnd:
-            return
-        SWP_NOZORDER, SWP_NOACTIVATE = 0x0004, 0x0010
-        u.SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE)
-    except Exception:
-        pass
-
-
-class InvalidPort(ValueError):
-    """A non-blank port value that is not a whole number from 1 to 65535."""
-    def __init__(self, value):
-        self.value = value
-        super().__init__(f"Invalid port: {value!r}")
-
-
-def parse_port(port):
-    """The one strict port parser, used everywhere a port is interpreted.
-    Blank (empty string or None) means the default SFTP port, 22. Anything
-    else must be a plain whole number from 1 to 65535, with no surrounding
-    whitespace and no sign or decimal point, or it raises InvalidPort - it
-    never silently falls back to 22 for a non-blank value."""
-    if port is None:
-        return 22
-    if isinstance(port, bool):
-        raise InvalidPort(port)
-    if isinstance(port, int):
-        value = port
-    elif isinstance(port, str):
-        stripped = port.strip()
-        if not stripped:
-            return 22
-        # isdigit() alone accepts Unicode digits like superscripts that int()
-        # then rejects, which would leak a raw ValueError past every caller's
-        # InvalidPort guard; require plain ASCII 0-9 so int() below can't fail.
-        if stripped != port or not (stripped.isascii() and stripped.isdigit()):
-            raise InvalidPort(port)
-        value = int(stripped)
-    else:
-        raise InvalidPort(port)
-    if not (1 <= value <= 65535):
-        raise InvalidPort(port)
-    return value
-
-
-INVALID_PORT_ERROR = "Enter a valid port (1-65535), or leave it blank for the default (22)."
-
-
-def hostkey_name(host, port):
-    """The name paramiko stores a host key under (bracketed when not port 22)."""
-    port = parse_port(port)
-    return host if port == 22 else "[%s]:%d" % (host, port)
-
-
-def cred_key(host, port, username):
-    """Credential Manager entry name for a saved password. Mirrors
-    hostkey_name: bare host|username on port 22, host|port|username on any
-    other port, so existing default-port entries keep working unchanged and
-    two services on the same host/user but different ports never collide."""
-    port = parse_port(port)
-    host = (host or "").strip()
-    username = (username or "").strip()
-    if port == 22:
-        return f"{host}|{username}"
-    return f"{host}|{port}|{username}"
-
-
-_SESSION_STR_FIELDS = ("host", "username", "key_path", "start_path")
-_SESSION_AUTH_VALUES = ("password", "key")
-
-
-def _valid_session_entry(x):
-    """A saved session entry is safe to hand to the UI (or a connect
-    attempt) only once every field is the type the UI expects: this is what
-    keeps a hand-edited or corrupted servers.json from injecting markup or
-    an unsupported auth mode into the session manager. Anything that fails
-    here gets dropped by the caller, not repaired."""
-    if not isinstance(x, dict):
-        return False
-    name = x.get("name")
-    if not isinstance(name, str) or not name.strip():
-        return False
-    for key in _SESSION_STR_FIELDS:
-        if key in x and not isinstance(x[key], str):
-            return False
-    if x.get("auth") not in _SESSION_AUTH_VALUES:
-        return False
-    if "remember" in x and not isinstance(x["remember"], bool):
-        return False
-    try:
-        parse_port(x.get("port"))
-    except InvalidPort:
-        return False
-    return True
-
-
-def fingerprint_sha256(key):
-    """OpenSSH-style SHA256 fingerprint, e.g. 'SHA256:abc...' (no padding)."""
-    digest = hashlib.sha256(key.asbytes()).digest()
-    return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
-
-
-def _known_hosts_readable_or_raise():
-    """Paramiko silently skips lines it can't parse, so a corrupt file would
-    otherwise look empty and get treated as first contact with every host,
-    which is exactly the swapped-server case host-key pinning exists to
-    catch. Read the file ourselves line by line and raise if any non-blank,
-    non-comment line fails to parse. A missing file is clean first contact,
-    not corruption."""
-    if not os.path.exists(KNOWN_HOSTS_FILE):
-        return
-    try:
-        with open(KNOWN_HOSTS_FILE, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except Exception as e:
-        raise KnownHostsUnreadable(KNOWN_HOSTS_FILE) from e
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        try:
-            entry = paramiko.hostkeys.HostKeyEntry.from_line(line)
-        except Exception:
-            entry = None
-        if entry is None:
-            raise KnownHostsUnreadable(KNOWN_HOSTS_FILE)
-
-
-def load_known_hosts():
-    _known_hosts_readable_or_raise()
-    hk = paramiko.HostKeys()
-    if os.path.exists(KNOWN_HOSTS_FILE):
-        hk.load(KNOWN_HOSTS_FILE)
-    return hk
-
-
-def _save_host_keys_atomic(hk) -> bool:
-    """Save a paramiko HostKeys object atomically: write to a temp file in
-    the same folder, then os.replace over the real known_hosts file so a
-    reader never sees a half-written file. False result must surface a
-    visible error, not silence."""
-    folder = os.path.dirname(KNOWN_HOSTS_FILE) or "."
-    tmp = None
-    try:
-        fd, tmp = tempfile.mkstemp(dir=folder, prefix=".tmp_", suffix=".tmp")
-        os.close(fd)
-        hk.save(tmp)
-        os.replace(tmp, KNOWN_HOSTS_FILE)
-        return True
-    except Exception as e:
-        if tmp:
-            try:
-                os.remove(tmp)
-            except Exception:
-                pass
-        try:
-            debug.log(f"Could not write {os.path.basename(KNOWN_HOSTS_FILE)}: {e}")
-        except Exception:
-            pass
-        return False
-
-
-class UnknownHostKey(Exception):
-    """First contact with a host whose key is not yet pinned."""
-    def __init__(self, hostname, key):
-        super().__init__("unknown host key")
-        self.hostname = hostname
-        self.key = key
-
-
-class KnownHostsUnreadable(Exception):
-    """The known_hosts file exists but could not be parsed. Connections are
-    refused rather than treating it as empty, since that would silently drop
-    protection against a swapped server."""
-    def __init__(self, path):
-        super().__init__(f"known_hosts file unreadable: {path}")
-        self.path = path
-
-
-class ScanIncomplete(Exception):
-    """Raised by _compute_pair_maps when part of the tree could not be read
-    during the walk (an unreadable folder, an unreadable file's metadata, or a
-    lost connection mid-listing), so compare/sync refuse to report a result
-    built on a tree that was not fully seen. It is also raised when a tree is
-    larger than COMPARE_SYNC_ENTRY_LIMIT entries on either side, since compare
-    and sync hold both sides in memory at once and refuse rather than risk
-    running out of it partway through. An unsafe remote name is not one of
-    these: it is skipped and logged, since it can never be represented
-    locally and refusing would block a whole folder over one such name."""
-
-
-class _TofuPolicy(paramiko.MissingHostKeyPolicy):
-    """Do not auto-add. Surface the offered key so the UI can ask the user."""
-    def missing_host_key(self, client, hostname, key):
-        raise UnknownHostKey(hostname, key)
-
-
-# ───────────── debug log (off by default) ─────────────
-_URL_CREDS_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:/@]+:)[^\s@]+(@)")
-_PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
-    re.DOTALL,
-)
-
-
-def _scrub(text):
-    """Mask URL-embedded passwords and private-key blocks before they hit the log."""
-    text = _URL_CREDS_RE.sub(r"\1[redacted]\2", text)
-    text = _PRIVATE_KEY_RE.sub("[redacted]", text)
-    return text
-
-
-class _ParamikoBridge(logging.Handler):
-    """Feed paramiko's protocol-level logging into the debug file when enabled."""
-    def __init__(self, dbg):
-        super().__init__()
-        self._dbg = dbg
-
-    def emit(self, record):
-        try:
-            self._dbg.log(f"{record.name}: {record.getMessage()}")
-        except Exception:
-            pass
-
-
-class AppDebugLog(debug_log.DebugLog):
-    """Adds the paramiko protocol-log bridge on top of the shared DebugLog:
-    attached whenever logging is on, detached the moment it goes off."""
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._bridge = None  # paramiko logging handler, attached only while on
-
-    def set_enabled(self, on):
-        ok = super().set_enabled(on)
-        self._set_paramiko(self.is_enabled())
-        return ok
-
-    def log(self, label, content=""):
-        super().log(label, content)
-        if self._bridge is not None and not self.is_enabled():
-            self._set_paramiko(False)
-
-    def _set_paramiko(self, on):
-        """Capture paramiko's verbose transport/SFTP logging while debug is on."""
-        plog = logging.getLogger("paramiko")
-        try:
-            if on and not self._bridge:
-                self._bridge = _ParamikoBridge(self)
-                plog.addHandler(self._bridge)
-                plog.setLevel(logging.DEBUG)
-            elif not on and self._bridge:
-                plog.removeHandler(self._bridge)
-                self._bridge = None
-        except Exception:
-            pass
-
-
-debug = AppDebugLog(exe_dir(), "Simple SFTP Client", redact=_scrub)
-
-
-def human_size(n):
-    try:
-        n = float(n)
-    except (TypeError, ValueError):
-        return ""
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024 or unit == "TB":
-            return (f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}")
-        n /= 1024
-
-
-def fmt_time(ts):
-    try:
-        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        return ""
-
-
-def friendly_error(e):
-    """Plain-language message for the UI; full detail goes to the debug log."""
-    try:
-        debug.log("error detail", f"{type(e).__name__}: {e}")
-    except Exception:
-        pass
-    if isinstance(e, paramiko.AuthenticationException):
-        return "Authentication failed. Check the username, password, or key."
-    if isinstance(e, paramiko.SSHException):
-        m = str(e)
-        if "negotiat" in m.lower() or "incompatible" in m.lower():
-            return ("Could not negotiate a secure connection. This server may only "
-                    "offer outdated algorithms, which this client refuses for safety.")
-        return m or "SSH connection error."
-    if isinstance(e, socket.gaierror):
-        return "Could not resolve that host name. Check the address."
-    if isinstance(e, (TimeoutError, socket.timeout)):
-        return "Connection timed out. Check the host, port, and network."
-    if isinstance(e, ConnectionRefusedError):
-        return "Connection refused. Check the port and that the server is running."
-    if isinstance(e, PermissionError):
-        return "Permission denied. Choose a location you can write to."
-    if isinstance(e, FileNotFoundError):
-        return f"Not found: {e.filename or 'the requested path'}"
-    if isinstance(e, IsADirectoryError):
-        return "That path is a folder. Include a filename."
-    if isinstance(e, OSError):
-        base = e.strerror or "The operation failed"
-        return f"{base}: {e.filename}" if getattr(e, "filename", None) else base
-    return "Something went wrong. Turn on the debug log for details."
-
-
-def error_tips(e):
-    """Actionable, plain-language guidance shown in the failure popup."""
-    if isinstance(e, (TimeoutError, socket.timeout)):
-        return ("The server didn't respond in time. Common causes:\n"
-                "• The host address or port number is wrong.\n"
-                "• A firewall is blocking the attempt, either on the server's network or in its operating system.\n"
-                "• A missing NAT rule or port-forward means your connection never reaches the server.\n\n"
-                "Ask the SFTP server's administrator to confirm that connections from your network are "
-                "allowed on this port.")
-    if isinstance(e, ConnectionRefusedError):
-        return ("The server's machine answered, but nothing is listening on that port.\n"
-                "• Double-check the port number.\n"
-                "• Confirm the SFTP/SSH service is running on the server.")
-    if isinstance(e, socket.gaierror):
-        return ("The host name could not be looked up.\n"
-                "• Check the spelling of the address.\n"
-                "• Try the server's IP address instead of its name.")
-    if isinstance(e, paramiko.AuthenticationException):
-        return ("The server was reached but rejected your credentials.\n"
-                "• Re-check the username and password.\n"
-                "• If using a key, confirm the private key matches a public key installed on the server.")
-    if isinstance(e, paramiko.SSHException):
-        m = str(e).lower()
-        if "negotiat" in m or "incompatible" in m:
-            return ("The server was reached but no secure encryption method could be agreed on.\n"
-                    "This client refuses outdated, insecure algorithms for safety. The server's SSH "
-                    "configuration may need to be updated to offer modern algorithms.")
-        return ("The secure connection could not be established.\n"
-                "Turn on the debug log (bottom-left) and try again to capture the details.")
-    return ("The connection could not be completed.\n"
-            "Check the host, port, username, and credentials. Turn on the debug log (bottom-left) "
-            "for more detail.")
-
-
-_PROTECT_WARNING = ("Saved, but the private key's file permissions couldn't be locked down on "
-                     "this location. Store it somewhere only you can read, such as your user "
-                     "profile's .ssh folder.")
-
-
-def _protect_private_key(path) -> str | None:
-    """Lock a private key file down to the current user only.
-
-    On Windows this disables inherited permissions and grants the current
-    user full control via icacls, so other accounts on the machine can't
-    read the file. Returns None on success, or a plain-language warning
-    string if the lockdown couldn't be applied (never raises)."""
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
-    if sys.platform != "win32":
-        return _PROTECT_WARNING
-    try:
-        user = os.environ.get("USERNAME") or getpass.getuser()
-        if not user:
-            return _PROTECT_WARNING
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        for cmd in (["icacls", path, "/inheritance:r"],
-                    ["icacls", path, "/grant:r", f"{user}:(F)"]):
-            res = subprocess.run(cmd, capture_output=True, shell=False,
-                                  startupinfo=startupinfo, creationflags=creationflags)
-            if res.returncode != 0:
-                debug.log("KEYGEN protect failed", res.stderr.decode(errors="replace") if res.stderr else str(res.returncode))
-                return _PROTECT_WARNING
-        return None
-    except Exception as e:
-        debug.log("KEYGEN protect failed", str(e))
-        return _PROTECT_WARNING
-
-
-def missing_fields(p):
-    """Up-front field check shared by Connect and Test (returns '' when OK)."""
-    host = (p.get("host") or "").strip()
-    user = (p.get("username") or "").strip()
-    key = (p.get("key_path") or "").strip()
-    pw = p.get("password") or ""
-    if not host or not user:
-        return "Enter a host and a username before connecting."
-    if not key and not pw:
-        return "Enter a password, or choose a private key, before connecting."
-    return ""
-
-
-def _update_error_reason(exc: BaseException) -> str:
-    """Turn a check_update exception into a short, plain-language reason to
-    show in the UI. Pure and network-free: takes the already-raised exception,
-    never touches the network itself.
-
-    Each branch is specific to a failure that can actually cause it, and
-    names a next step where there is a sensible one. Subclasses are checked
-    before their parents: SSLCertVerificationError and SSLEOFError/
-    SSLZeroReturnError before the generic ssl.SSLError, and the specific
-    ConnectionError subclasses and socket.gaierror before the generic OSError
-    branch (socket.timeout is an alias of TimeoutError, and both are OSError
-    subclasses)."""
-    # HTTPError is a URLError subclass but carries its own .code, so classify
-    # it before unwrapping anything.
-    if isinstance(exc, urllib.error.HTTPError):
-        if exc.code == 403:
-            return (
-                "GitHub is rate-limiting update checks from this network. "
-                "Try again later."
-            )
-        if exc.code == 404:
-            return "No published release was found."
-        if 500 <= exc.code < 600:
-            return f"GitHub is having trouble on its end (HTTP {exc.code})."
-        return f"GitHub returned an error (HTTP {exc.code})."
-
-    if isinstance(exc, json.JSONDecodeError):
-        return (
-            "GitHub returned something unexpected. This often means a proxy "
-            "or a guest wifi sign-in page answered instead."
-        )
-
-    # A plain URLError wraps the underlying cause (ssl.SSLError, socket.timeout,
-    # a DNS/socket OSError, ...) in its .reason; unwrap it to classify the
-    # actual cause, but remember it came from a URLError for the fallback below.
-    is_url_error = isinstance(exc, urllib.error.URLError)
-    cause = exc.reason if is_url_error and exc.reason is not None else exc
-
-    if isinstance(cause, ssl.SSLCertVerificationError):
-        return (
-            "GitHub's certificate could not be verified. This usually means "
-            "antivirus or a network filter is inspecting HTTPS traffic."
-        )
-    if isinstance(cause, (ssl.SSLEOFError, ssl.SSLZeroReturnError)):
-        return "The secure connection was cut off during the handshake with GitHub."
-    if isinstance(cause, ssl.SSLError):
-        return "The secure connection to GitHub failed."
-    if isinstance(cause, socket.gaierror):
-        return (
-            "The address for api.github.com could not be looked up. Check "
-            "DNS or the internet connection."
-        )
-    if isinstance(cause, (socket.timeout, TimeoutError)):
-        return "GitHub didn't respond in time."
-    if isinstance(cause, (ConnectionRefusedError, ConnectionResetError)):
-        return (
-            "The connection was refused or reset. A firewall or proxy may "
-            "be blocking it."
-        )
-    if isinstance(cause, OSError) and getattr(cause, "errno", None) == errno.ENETUNREACH:
-        return "No network connection."
-    if is_url_error:
-        return "Couldn't reach GitHub. Check the internet connection."
-
-    text = f"{type(exc).__name__}: {exc}"
-    if len(text) > 120:
-        text = text[:117] + "..."
-    return text
 
 
 def _browsing(method):
@@ -1110,12 +324,12 @@ class Api:
         entries are never rewritten back to servers.json - the file is left
         untouched either way."""
         try:
-            with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+            with open(paths.SESSIONS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except FileNotFoundError:
             return []
         except Exception as e:
-            _preserve_corrupt(SESSIONS_FILE, e)
+            _preserve_corrupt(paths.SESSIONS_FILE, e)
             return []
         if not isinstance(data, dict):
             self._sessions_notice("Saved sessions file has an unexpected format and was ignored.")
@@ -1130,7 +344,7 @@ class Api:
             word = "entry" if dropped == 1 else "entries"
             self._sessions_notice(
                 f"Skipped {dropped} saved session {word} that could not be read. "
-                f"{SESSIONS_FILE} was left unchanged.")
+                f"{paths.SESSIONS_FILE} was left unchanged.")
         return valid
 
     def _sessions_notice(self, msg):
@@ -1142,7 +356,7 @@ class Api:
             debug.log(msg)
 
     def _save_sessions(self, sessions):
-        return _atomic_write_json(SESSIONS_FILE,
+        return _atomic_write_json(paths.SESSIONS_FILE,
                                    {"_note": "Simple SFTP Client saved sessions (no passwords).",
                                     "sessions": sessions}, indent=2)
 
@@ -1210,7 +424,7 @@ class Api:
                         "error": "Could not save the session, and restoring the previous saved "
                                  "password may have failed. Check the saved password for this server."}
             return {"ok": False,
-                    "error": f"Could not save the session to {SESSIONS_FILE}. Nothing was changed."}
+                    "error": f"Could not save the session to {paths.SESSIONS_FILE}. Nothing was changed."}
         result = {"ok": True, "sessions": sessions, "pw_saved": pw_saved}
         if pw_error:
             result["pw_error"] = pw_error
@@ -1225,7 +439,7 @@ class Api:
             # The session still references its keyring entry, so leave the
             # entry alone rather than orphan it.
             return {"ok": False,
-                    "error": f"Could not update {SESSIONS_FILE}. The session was not removed."}
+                    "error": f"Could not update {paths.SESSIONS_FILE}. The session was not removed."}
         failed_names = []
         if target and target.get("remember"):
             host = target.get("host")
@@ -1282,8 +496,8 @@ class Api:
     def _open(self, host, port, username, password, key_path, passphrase):
         client = paramiko.SSHClient()
         _known_hosts_readable_or_raise()
-        if os.path.exists(KNOWN_HOSTS_FILE):
-            client.load_host_keys(KNOWN_HOSTS_FILE)
+        if os.path.exists(paths.KNOWN_HOSTS_FILE):
+            client.load_host_keys(paths.KNOWN_HOSTS_FILE)
         # Trust on first use: unknown hosts raise UnknownHostKey (user is asked),
         # a changed key raises paramiko.BadHostKeyException (flagged, not trusted).
         client.set_missing_host_key_policy(_TofuPolicy())
@@ -1415,7 +629,7 @@ class Api:
             debug.log(f"known_hosts file unreadable, refusing to connect: {e}")
             return {"ok": False,
                     "error": f"Your saved host-key file could not be read, so the connection was "
-                             f"refused to protect against a swapped server. File: {KNOWN_HOSTS_FILE}. "
+                             f"refused to protect against a swapped server. File: {paths.KNOWN_HOSTS_FILE}. "
                              "You can delete it to start fresh, which just means confirming your "
                              "hosts again on the next connect."}
         except Exception as e:
@@ -1836,7 +1050,7 @@ class Api:
         memory faster than the worker pool can drain it. Returns as soon as
         there is room, the scan is stopped, or the connection drops."""
         while not stop_event.is_set() and self.connected:
-            if self.queue.waiting() >= SCAN_QUEUE_HIGH_WATER:
+            if self.queue.waiting() >= constants.SCAN_QUEUE_HIGH_WATER:
                 time.sleep(0.05)
                 continue
             if self.queue.is_paused():
@@ -2031,7 +1245,7 @@ class Api:
                         stopped_early = True
                         break
                     batch.append(triple)
-                    batch_cap = min(64, SCAN_QUEUE_HIGH_WATER) or 64
+                    batch_cap = min(64, constants.SCAN_QUEUE_HIGH_WATER) or 64
                     if len(batch) >= batch_cap:
                         flush()
                         if stop_event.is_set() or not self.connected:
@@ -2930,7 +2144,7 @@ class Api:
         def _raise_too_many():
             raise ScanIncomplete(
                 f"Too many files to compare (more than "
-                f"{COMPARE_SYNC_ENTRY_LIMIT:,}). Pick a smaller folder.")
+                f"{constants.COMPARE_SYNC_ENTRY_LIMIT:,}). Pick a smaller folder.")
 
         for lp, rp, size, mtime, is_dir in self._iter_local(
                 local_dir, remote_dir, True, problems=problems, include_dirs=True):
@@ -2939,7 +2153,7 @@ class Api:
             rel = posixpath.relpath(rp, remote_dir)
             if rel == ".":
                 continue
-            if len(local_map) >= COMPARE_SYNC_ENTRY_LIMIT:
+            if len(local_map) >= constants.COMPARE_SYNC_ENTRY_LIMIT:
                 _raise_too_many()
             local_map[rel] = (size, mtime, lp, rp, is_dir)
             bump()
@@ -2954,7 +2168,7 @@ class Api:
             rel = posixpath.relpath(rp, remote_dir)
             if rel == ".":
                 continue
-            if len(remote_map) >= COMPARE_SYNC_ENTRY_LIMIT:
+            if len(remote_map) >= constants.COMPARE_SYNC_ENTRY_LIMIT:
                 _raise_too_many()
             remote_map[rel] = (size, mtime, lp, rp, is_dir)
             bump()
@@ -3285,7 +2499,7 @@ class Api:
                 self._enqueue_files(batch, direction, on_conflict)
                 batch = []
 
-            batch_cap = min(64, SCAN_QUEUE_HIGH_WATER) or 64
+            batch_cap = min(64, constants.SCAN_QUEUE_HIGH_WATER) or 64
             for lp, rp, size, is_dir in transfers:
                 if stop_event.is_set() or not self.connected:
                     break
@@ -3904,6 +3118,7 @@ class Api:
 # ───────────── main ─────────────
 _mutex_handle = None   # module-level: must live for the process lifetime
 
+
 def _acquire_single_instance(mutex_name: str) -> bool:
     # Name convention: "JDE_Simple{Thing}Tool_SingleInstance"
     # Session-local (no "Global\" prefix): each Windows session (e.g. RDP,
@@ -3917,6 +3132,7 @@ def _acquire_single_instance(mutex_name: str) -> bool:
         return ctypes.get_last_error() != 183   # ERROR_ALREADY_EXISTS
     except Exception:
         return True   # fail open: never block launch over a mutex error
+
 
 def _focus_existing_window(title: str) -> None:
     """Best-effort: bring an already-running instance's window to the

@@ -10,7 +10,8 @@ import stat
 import time
 
 import simple_sftp_client
-from transfer_queue import COMPLETED
+from app import constants
+from app.transfer_queue import COMPLETED
 
 
 class _FakeAttr:
@@ -153,7 +154,7 @@ def test_backpressure_holds_queue_waiting_at_the_high_water_mark(sftp_env, monke
     api, server_root, local_dir = sftp_env
     # a tiny high-water so the cap is observable without creating thousands
     # of real files
-    monkeypatch.setattr(simple_sftp_client, "SCAN_QUEUE_HIGH_WATER", 5)
+    monkeypatch.setattr(constants, "SCAN_QUEUE_HIGH_WATER", 5)
     # nothing drains the queue at all, so any growth past the high-water can
     # only be explained by backpressure not holding
     monkeypatch.setattr(api, "_ensure_worker", lambda: None)

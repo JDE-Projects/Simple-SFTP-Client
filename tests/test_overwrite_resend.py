@@ -12,7 +12,7 @@ Runs against the in-process SFTP server from conftest.py.
 import os
 import time
 
-from transfer_queue import COMPLETED, SKIPPED
+from app.transfer_queue import COMPLETED, SKIPPED
 
 
 def _download_one(api, local_dir, name):

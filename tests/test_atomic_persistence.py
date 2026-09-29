@@ -13,6 +13,7 @@ import paramiko
 import pytest
 
 import simple_sftp_client as app
+from app import paths, prefs
 from simple_sftp_client import Api, KnownHostsUnreadable
 
 
@@ -21,7 +22,7 @@ from simple_sftp_client import Api, KnownHostsUnreadable
 @pytest.fixture
 def pref_path(tmp_path, monkeypatch):
     path = str(tmp_path / "simple_sftp_client.pref")
-    monkeypatch.setattr(app, "_pref_path", lambda: path)
+    monkeypatch.setattr(prefs, "_pref_path", lambda: path)
     return path
 
 
@@ -77,7 +78,7 @@ def test_save_prefs_round_trips(pref_path):
 @pytest.fixture
 def sessions_path(tmp_path, monkeypatch):
     path = str(tmp_path / "servers.json")
-    monkeypatch.setattr(app, "SESSIONS_FILE", path)
+    monkeypatch.setattr(paths, "SESSIONS_FILE", path)
     return path
 
 
@@ -137,7 +138,7 @@ def test_save_sessions_round_trips(sessions_path):
 @pytest.fixture
 def known_hosts_path(tmp_path, monkeypatch):
     path = str(tmp_path / "known_hosts")
-    monkeypatch.setattr(app, "KNOWN_HOSTS_FILE", path)
+    monkeypatch.setattr(paths, "KNOWN_HOSTS_FILE", path)
     return path
 
 

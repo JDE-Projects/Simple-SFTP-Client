@@ -20,11 +20,12 @@ import json
 import pytest
 
 import simple_sftp_client as app
+from app import paths
 
 
 @pytest.fixture
 def api(tmp_path, monkeypatch):
-    monkeypatch.setattr(app, "SESSIONS_FILE", str(tmp_path / "servers.json"))
+    monkeypatch.setattr(paths, "SESSIONS_FILE", str(tmp_path / "servers.json"))
     return app.Api()
 
 
@@ -42,36 +43,36 @@ def base_entry(**overrides):
 
 def test_valid_entry_passes_through(api):
     entry = base_entry()
-    _write_raw(app.SESSIONS_FILE, json.dumps({"sessions": [entry]}))
+    _write_raw(paths.SESSIONS_FILE, json.dumps({"sessions": [entry]}))
 
     assert api._load_sessions() == [entry]
 
 
 def test_root_not_a_dict_is_ignored_and_file_left_untouched(api):
     original = json.dumps(["not", "a", "dict"])
-    _write_raw(app.SESSIONS_FILE, original)
+    _write_raw(paths.SESSIONS_FILE, original)
 
     result = api._load_sessions()
 
     assert result == []
-    with open(app.SESSIONS_FILE, encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, encoding="utf-8") as f:
         assert f.read() == original
 
 
 def test_sessions_not_a_list_is_ignored_and_file_left_untouched(api):
     original = json.dumps({"sessions": {"oops": "not a list"}})
-    _write_raw(app.SESSIONS_FILE, original)
+    _write_raw(paths.SESSIONS_FILE, original)
 
     result = api._load_sessions()
 
     assert result == []
-    with open(app.SESSIONS_FILE, encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, encoding="utf-8") as f:
         assert f.read() == original
 
 
 def test_entry_not_a_dict_is_dropped_valid_ones_kept(api):
     good = base_entry(name="good")
-    _write_raw(app.SESSIONS_FILE, json.dumps({"sessions": [good, "not a dict", 42, None, []]}))
+    _write_raw(paths.SESSIONS_FILE, json.dumps({"sessions": [good, "not a dict", 42, None, []]}))
 
     assert api._load_sessions() == [good]
 
@@ -88,7 +89,7 @@ def test_entry_not_a_dict_is_dropped_valid_ones_kept(api):
 ])
 def test_wrong_field_type_drops_entry(api, field, bad_value):
     entry = base_entry(**{field: bad_value})
-    _write_raw(app.SESSIONS_FILE, json.dumps({"sessions": [entry]}))
+    _write_raw(paths.SESSIONS_FILE, json.dumps({"sessions": [entry]}))
 
     assert api._load_sessions() == []
 
@@ -96,7 +97,7 @@ def test_wrong_field_type_drops_entry(api, field, bad_value):
 @pytest.mark.parametrize("auth", ["", "ssh-agent", "PASSWORD", "<script>alert(1)</script>", None, 1])
 def test_unsupported_auth_values_are_dropped(api, auth):
     entry = base_entry(auth=auth)
-    _write_raw(app.SESSIONS_FILE, json.dumps({"sessions": [entry]}))
+    _write_raw(paths.SESSIONS_FILE, json.dumps({"sessions": [entry]}))
 
     assert api._load_sessions() == []
 
@@ -109,32 +110,32 @@ def test_unsupported_auth_values_are_dropped(api, auth):
 ])
 def test_malicious_or_invalid_port_content_is_dropped(api, port):
     entry = base_entry(port=port)
-    _write_raw(app.SESSIONS_FILE, json.dumps({"sessions": [entry]}))
+    _write_raw(paths.SESSIONS_FILE, json.dumps({"sessions": [entry]}))
 
     assert api._load_sessions() == []
 
 
 def test_blank_port_is_valid(api):
     entry = base_entry(port="")
-    _write_raw(app.SESSIONS_FILE, json.dumps({"sessions": [entry]}))
+    _write_raw(paths.SESSIONS_FILE, json.dumps({"sessions": [entry]}))
 
     assert api._load_sessions() == [entry]
 
 
 def test_malformed_entries_leave_sessions_file_untouched(api):
     original = json.dumps({"sessions": [base_entry(auth="bogus"), base_entry(port="abc")]})
-    _write_raw(app.SESSIONS_FILE, original)
+    _write_raw(paths.SESSIONS_FILE, original)
 
     api._load_sessions()
 
-    with open(app.SESSIONS_FILE, encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, encoding="utf-8") as f:
         assert f.read() == original
 
 
 def test_dropped_entries_surface_visible_notice_and_debug_trace(api, monkeypatch):
     calls = []
     monkeypatch.setattr(api, "_vlog", lambda msg, level="info": calls.append((msg, level)))
-    _write_raw(app.SESSIONS_FILE,
+    _write_raw(paths.SESSIONS_FILE,
                json.dumps({"sessions": [base_entry(auth="bogus"), base_entry(name="ok")]}))
 
     result = api._load_sessions()
@@ -150,7 +151,7 @@ def test_dropped_entries_surface_visible_notice_and_debug_trace(api, monkeypatch
 def test_no_notice_when_nothing_dropped(api, monkeypatch):
     calls = []
     monkeypatch.setattr(api, "_vlog", lambda msg, level="info": calls.append((msg, level)))
-    _write_raw(app.SESSIONS_FILE, json.dumps({"sessions": [base_entry()]}))
+    _write_raw(paths.SESSIONS_FILE, json.dumps({"sessions": [base_entry()]}))
 
     api._load_sessions()
 
@@ -160,10 +161,10 @@ def test_no_notice_when_nothing_dropped(api, monkeypatch):
 def test_corrupt_json_still_preserved_aside_as_before(api, tmp_path):
     # Unchanged behavior: a file that isn't valid JSON at all goes through
     # _preserve_corrupt, not the new entry-shape validation.
-    _write_raw(app.SESSIONS_FILE, "{not json")
+    _write_raw(paths.SESSIONS_FILE, "{not json")
 
     result = api._load_sessions()
 
     assert result == []
     import os
-    assert not os.path.exists(app.SESSIONS_FILE)
+    assert not os.path.exists(paths.SESSIONS_FILE)

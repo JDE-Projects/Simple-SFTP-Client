@@ -27,8 +27,8 @@ import time
 
 import pytest
 
-from simple_sftp_client import SCAN_QUEUE_HIGH_WATER
-from transfer_queue import RETAIN_FINISHED
+from app.constants import SCAN_QUEUE_HIGH_WATER
+from app.transfer_queue import RETAIN_FINISHED
 
 FIXED_MTIME = 1_700_000_000
 

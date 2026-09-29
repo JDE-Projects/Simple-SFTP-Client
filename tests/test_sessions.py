@@ -13,12 +13,13 @@ import keyring
 import pytest
 
 import simple_sftp_client as app
+from app import paths
 
 
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     """A fresh Api instance with servers.json redirected to a tmp file."""
-    monkeypatch.setattr(app, "SESSIONS_FILE", str(tmp_path / "servers.json"))
+    monkeypatch.setattr(paths, "SESSIONS_FILE", str(tmp_path / "servers.json"))
     return app.Api()
 
 
@@ -154,7 +155,7 @@ def test_cred_key_naming():
 
 def test_delete_session_removes_keyring_credential_when_remembered(api, monkeypatch):
     # Seed servers.json directly with a session that has a saved password.
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session()]}, f)
 
     deleted = []
@@ -172,7 +173,7 @@ def test_delete_session_removes_keyring_credential_when_remembered(api, monkeypa
 
 
 def test_delete_session_does_not_touch_keyring_when_no_saved_password(api, monkeypatch):
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session(remember=False)]}, f)
 
     calls = []
@@ -193,7 +194,7 @@ def test_delete_session_non_default_port_deletes_both_names(api, monkeypatch):
     # A session remembered on a non-22 port may have been saved before the
     # port-aware naming (legacy port-less entry) or after (port-aware
     # entry). Delete both so nothing is left behind either way.
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session(port="2222")]}, f)
 
     deleted = []
@@ -210,7 +211,7 @@ def test_delete_session_non_default_port_deletes_both_names(api, monkeypatch):
 
 
 def test_delete_session_real_failure_sets_pw_warning(api, monkeypatch):
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session()]}, f)
 
     def failing_delete_password(service, key):
@@ -229,7 +230,7 @@ def test_delete_session_real_failure_sets_pw_warning(api, monkeypatch):
 def test_delete_session_password_delete_error_is_harmless(api, monkeypatch):
     # PasswordDeleteError means "no such entry", which is fine: the
     # credential was never there (or was already removed).
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session()]}, f)
 
     def missing_entry_delete_password(service, key):
@@ -245,7 +246,7 @@ def test_delete_session_password_delete_error_is_harmless(api, monkeypatch):
 
 
 def test_delete_session_non_default_port_one_name_missing_is_harmless(api, monkeypatch):
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session(port="2222")]}, f)
 
     attempted = []
@@ -265,7 +266,7 @@ def test_delete_session_non_default_port_one_name_missing_is_harmless(api, monke
 
 
 def test_delete_session_non_default_port_one_name_fails_for_real(api, monkeypatch):
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session(port="2222")]}, f)
 
     def delete_password(service, key):
@@ -426,7 +427,7 @@ def test_save_session_write_failure_without_password_does_not_touch_keyring(api,
 
 
 def test_delete_session_write_failure_does_not_touch_keyring(api, monkeypatch):
-    with open(app.SESSIONS_FILE, "w", encoding="utf-8") as f:
+    with open(paths.SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump({"sessions": [base_session()]}, f)
 
     deleted = []

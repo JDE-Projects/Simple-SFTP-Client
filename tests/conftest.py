@@ -15,6 +15,7 @@ import paramiko
 import pytest
 
 import simple_sftp_client
+from app import paths, prefs
 from tools import sftp_server_core
 from tools.sftp_server_core import PASSWORD, USER
 
@@ -66,9 +67,9 @@ def protect_repo_data_files():
 def isolate_app_data_files(tmp_path_factory, monkeypatch):
     """Redirect application data writes to a per-test temporary folder."""
     data_dir = tmp_path_factory.mktemp("app-data")
-    monkeypatch.setattr(simple_sftp_client, "SESSIONS_FILE", str(data_dir / "servers.json"))
-    monkeypatch.setattr(simple_sftp_client, "KNOWN_HOSTS_FILE", str(data_dir / "known_hosts"))
-    monkeypatch.setattr(simple_sftp_client, "_pref_path",
+    monkeypatch.setattr(paths, "SESSIONS_FILE", str(data_dir / "servers.json"))
+    monkeypatch.setattr(paths, "KNOWN_HOSTS_FILE", str(data_dir / "known_hosts"))
+    monkeypatch.setattr(prefs, "_pref_path",
                         lambda: str(data_dir / "simple_sftp_client.pref"))
     monkeypatch.setattr(simple_sftp_client.debug, "log_dir", str(data_dir))
     return data_dir

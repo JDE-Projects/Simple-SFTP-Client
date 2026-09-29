@@ -14,6 +14,7 @@ import stat
 import pytest
 
 import simple_sftp_client
+from app import constants
 
 
 LIMIT = 3
@@ -21,7 +22,7 @@ LIMIT = 3
 
 @pytest.fixture(autouse=True)
 def _small_limit(monkeypatch):
-    monkeypatch.setattr(simple_sftp_client, "COMPARE_SYNC_ENTRY_LIMIT", LIMIT)
+    monkeypatch.setattr(constants, "COMPARE_SYNC_ENTRY_LIMIT", LIMIT)
 
 
 class _FakeAttr:

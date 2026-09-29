@@ -12,13 +12,14 @@ connect(), _open()) must never be reached at all.
 import pytest
 
 import simple_sftp_client as app
+from app import paths
 
 INVALID_PORTS = ["0", "65536", "-1", "abc", "22 ", " 22", "999999", "1.5"]
 
 
 @pytest.fixture
 def api(tmp_path, monkeypatch):
-    monkeypatch.setattr(app, "SESSIONS_FILE", str(tmp_path / "servers.json"))
+    monkeypatch.setattr(paths, "SESSIONS_FILE", str(tmp_path / "servers.json"))
     return app.Api()
 
 

@@ -9,7 +9,7 @@ installed or left running.
 import os
 import time
 
-from transfer_queue import COMPLETED, CANCELLED, WAITING, FAILED, ACTIVE
+from app.transfer_queue import COMPLETED, CANCELLED, WAITING, FAILED, ACTIVE
 
 
 def test_upload_byte_integrity(sftp_env, wait_for_drain, wait_for_queue_count, state_of):

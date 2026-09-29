@@ -5,7 +5,7 @@ import json
 import os
 import re
 
-from debug_log import DebugLog
+from app.debug_log import DebugLog
 
 
 def _stamped_name(stamp, suffix=None):
@@ -91,7 +91,7 @@ def test_prune_orders_by_parsed_date_not_text(tmp_path):
 
 
 def test_same_second_name_clash_gets_suffix(tmp_path, monkeypatch):
-    import debug_log as debug_log_module
+    import app.debug_log as debug_log_module
 
     class FixedDateTime(debug_log_module.datetime):
         @classmethod
@@ -121,7 +121,7 @@ def test_locked_file_is_skipped_others_still_deleted(tmp_path, monkeypatch):
             raise PermissionError("file is open in another program")
         real_remove(path)
 
-    monkeypatch.setattr("debug_log.os.remove", fake_remove)
+    monkeypatch.setattr("app.debug_log.os.remove", fake_remove)
 
     warnings = []
     dbg = DebugLog(
@@ -183,7 +183,7 @@ def test_active_file_is_never_deleted(tmp_path):
 
 
 def test_write_failure_turns_logging_off_and_warns_without_raising(tmp_path, monkeypatch):
-    import debug_log as debug_log_module
+    import app.debug_log as debug_log_module
 
     warnings = []
     dbg = DebugLog(str(tmp_path), "Test App", max_bytes=2000, keep_older=3, on_warning=warnings.append)
@@ -246,7 +246,7 @@ def test_prune_warning_is_also_written_into_active_log(tmp_path, monkeypatch):
     def fake_remove(path):
         raise PermissionError("file is open in another program")
 
-    monkeypatch.setattr("debug_log.os.remove", fake_remove)
+    monkeypatch.setattr("app.debug_log.os.remove", fake_remove)
 
     warnings = []
     dbg = DebugLog(str(tmp_path), "Test App", max_bytes=2000, keep_older=0, on_warning=warnings.append)
@@ -257,7 +257,7 @@ def test_prune_warning_is_also_written_into_active_log(tmp_path, monkeypatch):
 
 
 def test_reenable_after_write_failure_starts_a_fresh_file(tmp_path, monkeypatch):
-    import debug_log as debug_log_module
+    import app.debug_log as debug_log_module
 
     dbg = DebugLog(str(tmp_path), "Test App", max_bytes=2000, keep_older=3)
     assert dbg.set_enabled(True)

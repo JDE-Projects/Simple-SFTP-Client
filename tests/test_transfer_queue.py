@@ -7,8 +7,8 @@ import threading
 
 import pytest
 
-import transfer_queue
-from transfer_queue import (
+import app.transfer_queue as transfer_queue
+from app.transfer_queue import (
     TransferQueue,
     WAITING,
     ACTIVE,

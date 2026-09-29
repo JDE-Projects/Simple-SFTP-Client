@@ -7,7 +7,7 @@ import os
 import time
 
 from simple_sftp_client import WORKER_COUNT, WORKER_COUNT_MAX, worker_target
-from transfer_queue import ACTIVE, COMPLETED, WAITING
+from app.transfer_queue import ACTIVE, COMPLETED, WAITING
 
 
 def test_few_small_files_stays_at_default():
