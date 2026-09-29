@@ -114,7 +114,7 @@ def start_watch(api, local_dir, remote_dir):
                             seen_changed.pop(fp, None)
                             break
                         api._ensure_remote_dir(rdir)
-                        finished = api._put_resume(api.sftp, fp, rp, 0, _cb, stop.is_set)
+                        finished = api._put_file(api.sftp, fp, rp, _cb, stop.is_set)
                     if finished:
                         api._worker_log(f"Watch: uploaded {rel}", "ok")
                         refreshed_folders.add(posixpath.dirname(rp))

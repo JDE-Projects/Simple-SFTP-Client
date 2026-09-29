@@ -17,44 +17,17 @@ Built with AI assistance, directed by JDE-Projects.
 
 import os
 import sys
-import io  # noqa: F401
 import shlex
-import stat  # noqa: F401
 import ctypes
 from ctypes import wintypes
-import errno  # noqa: F401
-import json  # noqa: F401
-import time  # noqa: F401
-import shutil  # noqa: F401
-import tempfile  # noqa: F401
 import threading
-import functools  # noqa: F401
-import traceback  # noqa: F401
-import webbrowser  # noqa: F401
-import socket  # noqa: F401
-import posixpath  # noqa: F401
-from datetime import datetime  # noqa: F401
-from urllib.request import Request, urlopen  # noqa: F401
 
 import webview
-import paramiko  # noqa: F401
 
-from app import constants, paths  # noqa: F401
-from app.api import Api, _browsing  # noqa
-# These names are kept for existing callers.
-from app.atomic import _atomic_write_json, _preserve_corrupt  # noqa: F401
-from app.constants import DISABLED_ALGORITHMS, GITHUB_REPO, MTIME_TOL, WORKER_COUNT, WORKER_COUNT_MAX  # noqa: F401
-from app.debug import AppDebugLog, _ParamikoBridge, _PRIVATE_KEY_RE, _URL_CREDS_RE, _scrub, debug  # noqa: F401
-from app.errors import InvalidPort, KnownHostsUnreadable, ScanIncomplete, UnknownHostKey, _update_error_reason, error_tips, friendly_error  # noqa: F401
-from app.formatting import fmt_time, human_size, negotiated_summary  # noqa: F401
-from app.geometry import _own_window_handle, _restore_geometry, _save_geometry, _win32  # noqa: F401
-from app.hostkeys import _TofuPolicy, _known_hosts_readable_or_raise, _save_host_keys_atomic, fingerprint_sha256, hostkey_name, load_known_hosts  # noqa: F401
-from app.keyfiles import _PROTECT_WARNING, _protect_private_key  # noqa: F401
-from app.paths import TEMP_PART_SUFFIX, _TEMP_PART_RE, exe_dir, is_temp_part, local_link_target, local_temp_path, remote_temp_path, resource_path, safe_local_child  # noqa: F401
-from app.prefs import load_prefs, save_prefs  # noqa: F401
-from app.transfer_queue import TransferQueue  # noqa: F401
-from app.validation import INVALID_PORT_ERROR, _SESSION_AUTH_VALUES, _SESSION_STR_FIELDS, _valid_session_entry, cred_key, missing_fields, parse_port  # noqa: F401
-from app.workers import worker_target  # noqa: F401
+from app.api import Api
+from app.debug import debug
+from app.geometry import _restore_geometry, _save_geometry
+from app.paths import resource_path
 
 
 APP_VERSION = "1.9.2"

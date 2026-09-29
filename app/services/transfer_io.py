@@ -11,7 +11,7 @@ from app.paths import local_temp_path, remote_temp_path
 DOWNLOAD_READV_BATCH_SIZE = 16 * 1024 * 1024
 
 
-def _put_resume(api, sftp, lp, rp, offset, cb, cancel_check):
+def _put_file(api, sftp, lp, rp, cb, cancel_check):
     # Writes into a scratch file next to the real remote destination
     # (never rp itself), so the destination is only touched once the new
     # copy is proven complete. On success the scratch file is confirmed
@@ -40,7 +40,6 @@ def _put_resume(api, sftp, lp, rp, offset, cb, cancel_check):
     published = False
     try:
         with open(lp, "rb") as src:
-            src.seek(offset)
             with sftp.open(temp, "w") as dst:
                 dst.set_pipelined(True)
                 sent = 0
@@ -106,8 +105,8 @@ def _put_resume(api, sftp, lp, rp, offset, cb, cancel_check):
                 pass
 
 
-def _get_resume(api, sftp, rp, lp, offset, cb, cancel_check):
-    # Same idea as _put_resume: stream into a local scratch file next to
+def _get_file(api, sftp, rp, lp, cb, cancel_check):
+    # Same idea as _put_file: stream into a local scratch file next to
     # the real destination, confirm its size once the loop finishes, then
     # publish with os.replace, which is atomic on the same drive. A
     # cancel, dropped connection, or exhausted retry only ever leaves the
@@ -117,7 +116,7 @@ def _get_resume(api, sftp, rp, lp, offset, cb, cancel_check):
     # Downloads use bounded readv batches instead of unlimited prefetch.
     # Batching keeps a cancel's drain-and-close latency bounded: a bigger
     # batch needs fewer idle round trips, but drains more data on cancel.
-    # As with _put_resume, a cancel only interrupts if a real chunk remains
+    # As with _put_file, a cancel only interrupts if a real chunk remains
     # to be written when it is observed.
     temp = local_temp_path(lp)
     finished = True
@@ -134,7 +133,7 @@ def _get_resume(api, sftp, rp, lp, offset, cb, cancel_check):
         with sftp.open(rp, "r") as src:
             with open(temp, "wb") as dst:
                 got = 0
-                batch_start = offset
+                batch_start = 0
                 while batch_start < expected_size:
                     if cancel_check():
                         finished = False

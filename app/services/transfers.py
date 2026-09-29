@@ -532,11 +532,10 @@ def _one(api, direction, lp, rp, name, idx, total, on_conflict, sftp,
     # new tail, and because that mangled file often ends up the same size as
     # the source, a later compare would read it as "same" and never fix it.
     # Sending fresh every time is the only safe rule size alone supports.
-    offset = 0
     start = time.time()
 
-    def cb(done_b, _t, base=offset):
-        api._progress(name, idx, total, base + done_b, src_size, time.time() - start, progress_key)
+    def cb(done_b, _t):
+        api._progress(name, idx, total, done_b, src_size, time.time() - start, progress_key)
 
     os.makedirs(os.path.dirname(lp), exist_ok=True) if direction == "download" else None
     if direction == "upload":
@@ -545,9 +544,9 @@ def _one(api, direction, lp, rp, name, idx, total, on_conflict, sftp,
             api._ensure_remote_dir(rdir, sftp)
             if dir_cache is not None:
                 dir_cache.add(rdir)
-        finished = api._put_resume(sftp, lp, rp, offset, cb, cancel_check)
+        finished = api._put_file(sftp, lp, rp, cb, cancel_check)
     else:
-        finished = api._get_resume(sftp, rp, lp, offset, cb, cancel_check)
+        finished = api._get_file(sftp, rp, lp, cb, cancel_check)
     # finished is False only if the byte loop broke early on cancel_check;
     # a transfer that sent every byte is "ok" even if cancel arrived a
     # moment later, so the caller must not re-check a cancel flag itself.

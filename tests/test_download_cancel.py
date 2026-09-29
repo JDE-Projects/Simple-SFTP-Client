@@ -33,8 +33,8 @@ def _cancelled_download(api, local_dir, name="cancel.bin"):
         return bool(progress) and progress[-1] >= CANCEL_AFTER_BYTES
 
     started = time.monotonic()
-    finished = transfer_io._get_resume(
-        api, api.sftp, f"/{name}", str(destination), 0,
+    finished = transfer_io._get_file(
+        api, api.sftp, f"/{name}", str(destination),
         lambda got, _total: progress.append(got), cancel_check)
     return finished, time.monotonic() - started, progress, destination
 
@@ -73,8 +73,8 @@ def test_immediate_cancel_then_session_close_leaves_no_prefetch_thread_or_crash(
     old_excepthook = threading.excepthook
     threading.excepthook = exceptions.append
     try:
-        finished = transfer_io._get_resume(
-            api, api.sftp, f"/{name}", str(local_dir / name), 0,
+        finished = transfer_io._get_file(
+            api, api.sftp, f"/{name}", str(local_dir / name),
             lambda _got, _total: None, lambda: True)
         leftover = _prefetch_threads()
         api.sftp.close()
@@ -96,8 +96,8 @@ def test_multi_batch_download_is_byte_identical(sftp_env):
     (server_root / name).write_bytes(data)
     destination = local_dir / name
 
-    finished = transfer_io._get_resume(
-        api, api.sftp, f"/{name}", str(destination), 0,
+    finished = transfer_io._get_file(
+        api, api.sftp, f"/{name}", str(destination),
         lambda _got, _total: None, lambda: False)
 
     assert finished is True
@@ -111,8 +111,8 @@ def test_zero_byte_download_publishes(sftp_env):
     destination.write_bytes(b"old content")
     (server_root / name).write_bytes(b"")
 
-    finished = transfer_io._get_resume(
-        api, api.sftp, f"/{name}", str(destination), 0,
+    finished = transfer_io._get_file(
+        api, api.sftp, f"/{name}", str(destination),
         lambda _got, _total: None, lambda: False)
 
     assert finished is True
