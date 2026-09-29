@@ -33,6 +33,16 @@ class KnownHostsUnreadable(Exception):
         self.path = path
 
 
+class KeyUnusable(Exception):
+    """The private key file chosen for key login could not be loaded, so the
+    server was never contacted with it. reason is "passphrase_needed",
+    "bad_passphrase", or "not_a_key"."""
+    def __init__(self, reason, path):
+        super().__init__(f"key unusable ({reason}): {path}")
+        self.reason = reason
+        self.path = path
+
+
 class ScanIncomplete(Exception):
     """Raised by _compute_pair_maps when part of the tree could not be read
     during the walk (an unreadable folder, an unreadable file's metadata, or a
@@ -51,6 +61,12 @@ def friendly_error(e):
         debug.log("error detail", f"{type(e).__name__}: {e}")
     except Exception:
         pass
+    if isinstance(e, KeyUnusable):
+        if e.reason == "passphrase_needed":
+            return "This key is protected by a passphrase. Enter it and try again."
+        if e.reason == "bad_passphrase":
+            return "Couldn't unlock the key. Check the passphrase."
+        return "That file isn't an SSH private key this app can read."
     if isinstance(e, paramiko.AuthenticationException):
         return "Authentication failed. Check the username, password, or key."
     if isinstance(e, paramiko.SSHException):
@@ -79,6 +95,18 @@ def friendly_error(e):
 
 def error_tips(e):
     """Actionable, plain-language guidance shown in the failure popup."""
+    if isinstance(e, KeyUnusable):
+        if e.reason == "passphrase_needed":
+            return ("The key file is encrypted with a passphrase.\n"
+                    "• Type the key's passphrase in the Key passphrase box and connect again.")
+        if e.reason == "bad_passphrase":
+            return ("The key file could not be unlocked with the passphrase given.\n"
+                    "• Re-type the passphrase, checking Caps Lock.\n"
+                    "• Confirm this is the key the passphrase belongs to.\n"
+                    "• If the passphrase is right, the key file may be damaged.")
+        return ("The chosen file is not a private key in a format this app reads.\n"
+                "• Choose the private key, not the .pub public key.\n"
+                "• A PuTTY .ppk key must first be exported to OpenSSH format with PuTTYgen.")
     if isinstance(e, (TimeoutError, socket.timeout)):
         return ("The server didn't respond in time. Common causes:\n"
                 "• The host address or port number is wrong.\n"
