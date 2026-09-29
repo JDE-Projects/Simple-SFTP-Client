@@ -54,7 +54,7 @@ def test_nested_remote_folder_downloads_every_file_with_correct_bytes(sftp_env, 
 
     wait_for_drain(api)
 
-    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    states = {e["name"]: e["state"] for e in api._queue.snapshot()}
     assert states["a.bin"] == COMPLETED
     assert states["b.bin"] == COMPLETED
     assert states["c.bin"] == COMPLETED
@@ -87,7 +87,7 @@ def test_nested_local_folder_uploads_creating_remote_dirs_lazily(sftp_env, wait_
 
     wait_for_drain(api)
 
-    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    states = {e["name"]: e["state"] for e in api._queue.snapshot()}
     assert states["a.bin"] == COMPLETED
     assert states["b.bin"] == COMPLETED
     assert states["c.bin"] == COMPLETED
@@ -115,7 +115,7 @@ def test_folder_upload_leaves_out_local_scratch_files(sftp_env, wait_for_drain):
     assert result["ok"] is True
     wait_for_drain(api)
 
-    names = [e["name"] for e in api.queue.snapshot()]
+    names = [e["name"] for e in api._queue.snapshot()]
     assert names == ["a.bin"]
     assert sorted(os.listdir(server_root / "top")) == ["a.bin"]
 
@@ -140,7 +140,7 @@ def test_poll_queue_reports_scanning_while_running_then_false_once_drained(sftp_
         if status["scanning"]:
             saw_scanning = True
             break
-        if not api._scan_active() and api.queue.pending() == 0 and len(api.queue.snapshot()) == 20:
+        if not api._scan_active() and api._queue.pending() == 0 and len(api._queue.snapshot()) == 20:
             break
         time.sleep(0.005)
     assert saw_scanning, "poll_queue never reported scanning=True while the scan ran"
@@ -177,7 +177,7 @@ def test_backpressure_holds_queue_waiting_at_the_high_water_mark(sftp_env, monke
         max_seen = 0
         deadline = time.time() + 2
         while time.time() < deadline:
-            max_seen = max(max_seen, api.queue.waiting())
+            max_seen = max(max_seen, api._queue.waiting())
             time.sleep(0.01)
 
         assert max_seen <= 5, f"queue.waiting() reached {max_seen}, expected it held at the high-water mark"

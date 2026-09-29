@@ -23,7 +23,7 @@ def test_upload_byte_integrity(sftp_env, wait_for_drain, wait_for_queue_count, s
     assert result["ok"] is True
     assert result["scanning"] is True
     wait_for_queue_count(api, 1)
-    item_id = api.queue.snapshot()[0]["id"]
+    item_id = api._queue.snapshot()[0]["id"]
 
     wait_for_drain(api)
 
@@ -42,7 +42,7 @@ def test_download_byte_integrity(sftp_env, wait_for_drain, wait_for_queue_count,
                           str(local_dir), "/", "overwrite")
     assert result["ok"] is True
     wait_for_queue_count(api, 1)
-    item_id = api.queue.snapshot()[0]["id"]
+    item_id = api._queue.snapshot()[0]["id"]
 
     wait_for_drain(api)
 
@@ -65,10 +65,10 @@ def test_multiple_files_drain_in_order_and_all_complete(sftp_env, wait_for_drain
 
     wait_for_drain(api)
 
-    snap = api.queue.snapshot()
+    snap = api._queue.snapshot()
     assert len(snap) == len(names)
     assert all(entry["state"] == COMPLETED for entry in snap)
-    assert api.queue.pending() == 0
+    assert api._queue.pending() == 0
 
 
 def test_cancel_waiting_item_behind_a_slower_active_one(
@@ -90,7 +90,7 @@ def test_cancel_waiting_item_behind_a_slower_active_one(
     assert result["ok"] is True
 
     wait_for_queue_count(api, 3)
-    snap = api.queue.snapshot()
+    snap = api._queue.snapshot()
     big1_id = next(e["id"] for e in snap if e["name"] == "big1.bin")
     big2_id = next(e["id"] for e in snap if e["name"] == "big2.bin")
     small_id = next(e["id"] for e in snap if e["name"] == "small.bin")
@@ -135,7 +135,7 @@ def test_progress_reaches_the_page_only_through_poll_queue(sftp_env, wait_for_dr
     api.enqueue([{"name": name, "is_dir": False}], "upload", str(local_dir), "/", "overwrite")
     wait_for_drain(api)
 
-    item_id = api.queue.snapshot()[-1]["id"]
+    item_id = api._queue.snapshot()[-1]["id"]
     assert state_of(api, item_id)["state"] == COMPLETED
     assert seen
     for key, payload in seen:
@@ -157,7 +157,7 @@ def test_enqueue_locked_out_while_legacy_transfer_active(sftp_env):
 
     assert result["ok"] is False
     assert "sync" in result["error"] or "watch" in result["error"]
-    assert api.queue.pending() == 0
+    assert api._queue.pending() == 0
 
 
 def test_second_batch_runs_after_the_queue_drained(sftp_env, wait_for_drain, state_of):
@@ -190,7 +190,7 @@ def test_second_batch_runs_after_the_queue_drained(sftp_env, wait_for_drain, sta
     assert result["ok"] is True
     wait_for_drain(api)
 
-    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    states = {e["name"]: e["state"] for e in api._queue.snapshot()}
     for name in first + second:
         assert states[name] == COMPLETED
         assert (server_root / name).exists()
@@ -205,7 +205,7 @@ def test_item_enqueued_as_the_queue_empties_is_not_stranded(sftp_env, wait_for_d
     (local_dir / "first.bin").write_bytes(os.urandom(1024))
     (local_dir / "late.bin").write_bytes(os.urandom(1024))
 
-    real_claim = api.queue.claim
+    real_claim = api._queue.claim
     injected = {"done": False}
 
     def claim_with_injection():
@@ -214,17 +214,17 @@ def test_item_enqueued_as_the_queue_empties_is_not_stranded(sftp_env, wait_for_d
             injected["done"] = True
             # a file appears right as the worker finds the queue empty, the way
             # enqueue() appends just before it would (re)start the worker
-            api.queue.append("upload", str(local_dir / "late.bin"), "/late.bin", "late.bin")
+            api._queue.append("upload", str(local_dir / "late.bin"), "/late.bin", "late.bin")
         return item
 
-    api.queue.claim = claim_with_injection
+    api._queue.claim = claim_with_injection
 
     api.enqueue([{"name": "first.bin", "is_dir": False}], "upload",
                 str(local_dir), "/", "overwrite")
     # pending only reaches 0 if the late arrival was picked up and transferred
     wait_for_drain(api)
 
-    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    states = {e["name"]: e["state"] for e in api._queue.snapshot()}
     assert states["first.bin"] == COMPLETED
     assert states["late.bin"] == COMPLETED
     assert (server_root / "late.bin").read_bytes() == (local_dir / "late.bin").read_bytes()
@@ -251,7 +251,7 @@ def test_upload_paths_joins_the_queue_alongside_pending_items(sftp_env, wait_for
 
     wait_for_drain(api)
 
-    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    states = {e["name"]: e["state"] for e in api._queue.snapshot()}
     assert states["queued.bin"] == COMPLETED
     assert states["dropped.bin"] == COMPLETED
     assert (server_root / "dropped.bin").read_bytes() == dropped_file.read_bytes()
@@ -270,7 +270,7 @@ def test_upload_paths_locked_out_while_legacy_active(sftp_env):
 
     assert result["ok"] is False
     assert "sync" in result["error"] or "watch" in result["error"]
-    assert api.queue.pending() == 0
+    assert api._queue.pending() == 0
 
 
 def test_retry_item_runs_to_completion(sftp_env, wait_for_drain, wait_for_queue_count, state_of):
@@ -281,7 +281,7 @@ def test_retry_item_runs_to_completion(sftp_env, wait_for_drain, wait_for_queue_
                           str(local_dir), "/", "overwrite")
     assert result["ok"] is True
     wait_for_queue_count(api, 1)
-    item_id = api.queue.snapshot()[0]["id"]
+    item_id = api._queue.snapshot()[0]["id"]
 
     wait_for_drain(api)
     assert state_of(api, item_id)["state"] == FAILED
@@ -318,7 +318,7 @@ def test_pause_holds_waiting_items_then_resume_drains_them(
     assert api.enqueue(jobs, "upload", str(local_dir), "/", "overwrite")["ok"] is True
 
     wait_for_queue_count(api, len(jobs))
-    snap = api.queue.snapshot()
+    snap = api._queue.snapshot()
     big1_id = next(e["id"] for e in snap if e["name"] == "big1.bin")
     big2_id = next(e["id"] for e in snap if e["name"] == "big2.bin")
 
@@ -344,15 +344,15 @@ def test_pause_holds_waiting_items_then_resume_drains_them(
     assert state_of(api, big1_id)["state"] == COMPLETED
     assert state_of(api, big2_id)["state"] == COMPLETED
     # every small is still WAITING: paused claim() never handed one out
-    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    states = {e["name"]: e["state"] for e in api._queue.snapshot()}
     for name in smalls:
         assert states[name] == WAITING
-    assert api.queue.is_paused() is True
+    assert api._queue.is_paused() is True
 
     # resume drains the rest
     assert api.resume_queue() == {"ok": True}
     wait_for_drain(api)
-    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    states = {e["name"]: e["state"] for e in api._queue.snapshot()}
     for name in smalls:
         assert states[name] == COMPLETED
         assert (server_root / name).read_bytes() == (local_dir / name).read_bytes()
@@ -373,7 +373,7 @@ def test_pause_flag_clears_once_a_paused_queue_empties(
     # pause only once both files are active (nothing left waiting behind them),
     # so the pause lands on a queue that then genuinely empties
     wait_for_queue_count(api, len(first))
-    snap = api.queue.snapshot()
+    snap = api._queue.snapshot()
     first_ids = [e["id"] for e in snap]
     deadline = time.time() + 15
     while time.time() < deadline:
@@ -384,7 +384,7 @@ def test_pause_flag_clears_once_a_paused_queue_empties(
     wait_for_drain(api)  # the two active files finish and the queue empties
 
     # the stale pause flag was cleared as the queue drained
-    assert api.queue.is_paused() is False
+    assert api._queue.is_paused() is False
 
     second = [f"b{i}.bin" for i in range(2)]
     for name in second:
@@ -393,7 +393,7 @@ def test_pause_flag_clears_once_a_paused_queue_empties(
                        str(local_dir), "/", "overwrite")["ok"] is True
     wait_for_drain(api)
 
-    states = {e["name"]: e["state"] for e in api.queue.snapshot()}
+    states = {e["name"]: e["state"] for e in api._queue.snapshot()}
     for name in first + second:
         assert states[name] == COMPLETED
         assert (server_root / name).exists()

@@ -110,9 +110,9 @@ def _start_sftp_env(tmp_path, fs_extra_attrs=None):
     sftp = client.open_sftp()
 
     api = Api(APP_VERSION)
-    api.client = client
-    api.sftp = sftp
-    api.connected = True
+    api._client = client
+    api._sftp = sftp
+    api._connected = True
 
     try:
         yield api, server_root, local_dir
@@ -175,19 +175,19 @@ def sftp_env_no_times(tmp_path):
 @pytest.fixture
 def wait_for_drain():
     """Return a helper that polls until the queue is truly empty: no
-    background scan still streaming files in, AND api.queue.pending() == 0.
+    background scan still streaming files in, AND api._queue.pending() == 0.
     enqueue()/upload_paths() now return before the scan has queued anything,
     so pending() can read 0 for an instant before the scan starts; checking
     only pending() would let this fixture return too early on a slow scan."""
     def _wait(api, timeout=15):
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if not api._scan_active() and api.queue.pending() == 0:
+            if not api._scan_active() and api._queue.pending() == 0:
                 return
             time.sleep(0.05)
         pytest.fail(
             f"queue did not drain within {timeout}s, "
-            f"scanning={api._scan_active()}, pending={api.queue.pending()}")
+            f"scanning={api._scan_active()}, pending={api._queue.pending()}")
     return _wait
 
 
@@ -200,12 +200,12 @@ def wait_for_queue_count():
     def _wait(api, n, timeout=15):
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if len(api.queue.snapshot()) >= n:
+            if len(api._queue.snapshot()) >= n:
                 return
             time.sleep(0.02)
         pytest.fail(
             f"queue did not reach {n} item(s) within {timeout}s, "
-            f"has {len(api.queue.snapshot())}")
+            f"has {len(api._queue.snapshot())}")
     return _wait
 
 
@@ -246,7 +246,7 @@ def wait_for_compare():
 def state_of():
     """Return a helper that finds a queue item's snapshot entry by id."""
     def _state(api, item_id):
-        for entry in api.queue.snapshot():
+        for entry in api._queue.snapshot():
             if entry["id"] == item_id:
                 return entry
         return None

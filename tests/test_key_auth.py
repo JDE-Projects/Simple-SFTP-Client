@@ -69,7 +69,7 @@ def test_right_key_connects_and_remembers_no_password(key_server):
     result = _connect(api, params)
 
     assert result["ok"] is True
-    assert api.connected is True
+    assert api._connected is True
     assert api._cred_pass == ""
     api.disconnect()
 
@@ -85,8 +85,8 @@ def test_wrong_key_is_refused_plainly(key_server, tmp_path):
     assert result["ok"] is False
     assert result["error"] == "Authentication failed. Check the username, password, or key."
     assert "Traceback" not in result["error"]
-    assert api.connected is False
-    assert api.client is None
+    assert api._connected is False
+    assert api._client is None
 
 
 def test_passphrase_key_connects_with_right_passphrase(tmp_path, monkeypatch):
@@ -134,7 +134,7 @@ def test_passphrase_key_wrong_passphrase_is_refused_plainly(tmp_path, monkeypatc
         assert result["ok"] is False
         assert result["error"] == "Couldn't unlock the key. Check the passphrase."
         assert "host_key_unknown" not in result
-        assert api.connected is False
+        assert api._connected is False
     finally:
         srv_sock.close()
 
@@ -164,8 +164,8 @@ def _key_error(tmp_path, monkeypatch, key_path, passphrase=""):
     api = Api(APP_VERSION)
     result = api.connect(_key_params(key_path, passphrase))
     assert result["ok"] is False
-    assert api.connected is False
-    assert api.client is None
+    assert api._connected is False
+    assert api._client is None
     assert result["tips"]
     return result["error"]
 

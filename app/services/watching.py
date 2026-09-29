@@ -36,7 +36,7 @@ def start_watch(api, local_dir, remote_dir):
     following start_watch is refused rather than risking two watch threads
     running over the same folder at once."""
     api.stop_watch()
-    if not api.connected:
+    if not api._connected:
         return {"ok": False, "error": "Not connected."}
     with api._watch_lock:
         prev = api._watch_thread
@@ -47,7 +47,7 @@ def start_watch(api, local_dir, remote_dir):
             if api._watch_thread is prev:
                 api._watch_stop = None
                 api._watch_thread = None
-    if api.queue.pending() > 0:
+    if api._queue.pending() > 0:
         return {"ok": False, "error": "A transfer queue is active. Wait for it to finish."}
     # This run's own stop Event, captured by loop() below. Never read the
     # shared self._watch_stop from inside the thread: a stop or a restart can
@@ -85,7 +85,7 @@ def start_watch(api, local_dir, remote_dir):
             # upload path is deliberately kept clear of an active batch.
             # Leave last and seen_changed untouched so the change is retried
             # on a later idle poll.
-            if changed and api.queue.pending() > 0:
+            if changed and api._queue.pending() > 0:
                 continue
             refreshed_folders = set()
             for fp in changed:
@@ -106,7 +106,7 @@ def start_watch(api, local_dir, remote_dir):
                         pass
 
                     # Serialize against the browsing session: this upload runs
-                    # on the watcher thread and shares self.sftp with listing
+                    # on the watcher thread and shares self._sftp with listing
                     # and health-ping bridge calls (see _browsing).
                     finished = False
                     with api._sftp_lock:
@@ -114,7 +114,7 @@ def start_watch(api, local_dir, remote_dir):
                             seen_changed.pop(fp, None)
                             break
                         api._ensure_remote_dir(rdir)
-                        finished = api._put_file(api.sftp, fp, rp, _cb, stop.is_set)
+                        finished = api._put_file(api._sftp, fp, rp, _cb, stop.is_set)
                     if finished:
                         api._worker_log(f"Watch: uploaded {rel}", "ok")
                         refreshed_folders.add(posixpath.dirname(rp))

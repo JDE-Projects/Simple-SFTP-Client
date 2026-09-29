@@ -31,7 +31,7 @@ def _remote_temp_files(server_root):
 def _wait_until_not_waiting(api, item_id, timeout=15):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        entry = next((e for e in api.queue.snapshot() if e["id"] == item_id), None)
+        entry = next((e for e in api._queue.snapshot() if e["id"] == item_id), None)
         if entry is not None and entry["state"] != WAITING:
             return
         time.sleep(0.02)
@@ -58,7 +58,7 @@ def test_large_queue_disconnect_stops_workers_promptly(sftp_env, wait_for_queue_
     assert elapsed < 8
     assert not any(w.is_alive() for w in api._workers)
 
-    states = [e["state"] for e in api.queue.snapshot()]
+    states = [e["state"] for e in api._queue.snapshot()]
     # Every item left WAITING when the disconnect landed goes straight to
     # CANCELLED (cancel_all()), never ground through retries into FAILED.
     assert FAILED not in states
@@ -78,7 +78,7 @@ def test_shutdown_mid_transfer_leaves_destination_intact_and_threads_stop(
                           str(local_dir), "/", "overwrite")
     assert result["ok"] is True
     wait_for_queue_count(api, 1)
-    item_id = api.queue.snapshot()[0]["id"]
+    item_id = api._queue.snapshot()[0]["id"]
     _wait_until_not_waiting(api, item_id)
 
     start = time.time()
@@ -180,15 +180,15 @@ def test_connect_failure_then_success_leaves_no_dangling_client(monkeypatch, tmp
 
     r1 = api.connect(payload)
     assert r1["ok"] is False
-    assert api.client is None
-    assert api.sftp is None
-    assert api.connected is False
+    assert api._client is None
+    assert api._sftp is None
+    assert api._connected is False
     assert "closed_fail_client" in calls
 
     r2 = api.connect(payload)
     assert r2["ok"] is True
-    assert api.connected is True
-    assert isinstance(api.client, _FakeClientOk)
+    assert api._connected is True
+    assert isinstance(api._client, _FakeClientOk)
     # The failed attempt's client was closed and never touched the good one.
     assert "closed_fail_client" in calls
     assert "closed_ok_client" not in calls
@@ -199,7 +199,7 @@ def test_connect_normalize_failure_leaves_state_unpublished(monkeypatch, tmp_pat
     # raises. State must never be published as connected, and the half-open
     # session must be torn down rather than left holding a closed transport
     # while the app reports "connected". Fails against the pre-fix code, which
-    # set self.client/sftp/connected before normalizing and left them set.
+    # set self._client/_sftp/_connected before normalizing and left them set.
     api = Api(APP_VERSION)
     api._local_cwd = str(tmp_path)
     calls = []
@@ -207,9 +207,9 @@ def test_connect_normalize_failure_leaves_state_unpublished(monkeypatch, tmp_pat
 
     r = api.connect({"host": "h", "username": "u", "password": "p"})
     assert r["ok"] is False
-    assert api.client is None
-    assert api.sftp is None
-    assert api.connected is False
+    assert api._client is None
+    assert api._sftp is None
+    assert api._connected is False
     # Both halves of the failed attempt were closed, not leaked.
     assert "closed_normfail_sftp" in calls
     assert "closed_normfail_client" in calls
@@ -228,13 +228,13 @@ def test_connect_normalize_failure_then_success(monkeypatch, tmp_path):
 
     r1 = api.connect(payload)
     assert r1["ok"] is False
-    assert api.connected is False
-    assert api.client is None and api.sftp is None
+    assert api._connected is False
+    assert api._client is None and api._sftp is None
 
     r2 = api.connect(payload)
     assert r2["ok"] is True
-    assert api.connected is True
-    assert isinstance(api.client, _FakeClientOk)
+    assert api._connected is True
+    assert isinstance(api._client, _FakeClientOk)
     # The good client was never closed by the earlier failure's cleanup.
     assert "closed_ok_client" not in calls
 
@@ -248,9 +248,9 @@ def test_disconnect_after_normalize_failure_is_clean(monkeypatch, tmp_path):
 
     # Disconnect after a failed connect stays safe and leaves state clean.
     assert api.disconnect() == {"ok": True}
-    assert api.connected is False
-    assert api.client is None
-    assert api.sftp is None
+    assert api._connected is False
+    assert api._client is None
+    assert api._sftp is None
 
 
 def test_failed_reconnect_preserves_prior_good_connection(monkeypatch, tmp_path):
@@ -262,17 +262,17 @@ def test_failed_reconnect_preserves_prior_good_connection(monkeypatch, tmp_path)
     payload = {"host": "h", "username": "u", "password": "p"}
 
     assert api.connect(payload)["ok"] is True
-    good_client = api.client
-    good_sftp = api.sftp
+    good_client = api._client
+    good_sftp = api._sftp
     assert isinstance(good_client, _FakeClientOk)
 
     # A reconnect that fails during home normalization must not tear down or
     # replace the still-good prior connection.
     r = api.connect(payload)
     assert r["ok"] is False
-    assert api.connected is True
-    assert api.client is good_client
-    assert api.sftp is good_sftp
+    assert api._connected is True
+    assert api._client is good_client
+    assert api._sftp is good_sftp
     # Only the failed attempt's objects were closed.
     assert "closed_normfail_client" in calls
     assert "closed_ok_client" not in calls
@@ -302,7 +302,7 @@ def test_mid_batch_server_drop_stops_queue_and_reports_once(sftp_env, wait_for_q
         with drop_lock:
             if not dropped["done"]:
                 dropped["done"] = True
-                api.client.close()
+                api._client.close()
         return real_progress(*a, **kw)
     api._progress = drop_then_progress
 
@@ -388,15 +388,15 @@ def test_real_connect_lifecycle_sweeps_scratch_and_shuts_down(
     # silently accept.
     r1 = api.connect(params)
     assert r1.get("host_key_unknown") is True
-    assert api.connected is False
-    assert api.client is None
+    assert api._connected is False
+    assert api._client is None
 
     assert api.trust_host_key()["ok"] is True
 
     r2 = api.connect(params)
     assert r2["ok"] is True
-    assert api.connected is True
-    assert api.client is not None and api.sftp is not None
+    assert api._connected is True
+    assert api._client is not None and api._sftp is not None
     assert "home" in r2 and "cwd" in r2
     # The on-connect sweep removed the orphaned scratch file.
     assert not scratch.exists()
@@ -410,8 +410,8 @@ def test_real_connect_lifecycle_sweeps_scratch_and_shuts_down(
 
     # Orderly disconnect tears the real session down and clears state.
     assert api.disconnect() == {"ok": True}
-    assert api.connected is False
-    assert api.client is None and api.sftp is None
+    assert api._connected is False
+    assert api._client is None and api._sftp is None
     assert not any(w.is_alive() for w in api._workers)
 
 
@@ -421,6 +421,6 @@ def test_shutdown_is_safe_to_call_twice(sftp_env):
     api, server_root, local_dir = sftp_env
     assert api.shutdown() == {"ok": True}
     assert api.shutdown() == {"ok": True}
-    assert api.connected is False
-    assert api.client is None
-    assert api.sftp is None
+    assert api._connected is False
+    assert api._client is None
+    assert api._sftp is None

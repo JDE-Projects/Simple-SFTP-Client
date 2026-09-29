@@ -36,12 +36,12 @@ def _wait_until_active(api, item_id, state_of, timeout=15):
 
 
 def _enqueue_one(api, direction, local_dir, remote_dir, name, on_conflict, wait_for_queue_count):
-    before = len(api.queue.snapshot())
+    before = len(api._queue.snapshot())
     result = api.enqueue([{"name": name, "is_dir": False}], direction,
                           str(local_dir), remote_dir, on_conflict)
     assert result["ok"] is True
     wait_for_queue_count(api, before + 1)
-    return api.queue.snapshot()[-1]["id"]
+    return api._queue.snapshot()[-1]["id"]
 
 
 # ───────────── download: cancel keeps the original ─────────────
@@ -294,8 +294,8 @@ def test_upload_refuses_and_keeps_original_when_posix_rename_unsupported(
 # ───────────── upload: preserve the existing target's permissions ─────────────
 
 # These patch paramiko.SFTPClient at the class level rather than on
-# api.sftp, because each queue worker opens its own SFTP session
-# (self.client.open_sftp()) instead of reusing the browsing session; api.sftp
+# api._sftp, because each queue worker opens its own SFTP session
+# (self._client.open_sftp()) instead of reusing the browsing session; api._sftp
 # is never touched by a transfer. This is the same approach the existing
 # flaky_stat/oversize_stat download tests above use.
 
@@ -605,7 +605,7 @@ def test_watch_upload_preserves_source_modification_time(sftp_env, wait_until):
     api.stop_watch()
 
     src_mtime = int(os.stat(f).st_mtime)
-    dst_mtime = int(api.sftp.stat(f"/{name}").st_mtime)
+    dst_mtime = int(api._sftp.stat(f"/{name}").st_mtime)
     assert abs(dst_mtime - src_mtime) <= 1
 
 
@@ -649,7 +649,7 @@ def test_compare_hides_temp_part_files_on_both_sides(sftp_env):
     (local_dir / ".same.bin.deadbeef.sxtpart").write_bytes(b"scratch")
     (server_root / ".other.bin.cafebabe.sxtpart").write_bytes(b"scratch")
 
-    data = api._compute_compare(api.sftp, str(local_dir), "/")
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert data is not None
     assert not any(is_temp_part(n) for n in data["files"])
     assert data["files"]["same.bin"] == "same"

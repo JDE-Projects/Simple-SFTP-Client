@@ -11,7 +11,7 @@ from app.transfer_queue import TransferQueue
 
 def _browsing(method):
     """Serialize a bridge call that uses the shared browsing SFTP session
-    (self.sftp). Paramiko's synchronous SFTP is not safe for two callers on one
+    (self._sftp). Paramiko's synchronous SFTP is not safe for two callers on one
     session at once, and pywebview runs each bridge call on its own thread, so
     without this the health ping and a listing (or any two browsing operations)
     can overlap and consume each other's replies, leaving a listing blocked with
@@ -30,9 +30,9 @@ class Api:
     def __init__(self, app_version):
         self._app_version = app_version
         self._window = None
-        self.connected = False
-        self.client = None
-        self.sftp = None
+        self._connected = False
+        self._client = None
+        self._sftp = None
         self._cred_pass = ""
         # Set only after a successful PASSWORD login: (host, port, username,
         # "password"), all stripped. save_session may write the remembered
@@ -42,7 +42,7 @@ class Api:
         self._cred_identity = None
         self._pending_host_key = None  # (hostname, offered_key) awaiting user trust
         self._lock = threading.Lock()
-        # Serializes every operation on the shared browsing session (self.sftp)
+        # Serializes every operation on the shared browsing session (self._sftp)
         # so two bridge threads never use it at once. Re-entrant so a guarded
         # call can nest another (see _browsing). Transfer workers and the
         # scanner use their own sessions and are intentionally not on this lock.
@@ -59,10 +59,10 @@ class Api:
         self._watch_refresh_lock = threading.Lock()
         self._watch_refresh = set()
         # transfer queue: a pool of workers drains it, each over its own SFTP
-        # session (never self.sftp, that stays reserved for the file browser).
+        # session (never self._sftp, that stays reserved for the file browser).
         # Pool size is WORKER_COUNT (2) by default, up to WORKER_COUNT_MAX (5)
         # for a batch of many small files.
-        self.queue = TransferQueue()
+        self._queue = TransferQueue()
         self._workers = []  # live worker Thread objects, at most self._target_workers
         self._worker_lock = threading.Lock()
         # How many workers the pool tops up to. A fresh batch sets this (see

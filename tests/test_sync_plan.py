@@ -31,7 +31,7 @@ def _by_name(plan):
 
 
 def _sync(api, local_dir, direction, changed_only=True):
-    plan, transfers, _conflicts = api._compute_sync(api.sftp, str(local_dir), "/", direction, changed_only)
+    plan, transfers, _conflicts = api._compute_sync(api._sftp, str(local_dir), "/", direction, changed_only)
     return plan, transfers
 
 

@@ -34,7 +34,7 @@ def _cancelled_download(api, local_dir, name="cancel.bin"):
 
     started = time.monotonic()
     finished = transfer_io._get_file(
-        api, api.sftp, f"/{name}", str(destination),
+        api, api._sftp, f"/{name}", str(destination),
         lambda got, _total: progress.append(got), cancel_check)
     return finished, time.monotonic() - started, progress, destination
 
@@ -50,7 +50,7 @@ def test_cancel_over_throttled_link_finishes_within_bound(sftp_env, monkeypatch)
     api, server_root, local_dir = sftp_env
     name = "cancel.bin"
     (server_root / name).write_bytes(os.urandom(48 * 1024 * 1024))
-    _throttle_sftp_data(monkeypatch, api.sftp)
+    _throttle_sftp_data(monkeypatch, api._sftp)
 
     finished, elapsed, progress, destination = _cancelled_download(api, local_dir, name)
 
@@ -74,11 +74,11 @@ def test_immediate_cancel_then_session_close_leaves_no_prefetch_thread_or_crash(
     threading.excepthook = exceptions.append
     try:
         finished = transfer_io._get_file(
-            api, api.sftp, f"/{name}", str(local_dir / name),
+            api, api._sftp, f"/{name}", str(local_dir / name),
             lambda _got, _total: None, lambda: True)
         leftover = _prefetch_threads()
-        api.sftp.close()
-        api.client.close()
+        api._sftp.close()
+        api._client.close()
         for thread in leftover:
             thread.join(2)
     finally:
@@ -97,7 +97,7 @@ def test_multi_batch_download_is_byte_identical(sftp_env):
     destination = local_dir / name
 
     finished = transfer_io._get_file(
-        api, api.sftp, f"/{name}", str(destination),
+        api, api._sftp, f"/{name}", str(destination),
         lambda _got, _total: None, lambda: False)
 
     assert finished is True
@@ -112,7 +112,7 @@ def test_zero_byte_download_publishes(sftp_env):
     (server_root / name).write_bytes(b"")
 
     finished = transfer_io._get_file(
-        api, api.sftp, f"/{name}", str(destination),
+        api, api._sftp, f"/{name}", str(destination),
         lambda _got, _total: None, lambda: False)
 
     assert finished is True

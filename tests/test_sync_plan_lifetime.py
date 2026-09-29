@@ -133,12 +133,12 @@ def test_stale_token_is_refused_and_queues_nothing_extra(sftp_env, wait_for_comp
     assert repeat["ok"] is False
     assert "no longer available" in (repeat["error"] or "")
     wait_for_drain(api)
-    before = api.queue.counts()
+    before = api._queue.counts()
 
     start2 = api.start_sync(token)
     assert start2["ok"] is False
     assert "no longer available" in (start2["error"] or "")
-    assert api.queue.counts() == before
+    assert api._queue.counts() == before
 
 
 def test_start_sync_after_discard_is_refused(sftp_env, wait_for_compare):

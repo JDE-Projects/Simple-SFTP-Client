@@ -76,49 +76,6 @@
   "pause_queue": [],
   "ping": [],
   "poll_queue": [],
-  "queue.append": [
-    "direction",
-    "local_path",
-    "remote_path",
-    "name",
-    "size",
-    "on_conflict",
-    "is_dir"
-  ],
-  "queue.cancel": [
-    "item_id"
-  ],
-  "queue.cancel_all": [],
-  "queue.claim": [],
-  "queue.clear_finished": [],
-  "queue.counts": [],
-  "queue.fail_waiting": [
-    "error"
-  ],
-  "queue.is_paused": [],
-  "queue.mark_cancelled": [
-    "item_id"
-  ],
-  "queue.mark_completed": [
-    "item_id"
-  ],
-  "queue.mark_failed": [
-    "item_id",
-    "error"
-  ],
-  "queue.mark_skipped": [
-    "item_id"
-  ],
-  "queue.pause": [],
-  "queue.pending": [],
-  "queue.requeue": [
-    "item_id"
-  ],
-  "queue.resume": [],
-  "queue.retry_all_failed": [],
-  "queue.snapshot": [],
-  "queue.snapshot_and_pending": [],
-  "queue.waiting": [],
   "rename": [],
   "resume_queue": [],
   "retry_all_failed": [],

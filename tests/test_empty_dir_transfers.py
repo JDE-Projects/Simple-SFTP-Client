@@ -24,7 +24,7 @@ def test_upload_of_empty_selected_folder_creates_it_on_remote(sftp_env, wait_for
 
     wait_for_drain(api)
 
-    snap = api.queue.snapshot()
+    snap = api._queue.snapshot()
     assert len(snap) == 1
     assert snap[0]["is_dir"] is True
     assert snap[0]["state"] == COMPLETED
@@ -41,7 +41,7 @@ def test_download_of_empty_remote_folder_creates_it_locally(sftp_env, wait_for_d
 
     wait_for_drain(api)
 
-    snap = api.queue.snapshot()
+    snap = api._queue.snapshot()
     assert len(snap) == 1
     assert snap[0]["is_dir"] is True
     assert snap[0]["state"] == COMPLETED
@@ -61,7 +61,7 @@ def test_nested_empty_folders_are_created_both_ways(sftp_env, wait_for_drain):
     assert (server_root / "up_a" / "up_b").is_dir()
     assert (server_root / "up_a" / "up_b" / "up_c").is_dir()
 
-    api.queue.clear_finished()
+    api._queue.clear_finished()
 
     # download side: a/b/c all empty
     (server_root / "dn_a" / "dn_b" / "dn_c").mkdir(parents=True)
@@ -88,7 +88,7 @@ def test_mixed_tree_transfers_files_and_creates_only_the_empty_folders(sftp_env,
     assert result["ok"] is True
     wait_for_drain(api)
 
-    snap = api.queue.snapshot()
+    snap = api._queue.snapshot()
     # exactly one file item and two folder items (empty_leaf, empty_nested);
     # has_file and mixed itself must NOT get their own folder items since
     # they contain a file somewhere in their subtree
@@ -113,7 +113,7 @@ def test_folder_already_existing_on_destination_is_success_not_failure(sftp_env,
     assert result["ok"] is True
     wait_for_drain(api)
 
-    snap = api.queue.snapshot()
+    snap = api._queue.snapshot()
     assert len(snap) == 1
     assert snap[0]["state"] == COMPLETED
     assert (server_root / "already").is_dir()
@@ -134,7 +134,7 @@ def test_file_where_folder_must_go_fails_the_item_without_overwriting(sftp_env, 
     assert result["ok"] is True
     wait_for_drain(api)
 
-    snap = api.queue.snapshot()
+    snap = api._queue.snapshot()
     assert len(snap) == 1
     assert snap[0]["state"] == FAILED
     assert "already exists" in snap[0]["error"]
@@ -167,5 +167,5 @@ def test_cancel_mid_scan_stops_cleanly(sftp_env):
         raise AssertionError("scan did not stop within 5s of cancel()")
 
     # the scan must have been cut short rather than queuing all 200 folders
-    total_ever_queued = sum(api.queue.counts().values())
+    total_ever_queued = sum(api._queue.counts().values())
     assert total_ever_queued < 200

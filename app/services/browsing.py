@@ -13,14 +13,14 @@ from app.paths import is_temp_part
 
 def ping(api):
     # latency for the health indicator
-    if not api.connected:
+    if not api._connected:
         return {"ok": False}
     try:
         t0 = time.time()
-        api.sftp.stat(".")
+        api._sftp.stat(".")
         return {"ok": True, "ms": int((time.time() - t0) * 1000)}
     except Exception:
-        api.connected = False
+        api._connected = False
         return {"ok": False}
 
 
@@ -56,12 +56,12 @@ def list_local(api, path):
 
 
 def list_remote(api, path):
-    if not api.connected:
+    if not api._connected:
         return {"ok": False, "error": "Not connected."}
     try:
-        path = api.sftp.normalize(path or ".")
+        path = api._sftp.normalize(path or ".")
         entries = []
-        for a in api.sftp.listdir_attr(path):
+        for a in api._sftp.listdir_attr(path):
             if is_temp_part(a.filename):
                 continue
             entries.append({"name": a.filename, "is_dir": stat.S_ISDIR(a.st_mode),
@@ -79,7 +79,7 @@ def make_dir(api, side, path, name):
             os.makedirs(os.path.join(path, name), exist_ok=False)
         else:
             target = posixpath.join(path, name)
-            api.sftp.mkdir(target)
+            api._sftp.mkdir(target)
             api._vlog(f"mkdir {target}")
         return {"ok": True}
     except Exception as e:
@@ -91,7 +91,7 @@ def rename(api, side, path, old, new):
         if side == "local":
             os.rename(os.path.join(path, old), os.path.join(path, new))
         else:
-            api.sftp.rename(posixpath.join(path, old), posixpath.join(path, new))
+            api._sftp.rename(posixpath.join(path, old), posixpath.join(path, new))
             api._vlog(f"rename {posixpath.join(path, old)} → {new}")
         return {"ok": True}
     except Exception as e:
@@ -107,7 +107,7 @@ def delete(api, side, path, items):
                 shutil.rmtree(full) if it["is_dir"] else os.remove(full)
             else:
                 full = posixpath.join(path, it["name"])
-                api._rremove(full) if it["is_dir"] else api.sftp.remove(full)
+                api._rremove(full) if it["is_dir"] else api._sftp.remove(full)
                 if not it["is_dir"]:
                     api._vlog(f"remove {full}")
         except Exception as e:
@@ -119,10 +119,10 @@ def _rremove(api, path):
     # Deleting a folder removes everything in it, including any leftover
     # scratch file from an interrupted transfer: skipping those would
     # leave the directory non-empty and make the final rmdir fail.
-    for a in api.sftp.listdir_attr(path):
+    for a in api._sftp.listdir_attr(path):
         child = posixpath.join(path, a.filename)
-        api._rremove(child) if stat.S_ISDIR(a.st_mode) else api.sftp.remove(child)
-    api.sftp.rmdir(path)
+        api._rremove(child) if stat.S_ISDIR(a.st_mode) else api._sftp.remove(child)
+    api._sftp.rmdir(path)
     api._vlog(f"rmdir {path}")
 
 
@@ -135,7 +135,7 @@ def open_local(api, path, name):
 
 
 def calc_remote_size(api, remote_dir, name):
-    if not api.connected:
+    if not api._connected:
         return {"ok": False, "error": "Not connected."}
     target = posixpath.join(remote_dir, name)
     total = {"bytes": 0, "files": 0}
@@ -145,7 +145,7 @@ def calc_remote_size(api, remote_dir, name):
         if api._cancel.is_set():
             return
         try:
-            attrs = api.sftp.listdir_attr(p)
+            attrs = api._sftp.listdir_attr(p)
         except Exception:
             return
         for a in attrs:
