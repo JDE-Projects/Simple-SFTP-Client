@@ -1,4 +1,4 @@
-# Apps place this file in tests/, next to the copied debug_log.py module.
+# Apps place this file in tests/; it tests the copied app/debug_log.py module.
 import builtins
 import glob
 import json
