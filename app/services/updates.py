@@ -9,7 +9,8 @@ from app.errors import _update_error_reason, friendly_error
 
 
 def check_update(api):
-    """Compare the latest published release to APP_VERSION. Quiet in the UI on
+    """Compare the latest published release to the running version (the one
+    the launcher hands to Api, kept as api._app_version). Quiet in the UI on
     failure (see _update_error_reason), but always logged when debug is on."""
     result = {"current": api._app_version, "version": None, "update": False, "offline": False}
     try:
