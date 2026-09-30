@@ -172,6 +172,10 @@ def _focus_existing_window(title: str) -> None:
 
 
 def main():
+    # Qt's shader disk cache would leave an empty
+    # %LOCALAPPDATA%\<exe name>\cache\qtpipelinecache-* folder behind that
+    # the uninstaller never removes. Must be set before the window is created.
+    os.environ.setdefault("QT_DISABLE_SHADER_DISK_CACHE", "1")
     strip_remote_debugging(os.environ, sys.argv, getattr(sys, "frozen", False))
 
     # Use the Windows certificate store for TLS instead of the bundled CA list,
