@@ -20,4 +20,4 @@ keyring==25.7.0
 # Routes TLS verification through the Windows certificate store for the
 # GitHub update check, so antivirus/network HTTPS inspection doesn't break it.
 # Fleet pin from Build-Tools baseline requirements.txt.
-truststore==0.10.4
+truststore==0.10.5
