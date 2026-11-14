@@ -41,7 +41,7 @@ def _preserve_corrupt(path, error) -> None:
         if os.path.exists(path):
             aside = f"{path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
             os.replace(path, aside)
-            debug.log(f"{os.path.basename(path)} unreadable, kept as {aside}: {error}")
+            debug.log(f"{os.path.basename(path)} unreadable, kept aside: {error}")
         else:
             debug.log(f"{os.path.basename(path)} unreadable: {error}")
     except Exception:

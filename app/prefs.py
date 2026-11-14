@@ -2,6 +2,7 @@ import json
 import os
 
 from app.atomic import _atomic_write_json, _preserve_corrupt
+from app.debug import debug
 from app.paths import exe_dir
 
 # ----------------------------------------------------------------------------
@@ -17,16 +18,24 @@ def _pref_path() -> str:
 
 
 def load_prefs() -> dict:
-    """Full prefs dict. Missing file: first run. Corrupt file: kept aside, logged."""
+    """Full prefs dict. Missing file: first run. Damaged file: kept aside,
+    logged. A file that cannot be opened (locked, no access) is not damaged,
+    so it is left in place and logged."""
     path = _pref_path()
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        debug.log(f"Settings file not read, left in place: "
+                  f"{e.strerror or type(e).__name__}")
+        return {}
+    try:
+        data = json.loads(raw.decode("utf-8"))
         if isinstance(data, dict):
             return data
         raise ValueError("prefs root is not an object")
-    except FileNotFoundError:
-        return {}
     except Exception as e:
         _preserve_corrupt(path, e)
         return {}
