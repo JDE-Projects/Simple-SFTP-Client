@@ -168,6 +168,9 @@ class Api:
     def _load_sessions(self):
         return services.sessions._load_sessions(self)
 
+    def _read_sessions(self):
+        return services.sessions._read_sessions(self)
+
     def _sessions_notice(self, msg):
         return services.sessions._sessions_notice(self, msg)
 

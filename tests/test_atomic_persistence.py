@@ -44,6 +44,45 @@ def test_load_prefs_corrupt_file_preserved_aside(pref_path):
         assert f.read() == "not valid json{{{"
 
 
+def test_load_prefs_locked_file_left_in_place(pref_path, monkeypatch):
+    with open(pref_path, "w", encoding="utf-8") as f:
+        json.dump({"theme": "light"}, f)
+    real_open = open
+    logged = []
+
+    def locked_open(file, *a, **k):
+        if file == pref_path:
+            raise PermissionError(13, "Permission denied", pref_path)
+        return real_open(file, *a, **k)
+
+    monkeypatch.setattr("builtins.open", locked_open)
+    monkeypatch.setattr(prefs.debug, "log", logged.append)
+
+    result = load_prefs()
+
+    monkeypatch.undo()
+    assert result == {}
+    assert glob.glob(pref_path + ".corrupt-*") == []
+    with open(pref_path, encoding="utf-8") as f:
+        assert json.load(f) == {"theme": "light"}
+    assert logged == ["Settings file not read, left in place: Permission denied"]
+
+
+def test_load_prefs_kept_aside_log_line_has_no_path(pref_path, monkeypatch):
+    from app import atomic
+    logged = []
+    monkeypatch.setattr(atomic.debug, "log", logged.append)
+    with open(pref_path, "w", encoding="utf-8") as f:
+        f.write("not valid json{{{")
+
+    load_prefs()
+
+    assert len(logged) == 1
+    assert "kept aside" in logged[0]
+    assert os.path.dirname(pref_path) not in logged[0]
+    assert ".corrupt-" not in logged[0]
+
+
 def test_save_prefs_missing_file_is_first_run(pref_path):
     assert load_prefs() == {}
 
@@ -96,6 +135,78 @@ def test_load_sessions_corrupt_file_preserved_aside(sessions_path):
     assert result == []
     assert not os.path.exists(sessions_path)
     assert len(glob.glob(sessions_path + ".corrupt-*")) == 1
+
+
+SAVED = {"sessions": [{"name": "prod", "host": "example.com", "port": 22,
+                       "username": "u", "auth": "password", "key_path": "",
+                       "start_path": "", "remember": False}]}
+
+
+def _write_saved_sessions(path):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(SAVED, f)
+
+
+def _lock_file(monkeypatch, locked_path):
+    real_open = open
+
+    def locked_open(file, *a, **k):
+        if file == locked_path:
+            raise PermissionError(13, "Permission denied", locked_path)
+        return real_open(file, *a, **k)
+
+    monkeypatch.setattr("builtins.open", locked_open)
+
+
+def _assert_sessions_untouched(path):
+    assert glob.glob(path + ".corrupt-*") == []
+    with open(path, encoding="utf-8") as f:
+        assert json.load(f) == SAVED
+
+
+def test_load_sessions_locked_file_left_in_place_with_notice(sessions_path, monkeypatch):
+    _write_saved_sessions(sessions_path)
+    api = Api(APP_VERSION)
+    notices = []
+    api._sessions_notice = notices.append
+    _lock_file(monkeypatch, sessions_path)
+
+    result = api._load_sessions()
+
+    monkeypatch.undo()
+    assert result == []
+    _assert_sessions_untouched(sessions_path)
+    assert len(notices) == 1
+    assert "Permission denied" in notices[0]
+    assert sessions_path not in notices[0]
+
+
+def test_save_session_refused_when_file_locked(sessions_path, monkeypatch):
+    _write_saved_sessions(sessions_path)
+    api = Api(APP_VERSION)
+    _lock_file(monkeypatch, sessions_path)
+
+    result = api.save_session({"name": "new", "host": "other.example.com",
+                               "port": "22", "username": "u",
+                               "auth": "password"})
+
+    monkeypatch.undo()
+    assert result["ok"] is False
+    assert "Nothing was changed" in result["error"]
+    _assert_sessions_untouched(sessions_path)
+
+
+def test_delete_session_refused_when_file_locked(sessions_path, monkeypatch):
+    _write_saved_sessions(sessions_path)
+    api = Api(APP_VERSION)
+    _lock_file(monkeypatch, sessions_path)
+
+    result = api.delete_session("prod")
+
+    monkeypatch.undo()
+    assert result["ok"] is False
+    assert "Nothing was changed" in result["error"]
+    _assert_sessions_untouched(sessions_path)
 
 
 def test_load_sessions_missing_file_is_empty_not_corrupt(sessions_path):
