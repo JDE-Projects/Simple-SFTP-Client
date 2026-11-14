@@ -4,24 +4,47 @@ import json
 from app import paths
 from app.atomic import _atomic_write_json, _preserve_corrupt
 from app.debug import debug
-from app.errors import InvalidPort
+from app.errors import InvalidPort, SessionsUnreadable
 from app.validation import INVALID_PORT_ERROR, _valid_session_entry, cred_key, parse_port
+
+SESSIONS_UNREADABLE_ERROR = (
+    "Could not open the saved sessions file to update it. Nothing was changed. "
+    "Close any program that may be using it and try again.")
 
 
 def _load_sessions(api):
-    """Load saved sessions and validate every entry before it can reach
-    the UI or a connect attempt. The file itself failing to parse is
-    handled exactly as before (kept aside via _preserve_corrupt); this
-    additionally drops individual entries that parsed fine as JSON but
-    have the wrong shape, so nothing malformed or hostile (e.g. a bad
-    port or an unsupported auth value) ever gets that far. Dropped
-    entries are never rewritten back to servers.json - the file is left
-    untouched either way."""
+    """Saved sessions for the UI. A file that cannot be opened (locked, no
+    access) is left in place and reported with a visible notice, and the
+    list comes up empty for this load."""
     try:
-        with open(paths.SESSIONS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        return _read_sessions(api)
+    except SessionsUnreadable as e:
+        api._sessions_notice(
+            f"Saved sessions could not be opened ({e.reason}). The file was left "
+            f"unchanged. Restart the app to try again.")
+        return []
+
+
+def _read_sessions(api):
+    """Load saved sessions and validate every entry before it can reach
+    the UI or a connect attempt. A file that cannot be opened raises
+    SessionsUnreadable and is left in place. A file that opens but fails
+    to parse is kept aside via _preserve_corrupt. Entries that parsed fine
+    as JSON but have the wrong shape are dropped, so nothing malformed or
+    hostile (e.g. a bad port or an unsupported auth value) ever gets that
+    far. Dropped entries are never rewritten back to servers.json by this
+    load: the file is left untouched."""
+    try:
+        with open(paths.SESSIONS_FILE, "rb") as f:
+            raw = f.read()
     except FileNotFoundError:
         return []
+    except OSError as e:
+        reason = e.strerror or type(e).__name__
+        debug.log(f"Saved sessions file not read, left in place: {reason}")
+        raise SessionsUnreadable(reason) from e
+    try:
+        data = json.loads(raw.decode("utf-8"))
     except Exception as e:
         _preserve_corrupt(paths.SESSIONS_FILE, e)
         return []
@@ -65,7 +88,10 @@ def save_session(api, s):
     except InvalidPort:
         return {"ok": False,
                 "error": INVALID_PORT_ERROR}
-    sessions = api._load_sessions()
+    try:
+        sessions = api._read_sessions()
+    except SessionsUnreadable:
+        return {"ok": False, "error": SESSIONS_UNREADABLE_ERROR}
     # optional remembered password -> OS keychain. The session may only
     # claim a saved password when one was actually written, so a failed
     # write, or "remember" ticked with no password to save (key auth, or
@@ -129,7 +155,10 @@ def save_session(api, s):
 
 
 def delete_session(api, name):
-    sessions = api._load_sessions()
+    try:
+        sessions = api._read_sessions()
+    except SessionsUnreadable:
+        return {"ok": False, "error": SESSIONS_UNREADABLE_ERROR}
     target = next((x for x in sessions if x.get("name") == name), None)
     sessions = [x for x in sessions if x.get("name") != name]
     saved_ok = api._save_sessions(sessions)

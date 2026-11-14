@@ -33,6 +33,17 @@ class KnownHostsUnreadable(Exception):
         self.path = path
 
 
+class SessionsUnreadable(Exception):
+    """The saved sessions file exists but could not be opened (locked, no
+    access). It is not damaged, so it is left in place, and saving or
+    deleting a session is refused, since writing back the empty list a
+    failed read returns would wipe every saved session. reason is the
+    plain-language cause, without the file path."""
+    def __init__(self, reason):
+        super().__init__(f"saved sessions file could not be opened: {reason}")
+        self.reason = reason
+
+
 class KeyUnusable(Exception):
     """The private key file chosen for key login could not be loaded, so the
     server was never contacted with it. reason is "passphrase_needed",

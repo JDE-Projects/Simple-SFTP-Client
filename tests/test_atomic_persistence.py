@@ -137,6 +137,78 @@ def test_load_sessions_corrupt_file_preserved_aside(sessions_path):
     assert len(glob.glob(sessions_path + ".corrupt-*")) == 1
 
 
+SAVED = {"sessions": [{"name": "prod", "host": "example.com", "port": 22,
+                       "username": "u", "auth": "password", "key_path": "",
+                       "start_path": "", "remember": False}]}
+
+
+def _write_saved_sessions(path):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(SAVED, f)
+
+
+def _lock_file(monkeypatch, locked_path):
+    real_open = open
+
+    def locked_open(file, *a, **k):
+        if file == locked_path:
+            raise PermissionError(13, "Permission denied", locked_path)
+        return real_open(file, *a, **k)
+
+    monkeypatch.setattr("builtins.open", locked_open)
+
+
+def _assert_sessions_untouched(path):
+    assert glob.glob(path + ".corrupt-*") == []
+    with open(path, encoding="utf-8") as f:
+        assert json.load(f) == SAVED
+
+
+def test_load_sessions_locked_file_left_in_place_with_notice(sessions_path, monkeypatch):
+    _write_saved_sessions(sessions_path)
+    api = Api(APP_VERSION)
+    notices = []
+    api._sessions_notice = notices.append
+    _lock_file(monkeypatch, sessions_path)
+
+    result = api._load_sessions()
+
+    monkeypatch.undo()
+    assert result == []
+    _assert_sessions_untouched(sessions_path)
+    assert len(notices) == 1
+    assert "Permission denied" in notices[0]
+    assert sessions_path not in notices[0]
+
+
+def test_save_session_refused_when_file_locked(sessions_path, monkeypatch):
+    _write_saved_sessions(sessions_path)
+    api = Api(APP_VERSION)
+    _lock_file(monkeypatch, sessions_path)
+
+    result = api.save_session({"name": "new", "host": "other.example.com",
+                               "port": "22", "username": "u",
+                               "auth": "password"})
+
+    monkeypatch.undo()
+    assert result["ok"] is False
+    assert "Nothing was changed" in result["error"]
+    _assert_sessions_untouched(sessions_path)
+
+
+def test_delete_session_refused_when_file_locked(sessions_path, monkeypatch):
+    _write_saved_sessions(sessions_path)
+    api = Api(APP_VERSION)
+    _lock_file(monkeypatch, sessions_path)
+
+    result = api.delete_session("prod")
+
+    monkeypatch.undo()
+    assert result["ok"] is False
+    assert "Nothing was changed" in result["error"]
+    _assert_sessions_untouched(sessions_path)
+
+
 def test_load_sessions_missing_file_is_empty_not_corrupt(sessions_path):
     api = Api(APP_VERSION)
     assert api._load_sessions() == []
