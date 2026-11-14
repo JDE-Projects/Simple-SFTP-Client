@@ -105,6 +105,12 @@ def test_fresh_api_has_only_underscore_instance_attributes():
     assert not public, f"Api has public instance attributes: {public}"
 
 
+def test_page_cannot_reach_debug_logging_helpers():
+    exposed = build_manifest()
+    forbidden = {"debug", "log_event", "_log", "_vlog", "_worker_log"}
+    assert not (forbidden & set(exposed))
+
+
 def test_pywebview_version_matches_copied_discovery_rules():
     version = metadata.version("pywebview")
     assert version == "6.2.1", (

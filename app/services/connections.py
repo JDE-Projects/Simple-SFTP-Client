@@ -1,12 +1,11 @@
 """Service functions for the connections area."""
 
 import os
-import traceback
 import socket
 import paramiko
 from app import paths
 from app.constants import DISABLED_ALGORITHMS
-from app.debug import debug
+from app.debug import log_event
 from app.errors import InvalidPort, KeyUnusable, KnownHostsUnreadable, UnknownHostKey, error_tips, friendly_error
 from app.formatting import negotiated_summary
 from app.hostkeys import _TofuPolicy, _known_hosts_readable_or_raise, _save_host_keys_atomic, fingerprint_sha256, hostkey_name, load_known_hosts
@@ -41,7 +40,10 @@ def _load_private_key(key_path, passphrase):
         if os.path.isfile(cert_path):
             key.load_certificate(cert_path)
         return key
-    debug.log("key load failed", f"{key_path}: {type(last).__name__}: {last}")
+    if last is not None:
+        log_event("key load failed", error=last)
+    else:
+        log_event("key load failed")
     if needs_passphrase:
         raise KeyUnusable("passphrase_needed", key_path)
     if passphrase and b"PRIVATE KEY-----" in data:
@@ -112,7 +114,7 @@ def connect(api, p):
     password = p.get("password") or ""
     key_path = (p.get("key_path") or "").strip()
     passphrase = p.get("passphrase") or ""
-    debug.log("CONNECT", {"host": host, "user": username, "auth": "key" if key_path else "password"})
+    log_event("connect", auth="key" if key_path else "password")
     new_client = None
     new_sftp = None
     try:
@@ -150,7 +152,7 @@ def connect(api, p):
         negotiated = negotiated_summary(ti)
         if negotiated:
             api._vlog(f"Negotiated: {negotiated}")
-        api._vlog(f"SFTP session opened, home folder {home}", "ok")
+        api._vlog(f"SFTP session opened, home folder {home}", "ok", "connected")
         api._sweep_scratch_files()
         return {"ok": True, "home": home, "cwd": start, "transport": ti}
     except UnknownHostKey as e:
@@ -161,7 +163,7 @@ def connect(api, p):
         # (bracketed for non-standard ports), not e.hostname, whose format
         # differs between the unknown-key and changed-key paths.
         api._pending_host_key = (hostkey_name(host, port), e.key)
-        debug.log(f"Unknown host key for {host} ({e.key.get_name()}).")
+        log_event("host key unknown")
         return {"ok": False, "host_key_unknown": True, "host": host,
                 "key_type": e.key.get_name(), "fingerprint": fingerprint_sha256(e.key)}
     except paramiko.BadHostKeyException as e:
@@ -173,7 +175,7 @@ def connect(api, p):
         # key under a name the library never rechecks, and the warning would
         # loop forever on non-standard ports.
         api._pending_host_key = (hostkey_name(host, port), e.key)
-        debug.log(f"HOST KEY CHANGED for {host} - refused.")
+        log_event("host key changed")
         return {"ok": False, "host_key_changed": True, "host": host,
                 "key_type": e.key.get_name(),
                 "new_fingerprint": fingerprint_sha256(e.key),
@@ -182,7 +184,7 @@ def connect(api, p):
         api._cred_pass = ""
         api._cred_identity = None
         api._close_partial(new_client, new_sftp)
-        debug.log(f"known_hosts file unreadable, refusing to connect: {e}")
+        log_event("known hosts unreadable", error=e)
         return {"ok": False,
                 "error": f"Your saved host-key file could not be read, so the connection was "
                          f"refused to protect against a swapped server. File: {paths.KNOWN_HOSTS_FILE}. "
@@ -192,7 +194,7 @@ def connect(api, p):
         api._cred_pass = ""
         api._cred_identity = None
         api._close_partial(new_client, new_sftp)
-        debug.log("CONNECT failed", traceback.format_exc())
+        log_event("connect failed", error=e)
         return {"ok": False, "error": friendly_error(e), "tips": error_tips(e)}
 
 
@@ -213,7 +215,7 @@ def _sweep_scratch_files(api):
     try:
         names = os.listdir(folder)
     except Exception as e:
-        debug.log("scratch sweep: could not list folder", f"{folder}: {e}")
+        log_event("scratch sweep list failed", error=e)
         return
     for name in names:
         if not is_temp_part(name):
@@ -223,10 +225,9 @@ def _sweep_scratch_files(api):
             os.remove(full)
             swept.append(name)
         except Exception as e:
-            debug.log("scratch sweep: could not remove", f"{full}: {e}")
+            log_event("scratch sweep remove failed", error=e)
     if swept:
-        api._vlog(f"Swept {len(swept)} leftover scratch file(s) from {folder}", "warn")
-        debug.log("scratch sweep removed", swept)
+        api._vlog(f"Swept {len(swept)} leftover scratch file(s) from {folder}", "warn", "scratch sweep", items=len(swept))
 
 
 def trust_host_key(api):
@@ -248,7 +249,7 @@ def trust_host_key(api):
         hk.add(name, key.get_name(), key)
         if not _save_host_keys_atomic(hk):
             return {"ok": False, "error": "Could not save the host key: write failed."}
-        debug.log(f"Trusted host key for {name} ({key.get_name()}).")
+        log_event("host key trusted")
         return {"ok": True, "fingerprint": fingerprint_sha256(key)}
     except Exception as e:
         return {"ok": False, "error": f"Could not save the host key: {e}"}
@@ -297,7 +298,7 @@ def test_connection(api, p):
     except InvalidPort:
         return {"ok": False,
                 "error": INVALID_PORT_ERROR}
-    debug.log("TEST", {"host": host, "port": port})
+    log_event("test connection")
     try:
         with socket.create_connection((host, port), timeout=10) as sock:
             sock.settimeout(4)
@@ -309,7 +310,7 @@ def test_connection(api, p):
         return {"ok": False, "error": friendly_error(e), "tips": error_tips(e)}
     if banner.startswith(b"SSH-"):
         ident = banner.decode("ascii", "replace").splitlines()[0].strip()
-        api._vlog(f"Test: {host}:{port} reachable ({ident})", "ok")
+        api._vlog(f"Test: {host}:{port} reachable ({ident})", "ok", "test connection")
         return {"ok": True, "msg": f"{host}:{port} reachable ({ident})"}
     return {"ok": False, "warn": True,
             "error": f"Something is listening on {host}:{port}, but it didn't identify as an "
@@ -323,7 +324,7 @@ def disconnect(api):
     path; this just runs it and gives the UI the return shape it
     expects."""
     api._shutdown()
-    debug.log("DISCONNECTED")
+    log_event("disconnected")
     return {"ok": True}
 
 
@@ -365,4 +366,4 @@ def _report_dead_connection(api):
     api._stop_all_compares()
     stranded = api._queue.fail_waiting("Connection lost")
     suffix = f" ({stranded} queued item(s) failed)" if stranded else ""
-    api._worker_log(f"Connection lost. Remaining transfers stopped.{suffix}", "error")
+    api._worker_log(f"Connection lost. Remaining transfers stopped.{suffix}", "error", "connection lost", items=stranded)

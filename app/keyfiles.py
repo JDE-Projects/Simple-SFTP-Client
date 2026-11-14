@@ -3,7 +3,7 @@ import os
 import subprocess
 import sys
 
-from app.debug import debug
+from app.debug import log_event
 
 _PROTECT_WARNING = ("Saved, but the private key's file permissions couldn't be locked down on "
                      "this location. Store it somewhere only you can read, such as your user "
@@ -35,10 +35,10 @@ def _protect_private_key(path) -> str | None:
             res = subprocess.run(cmd, capture_output=True, shell=False,
                                   startupinfo=startupinfo, creationflags=creationflags)
             if res.returncode != 0:
-                debug.log("KEYGEN protect failed", res.stderr.decode(errors="replace") if res.stderr else str(res.returncode))
+                log_event("key protection failed", returncode=res.returncode)
                 return _PROTECT_WARNING
         return None
     except Exception as e:
-        debug.log("KEYGEN protect failed", str(e))
+        log_event("key protection failed", error=e)
         return _PROTECT_WARNING
 

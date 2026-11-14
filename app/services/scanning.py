@@ -4,10 +4,8 @@ import os
 import stat
 import time
 import threading
-import traceback
 import posixpath
 from app import constants
-from app.debug import debug
 from app.errors import friendly_error
 from app.paths import is_temp_part, safe_local_child
 
@@ -130,7 +128,7 @@ def _iter_local(api, lp, rp, is_dir, problems=None, include_dirs=False):
                     yield (entry.path, rchild, size, mtime, False)
                     had_file = True
     except OSError as e:
-        api._worker_log(f"could not list {lp}: {e}", "error")
+        api._worker_log(f"could not list {lp}: {e}", "error", "list failed", error=e)
         if problems is not None:
             problems.append(f"could not list {lp}: {e}")
         return False
@@ -190,7 +188,7 @@ def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=Fa
                 # over one untransferable name (e.g. a legitimate Linux name
                 # that is illegal on Windows). This matches the transfer
                 # scan's skip-and-report behavior.
-                api._worker_log(f"skipped unsafe remote name {a.filename!r}: {e}", "error")
+                api._worker_log(f"skipped unsafe remote name {a.filename!r}: {e}", "error", "unsafe remote name", error=e)
                 continue
             if stat.S_ISDIR(a.st_mode):
                 subdirs.append((rchild, lchild))
@@ -198,7 +196,7 @@ def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=Fa
                 yield (lchild, rchild, a.st_size, int(a.st_mtime or 0), False)
                 had_file = True
     except Exception as e:
-        api._worker_log(f"could not list {rp}: {friendly_error(e)}", "error")
+        api._worker_log(f"could not list {rp}: {friendly_error(e)}", "error", "list failed", error=e)
         if problems is not None:
             problems.append(f"could not list {rp}: {friendly_error(e)}")
         return False
@@ -233,7 +231,8 @@ def _scan_and_queue(api, roots, direction, on_conflict, scan_id, stop_event, loc
                 sftp = api._client.open_sftp()
             except Exception as e:
                 api._worker_log(
-                    f"scan: could not open a transfer session: {friendly_error(e)}", "error")
+                    f"scan: could not open a transfer session: {friendly_error(e)}", "error",
+                    "scan", outcome="failed", items=0, error=e)
                 return
 
         def flush():
@@ -270,16 +269,15 @@ def _scan_and_queue(api, roots, direction, on_conflict, scan_id, stop_event, loc
                 break
         flush()
         if stop_event.is_set():
-            api._worker_log(f"Scan stopped ({found} file(s) queued before stopping)", "warn")
+            api._worker_log(f"Scan stopped ({found} file(s) queued before stopping)", "warn", "scan", outcome="stopped", items=found)
         elif not api._connected:
-            api._worker_log(f"Scan halted: disconnected ({found} file(s) queued)", "warn")
+            api._worker_log(f"Scan halted: disconnected ({found} file(s) queued)", "warn", "scan", outcome="disconnected", items=found)
         elif found:
-            api._worker_log(f"Scan complete: {found} file(s) queued")
+            api._worker_log(f"Scan complete: {found} file(s) queued", event="scan", outcome="complete", items=found)
         else:
-            api._worker_log("Scan complete: nothing to transfer")
+            api._worker_log("Scan complete: nothing to transfer", event="scan", outcome="complete", items=0)
     except Exception as e:
-        api._worker_log(f"scan failed: {friendly_error(e)}", "error")
-        debug.log("SCAN failed", traceback.format_exc())
+        api._worker_log(f"scan failed: {friendly_error(e)}", "error", "scan", outcome="failed", items=found, error=e)
     finally:
         if sftp is not None:
             try:

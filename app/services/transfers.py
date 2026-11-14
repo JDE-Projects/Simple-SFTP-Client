@@ -6,7 +6,7 @@ import time
 import threading
 import posixpath
 from app.constants import MTIME_TOL, WORKER_COUNT
-from app.debug import debug
+from app.debug import debug, log_event
 from app.formatting import human_size
 from app.paths import local_link_target, safe_local_child
 from app.workers import worker_target
@@ -140,7 +140,7 @@ def pause_queue(api):
     are left to finish; the worker pool winds down once they do. Wired to the
     footer Pause control."""
     api._queue.pause()
-    api._worker_log("Pausing queue…")
+    api._worker_log("Pausing queue…", event="queue", outcome="paused", items=0)
     return {"ok": True}
 
 
@@ -150,7 +150,7 @@ def resume_queue(api):
     if not api._connected:
         return {"ok": False, "error": "Not connected."}
     api._queue.resume()
-    api._worker_log("Resuming queue")
+    api._worker_log("Resuming queue", event="queue", outcome="resumed", items=0)
     api._ensure_worker()
     return {"ok": True}
 
@@ -181,11 +181,11 @@ def enqueue(api, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"
             try:
                 lp = safe_local_child(local_dir, name, local_dir)
             except ValueError as e:
-                api._worker_log(f"skipped unsafe remote name {name!r}: {e}", "error")
+                api._worker_log(f"skipped unsafe remote name {name!r}: {e}", "error", "unsafe remote name", error=e)
                 continue
             target = local_link_target(lp) if is_dir else None
             if target:
-                api._worker_log(f"{name} is symlinked to {target}; files will be written there.", "warn")
+                api._worker_log(f"{name} is symlinked to {target}; files will be written there.", "warn", "symlink target")
         roots.append((lp, rp, is_dir))
     scan_id, stop_event = api._register_scan()
     t = threading.Thread(target=api._scan_and_queue,
@@ -268,7 +268,7 @@ def _worker_loop(api):
         reason = str(e).strip() or e.__class__.__name__
         # No silent failure: surface it in the console log and let this
         # worker retire; the other worker (if any) keeps draining the queue.
-        api._worker_log(f"could not open a transfer session: {reason}", "error")
+        api._worker_log(f"could not open a transfer session: {reason}", "error", "queue", outcome="session failed", items=0)
         with api._worker_lock:
             if me in api._workers:
                 api._workers.remove(me)
@@ -283,7 +283,7 @@ def _worker_loop(api):
                 if stranded:
                     api._worker_log(
                         f"{stranded} queued item(s) marked failed: no transfer session",
-                        "error")
+                        "error", "queue", outcome="session failed", items=stranded)
         return
     # Remote directories this worker has already confirmed exist, so an
     # upload only pays the stat/mkdir round trip once per directory, not
@@ -323,7 +323,7 @@ def _worker_loop(api):
                                 # alone so a resume drains the rest at the count
                                 # this batch was scaled to, not the default.
                                 api._worker_log(
-                                    f"Queue paused ({api._queue.waiting()} still waiting)")
+                                    f"Queue paused ({api._queue.waiting()} still waiting)", event="queue", outcome="paused", items=api._queue.waiting())
                             else:
                                 # Reached the empty queue (paused with nothing
                                 # left, or a normal drain). Reset the pool target
@@ -337,7 +337,7 @@ def _worker_loop(api):
                                 api._worker_log(
                                     f"Queue drained: {counts.get('completed', 0)} completed, "
                                     f"{counts.get('failed', 0)} failed, {counts.get('cancelled', 0)} cancelled, "
-                                    f"{counts.get('skipped', 0)} skipped")
+                                    f"{counts.get('skipped', 0)} skipped", event="queue", outcome="drained", items=sum(counts.values()))
                         break
                 continue
             total = done_count + api._queue.pending()
@@ -345,7 +345,7 @@ def _worker_loop(api):
                 # cancel() on a waiting item goes straight to CANCELLED, so this
                 # should not happen in practice, but guard anyway.
                 api._queue.mark_cancelled(item.id)
-                api._worker_log(f"cancelled {item.name}", "warn")
+                api._worker_log(f"cancelled {item.name}", "warn", "transfer", outcome="cancelled")
                 done_count += 1
                 continue
             arrow = "↑" if item.direction == "upload" else "↓"
@@ -371,7 +371,7 @@ def _worker_loop(api):
                     break  # success (including "skip"/"cancelled"): stop retrying
                 except Exception as e:
                     last_err = str(e)
-                    debug.log(f"transfer retry {attempt+1}", f"{item.name}: {e}")
+                    log_event("transfer retry", attempt=attempt + 1, error=e)
                     if item.cancel_requested:
                         break
                     if api._connection_dead(sftp):
@@ -390,22 +390,22 @@ def _worker_loop(api):
                 # could mislabel a file that finished sending its very last
                 # byte the instant cancel arrived.
                 api._queue.mark_cancelled(item.id)
-                api._worker_log(f"cancelled {item.name}", "warn")
+                api._worker_log(f"cancelled {item.name}", "warn", "transfer", outcome="cancelled")
             elif res == "skip":
                 api._queue.mark_skipped(item.id)
-                api._worker_log(f"skip {item.name} (already up to date)")
+                api._worker_log(f"skip {item.name} (already up to date)", event="transfer", outcome="skipped")
             elif ok:
                 api._queue.mark_completed(item.id)
                 if item.is_dir:
                     if item.direction == "upload":
-                        api._worker_log(f"{arrow} folder {item.remote_path}", "ok")
+                        api._worker_log(f"{arrow} folder {item.remote_path}", "ok", "transfer", outcome="ok")
                     else:
-                        api._worker_log(f"created folder {item.local_path}", "ok")
+                        api._worker_log(f"created folder {item.local_path}", "ok", "transfer", outcome="ok")
                 else:
-                    api._worker_log(f"{arrow} {(item.remote_path if item.direction == 'upload' else item.name)}", "ok")
+                    api._worker_log(f"{arrow} {(item.remote_path if item.direction == 'upload' else item.name)}", "ok", "transfer", outcome="ok")
             else:
                 api._queue.mark_failed(item.id, last_err or "transfer failed")
-                api._worker_log(f"failed {item.name}", "error")
+                api._worker_log(f"failed {item.name}", "error", "transfer", outcome="failed")
             done_count += 1
             with api._progress_lock:
                 api._progress_by_id.pop(item.id, None)
@@ -455,7 +455,7 @@ def upload_paths(api, paths, remote_dir, on_conflict="overwrite"):
         return {"ok": False, "error": f"Could not read the dropped items: {e}"}
     if not roots:
         return {"ok": False, "error": "No files were found in the dropped items."}
-    debug.log("EXTERNAL UPLOAD", {"items": len(roots), "remote": remote_dir})
+    log_event("external upload", items=len(roots))
     scan_id, stop_event = api._register_scan()
     t = threading.Thread(target=api._scan_and_queue,
                           args=(roots, "upload", on_conflict, scan_id, stop_event),
@@ -480,11 +480,11 @@ def on_external_drop(api, event):
     try:
         files = ((event or {}).get("dataTransfer") or {}).get("files") or []
         paths = [f.get("pywebviewFullPath") for f in files if f.get("pywebviewFullPath")]
-        debug.log("EXTERNAL DROP", {"paths": paths})
+        log_event("external drop", items=len(paths))
         if paths:
             api._emit("external_drop", {"paths": paths})
     except Exception as e:
-        debug.log("external drop handler failed", str(e))
+        log_event("external drop failed", error=e)
 
 
 def _one(api, direction, lp, rp, name, idx, total, on_conflict, sftp,

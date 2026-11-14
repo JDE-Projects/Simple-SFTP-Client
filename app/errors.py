@@ -6,7 +6,7 @@ import urllib.error
 
 import paramiko
 
-from app.debug import debug
+from app.debug import log_event
 
 
 class InvalidPort(ValueError):
@@ -67,9 +67,9 @@ class ScanIncomplete(Exception):
 
 
 def friendly_error(e):
-    """Plain-language message for the UI; full detail goes to the debug log."""
+    """Plain-language message for the UI; the debug log gets only the error kind and code."""
     try:
-        debug.log("error detail", f"{type(e).__name__}: {e}")
+        log_event("error", error=e)
     except Exception:
         pass
     if isinstance(e, KeyUnusable):

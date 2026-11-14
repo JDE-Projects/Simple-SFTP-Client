@@ -1,7 +1,7 @@
-import logging
 import re
 
 from app import debug_log, paths
+from app.debug_log import describe_error
 
 # ───────────── debug log (off by default) ─────────────
 _URL_CREDS_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:/@]+:)[^\s@]+(@)")
@@ -19,49 +19,64 @@ def _scrub(text):
     return text
 
 
-class _ParamikoBridge(logging.Handler):
-    """Feed paramiko's protocol-level logging into the debug file when enabled."""
-    def __init__(self, dbg):
-        super().__init__()
-        self._dbg = dbg
+EVENTS = {
+    "debug enabled": {}, "debug disabled": {}, "connect": {"auth": ("key", "password")},
+    "connected": {}, "connect failed": {"error": "error"}, "error": {"error": "error"},
+    "key load failed": {"error": "error"},
+    "host key unknown": {}, "host key changed": {}, "known hosts unreadable": {"error": "error"},
+    "host key trusted": {}, "test connection": {}, "disconnected": {},
+    "scratch sweep list failed": {"error": "error"}, "scratch sweep remove failed": {"error": "error"},
+    "scratch sweep": {"items": int}, "watch start": {}, "watch upload": {"outcome": ("ok", "failed"), "error": "error"},
+    "watch stop delayed": {}, "update check": {"outcome": ("newer", "current", "failed"), "error": "error"},
+    "open url refused": {}, "transfer": {"outcome": ("ok", "failed", "cancelled", "skipped"), "error": "error"},
+    "transfer retry": {"attempt": int, "error": "error"}, "external upload": {"items": int},
+    "external drop": {"items": int}, "external drop wired": {}, "external drop failed": {"error": "error"},
+    "scan": {"outcome": ("complete", "stopped", "disconnected", "failed"), "items": int, "error": "error"},
+    "list failed": {"error": "error"},
+    "compare failed": {"error": "error"}, "sync": {"outcome": ("complete", "stopped", "disconnected", "failed"), "items": int, "error": "error"},
+    "keygen": {"outcome": ("ok", "failed", "restore failed"), "error": "error"},
+    "key protection failed": {"returncode": int, "error": "error"},
+    "prefs unreadable": {"error": "error"}, "atomic write failed": {"error": "error"},
+    "atomic unreadable": {"error": "error"}, "known hosts write failed": {"error": "error"},
+    "session unreadable": {"error": "error"}, "sessions notice": {}, "session backup failed": {"error": "error"},
+    "keyring failed": {"outcome": ("set", "rollback", "import", "delete"), "error": "error"},
+    "shutdown workers delayed": {"items": int}, "shutdown close errors": {"items": int}, "shutdown complete": {"outcome": ("clean", "workers delayed")},
+    "remote list": {"items": int}, "remote mkdir": {}, "remote rename": {}, "remote remove": {}, "remote rmdir": {},
+    "connection lost": {"items": int}, "unknown event": {},
+    "queue": {"outcome": ("paused", "resumed", "drained", "session failed"), "items": int},
+    "unsafe remote name": {"error": "error"}, "symlink target": {},
+    "mtime": {"outcome": ("missing", "local failed", "remote failed"), "error": "error"},
+}
 
-    def emit(self, record):
+debug = debug_log.DebugLog(paths.exe_dir(), "Simple SFTP Client", redact=_scrub)
+
+
+def log_event(event, **fields):
+    """Write only schema-checked, non-user-controlled debug fields."""
+    try:
+        spec = EVENTS.get(event)
+        if spec is None:
+            debug._log("unknown event")
+            return
+        accepted = []
+        for name, value in fields.items():
+            allowed = spec.get(name)
+            if allowed is int:
+                valid = isinstance(value, int) and not isinstance(value, bool)
+                rendered = str(value) if valid else "rejected"
+            elif allowed is bool:
+                valid = isinstance(value, bool)
+                rendered = str(value).lower() if valid else "rejected"
+            elif allowed == "error":
+                valid = isinstance(value, BaseException)
+                rendered = describe_error(value) if valid else "rejected"
+            else:
+                valid = isinstance(allowed, tuple) and isinstance(value, str) and value in allowed
+                rendered = value if valid else "rejected"
+            accepted.append(f"{name}={rendered}")
+        debug._log(event, " ".join(accepted))
+    except Exception:
         try:
-            self._dbg.log(f"{record.name}: {record.getMessage()}")
+            debug._log("unknown event")
         except Exception:
             pass
-
-
-class AppDebugLog(debug_log.DebugLog):
-    """Adds the paramiko protocol-log bridge on top of the shared DebugLog:
-    attached whenever logging is on, detached the moment it goes off."""
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._bridge = None  # paramiko logging handler, attached only while on
-
-    def set_enabled(self, on):
-        ok = super().set_enabled(on)
-        self._set_paramiko(self.is_enabled())
-        return ok
-
-    def log(self, label, content=""):
-        super().log(label, content)
-        if self._bridge is not None and not self.is_enabled():
-            self._set_paramiko(False)
-
-    def _set_paramiko(self, on):
-        """Capture paramiko's verbose transport/SFTP logging while debug is on."""
-        plog = logging.getLogger("paramiko")
-        try:
-            if on and not self._bridge:
-                self._bridge = _ParamikoBridge(self)
-                plog.addHandler(self._bridge)
-                plog.setLevel(logging.DEBUG)
-            elif not on and self._bridge:
-                plog.removeHandler(self._bridge)
-                self._bridge = None
-        except Exception:
-            pass
-
-
-debug = AppDebugLog(paths.exe_dir(), "Simple SFTP Client", redact=_scrub)

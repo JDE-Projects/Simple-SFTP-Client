@@ -158,11 +158,11 @@ class Api:
     def _emit(self, event, payload):
         return services.window._emit(self, event, payload)
 
-    def _vlog(self, msg, level="info"):
-        return services.window._vlog(self, msg, level)
+    def _vlog(self, msg, level="info", event=None, **fields):
+        return services.window._vlog(self, msg, level, event, **fields)
 
-    def _worker_log(self, msg, level="info"):
-        return services.window._worker_log(self, msg, level)
+    def _worker_log(self, msg, level="info", event=None, **fields):
+        return services.window._worker_log(self, msg, level, event, **fields)
 
     # ───────────── sessions (servers.json, never passwords) ─────────────
     def _load_sessions(self):

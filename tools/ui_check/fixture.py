@@ -101,6 +101,7 @@ def main() -> int:
                 "link_folder": LINK_FOLDER,
                 "link_file": LINK_FILE,
                 "link_target": os.path.realpath(link_target),
+                "app_dir": os.environ.get("UI_DRIVE_APP_DIR", ""),
             }
         ),
         flush=True,

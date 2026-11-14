@@ -1,11 +1,9 @@
 """Service functions for the compare_sync area."""
 
 import threading
-import traceback
 import posixpath
 from app import constants
 from app.constants import MTIME_TOL
-from app.debug import debug
 from app.errors import ScanIncomplete, friendly_error
 
 
@@ -303,7 +301,7 @@ def _run_compare(api, cid, local_dir, remote_dir, stop_event, direction=None, ch
             sftp = api._client.open_sftp()
         except Exception as e:
             reason = friendly_error(e)
-            api._worker_log(f"compare: could not open a transfer session: {reason}", "error")
+            api._worker_log(f"compare: could not open a transfer session: {reason}", "error", "compare failed", error=e)
             _finish(False, error=reason)
             return
         on_progress = lambda n: api._bump_compare_found(cid, n)  # noqa: E731
@@ -333,12 +331,11 @@ def _run_compare(api, cid, local_dir, remote_dir, stop_event, direction=None, ch
             data["root_remote"] = remote_dir
             _finish(True, result=data)
     except ScanIncomplete as e:
-        api._worker_log(f"compare: {e}", "error")
+        api._worker_log(f"compare: {e}", "error", "compare failed", error=e)
         _finish(False, error=str(e))
     except Exception as e:
         reason = friendly_error(e)
-        api._worker_log(f"compare failed: {reason}", "error")
-        debug.log("COMPARE failed", traceback.format_exc())
+        api._worker_log(f"compare failed: {reason}", "error", "compare failed", error=e)
         _finish(False, error=reason)
     finally:
         if sftp is not None:
@@ -430,16 +427,15 @@ def _stream_sync_transfers(api, transfers, direction, on_conflict, scan_id, stop
                     break
         flush()
         if stop_event.is_set():
-            api._worker_log(f"Sync stopped ({found} item(s) queued before stopping)", "warn")
+            api._worker_log(f"Sync stopped ({found} item(s) queued before stopping)", "warn", "sync", outcome="stopped", items=found)
         elif not api._connected:
-            api._worker_log(f"Sync halted: disconnected ({found} item(s) queued)", "warn")
+            api._worker_log(f"Sync halted: disconnected ({found} item(s) queued)", "warn", "sync", outcome="disconnected", items=found)
         elif found:
-            api._worker_log(f"Sync: {found} item(s) queued")
+            api._worker_log(f"Sync: {found} item(s) queued", event="sync", outcome="complete", items=found)
         else:
-            api._worker_log("Sync: nothing to transfer")
+            api._worker_log("Sync: nothing to transfer", event="sync", outcome="complete", items=0)
     except Exception as e:
-        api._worker_log(f"sync failed: {friendly_error(e)}", "error")
-        debug.log("SYNC failed", traceback.format_exc())
+        api._worker_log(f"sync failed: {friendly_error(e)}", "error", "sync", outcome="failed", items=found, error=e)
     finally:
         api._deregister_scan(scan_id)
         api._deregister_compare(token)

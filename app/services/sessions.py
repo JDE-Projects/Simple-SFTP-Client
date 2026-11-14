@@ -7,7 +7,7 @@ import time
 
 from app import paths
 from app.atomic import _atomic_write_json, _preserve_corrupt
-from app.debug import debug
+from app.debug import log_event
 from app.errors import InvalidPort, SessionsUnreadable
 from app.validation import INVALID_PORT_ERROR, _valid_session_entry, cred_key, parse_port
 
@@ -51,7 +51,7 @@ def _read_sessions(api):
         return [], False
     except OSError as e:
         reason = e.strerror or type(e).__name__
-        debug.log(f"Saved sessions file not read, left in place: {reason}")
+        log_event("session unreadable", error=e)
         raise SessionsUnreadable(reason) from e
     try:
         data = json.loads(raw.decode("utf-8"))
@@ -86,7 +86,7 @@ def _keep_copy_before_rewrite(api):
     try:
         shutil.copy2(paths.SESSIONS_FILE, aside)
     except OSError as e:
-        debug.log(f"Saved sessions copy not made: {e.strerror or type(e).__name__}")
+        log_event("session backup failed", error=e)
         return False
     api._sessions_notice(
         f"Some saved sessions could not be read, so a copy of the original "
@@ -99,8 +99,9 @@ def _sessions_notice(api, msg):
     problem noticed at load time, without silently dropping data unseen."""
     try:
         api._vlog(msg, "warn")
+        log_event("sessions notice")
     except Exception:
-        debug.log(msg)
+        log_event("sessions notice")
 
 
 def _save_sessions(api, sessions):
@@ -147,7 +148,7 @@ def save_session(api, s):
                 keyring.set_password("SimpleSFTPClient", cred_name, api._cred_pass)
                 pw_saved = True
             except Exception as e:
-                debug.log("keyring set failed", str(e))
+                log_event("keyring failed", outcome="set", error=e)
                 pw_error = f"Could not save the password to Windows Credential Manager: {e}"
         else:
             pw_error = "Password not saved. Connect successfully with these exact settings first, then save."
@@ -171,7 +172,7 @@ def save_session(api, s):
                 else:
                     keyring.delete_password("SimpleSFTPClient", cred_name)
             except Exception as e:
-                debug.log("keyring rollback failed", str(e))
+                log_event("keyring failed", outcome="rollback", error=e)
                 rollback_failed = True
         if rollback_failed:
             return {"ok": False,
@@ -212,7 +213,7 @@ def delete_session(api, name):
             import keyring
             import keyring.errors
         except Exception as e:
-            debug.log("keyring import failed", str(e))
+            log_event("keyring failed", outcome="import", error=e)
             failed_names = list(names)
         else:
             for cred_name in names:
@@ -223,7 +224,7 @@ def delete_session(api, name):
                     # it was either never saved or already removed.
                     pass
                 except Exception as e:
-                    debug.log("keyring delete failed", f"{cred_name}: {e}")
+                    log_event("keyring failed", outcome="delete", error=e)
                     failed_names.append(cred_name)
     result = {"ok": True, "sessions": sessions}
     if failed_names:

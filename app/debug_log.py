@@ -1,8 +1,23 @@
+import errno
 import json
 import os
 import re
 import threading
 from datetime import datetime
+
+
+def describe_error(error):
+    """Return a safe, fixed description without inspecting error text."""
+    parts = [type(error).__name__]
+    number = getattr(error, "errno", None)
+    if isinstance(number, int) and not isinstance(number, bool):
+        code = errno.errorcode.get(number)
+        if code:
+            parts.append(code)
+    winerror = getattr(error, "winerror", None)
+    if isinstance(winerror, int) and not isinstance(winerror, bool):
+        parts.append(f"WinError {winerror}")
+    return ": ".join(parts)
 
 
 # Apps copy this file in as debug_log.py. It only writes and prunes log files;
@@ -48,10 +63,10 @@ class DebugLog:
         # Every warning reaches the app's UI. While logging is on it is also
         # written into the active log, so the file keeps a trace of it. A write
         # failure turns logging off first, so this never loops.
-        for message in warnings:
+        for kind, message in warnings:
             self._warn(message)
             if self._on:
-                self.log("WARNING", message)
+                self._log("WARNING", kind)
 
     def is_enabled(self):
         return self._on
@@ -68,9 +83,8 @@ class DebugLog:
                 warnings.extend(self._prune_locked(new_path))
                 size = self._write_new_file(new_path)
                 if size is None:
-                    warnings.append(
-                        f"Debug log: could not create {os.path.basename(new_path)}. Logging stayed off."
-                    )
+                    warnings.append(("create failed",
+                        f"Debug log: could not create {os.path.basename(new_path)}. Logging stayed off."))
                     self._on = False
                     ok = False
                 else:
@@ -87,7 +101,7 @@ class DebugLog:
             warnings = self._prune_locked(self._path)
         self._emit(warnings)
 
-    def log(self, label, content=""):
+    def _log(self, label, content=""):
         warnings = []
         with self._lock:
             if self._on and self._path:
@@ -109,9 +123,8 @@ class DebugLog:
                         self._on = False
                         self._path = None
                         fatal = True
-                        warnings.append(
-                            f"Debug log: could not start a new log file ({os.path.basename(new_path)}). Logging turned off."
-                        )
+                        warnings.append(("rollover failed",
+                            f"Debug log: could not start a new log file ({os.path.basename(new_path)}). Logging turned off."))
                     else:
                         self._path = new_path
                         self._current_size = size
@@ -129,9 +142,12 @@ class DebugLog:
                             f.write(entry_text)
                         self._current_size += len(entry_bytes)
                     except OSError as e:
+                        name = os.path.basename(self._path)
                         self._on = False
                         self._path = None
-                        warnings.append(f"Debug log: write failed ({e}). Logging turned off.")
+                        reason = e.strerror or type(e).__name__
+                        warnings.append(("write failed",
+                            f"Debug log: write failed for {name} ({reason}). Logging turned off."))
         self._emit(warnings)
 
     def _format_core(self, ts, label, content):
@@ -186,7 +202,9 @@ class DebugLog:
         try:
             entries = list(os.scandir(self.log_dir))
         except OSError as e:
-            return [f"Debug log: could not check {self.log_dir} for old logs ({e})."]
+            reason = e.strerror or type(e).__name__
+            return [("folder check failed",
+                     f"Debug log: could not check {self.log_dir} for old logs ({reason}).")]
 
         active_norm = os.path.normcase(os.path.abspath(active_path)) if active_path else None
 
@@ -243,7 +261,6 @@ class DebugLog:
                 name = os.path.basename(path)
                 if name not in self._warned_names:
                     self._warned_names.add(name)
-                    warnings.append(
-                        f"Debug log: could not delete old log {name} (it may be open in another program). Will retry later."
-                    )
+                    warnings.append(("old log not deleted",
+                        f"Debug log: could not delete old log {name} (it may be open in another program). Will retry later."))
         return warnings

@@ -5,7 +5,7 @@ import json
 import os
 import re
 
-from app.debug_log import DebugLog
+from app.debug_log import DebugLog, describe_error
 
 
 def _stamped_name(stamp, suffix=None):
@@ -28,7 +28,7 @@ def test_active_file_never_exceeds_cap_and_rolls_over(tmp_path):
     assert dbg.set_enabled(True)
 
     for i in range(60):
-        dbg.log(f"entry {i}", "x" * 40)
+        dbg._log(f"entry {i}", "x" * 40)
         assert os.path.getsize(dbg._path) <= 2000
 
     logs = sorted(glob.glob(str(tmp_path / "Debug_Log_*.txt")))
@@ -39,7 +39,7 @@ def test_oversized_entry_is_truncated_and_marked(tmp_path):
     dbg = DebugLog(str(tmp_path), "Test App", max_bytes=500, keep_older=3)
     assert dbg.set_enabled(True)
 
-    dbg.log("big", "A" * 5000)
+    dbg._log("big", "A" * 5000)
 
     assert os.path.getsize(dbg._path) <= 500
     assert "[entry truncated]" in read(dbg._path)
@@ -198,7 +198,7 @@ def test_write_failure_turns_logging_off_and_warns_without_raising(tmp_path, mon
 
     monkeypatch.setattr(debug_log_module, "open", fake_open, raising=False)
 
-    dbg.log("should fail")  # must not raise
+    dbg._log("should fail")  # must not raise
 
     assert dbg.is_enabled() is False
     assert len(warnings) == 1
@@ -211,7 +211,7 @@ def test_redact_is_applied_to_label_and_content(tmp_path):
     dbg = DebugLog(str(tmp_path), "Test App", redact=redact, max_bytes=2000, keep_older=3)
     assert dbg.set_enabled(True)
 
-    dbg.log("has a secretlabel", {"password": "secretvalue"})
+    dbg._log("has a secretlabel", {"password": "secretvalue"})
 
     contents = read(dbg._path)
     assert "secretlabel" not in contents
@@ -224,7 +224,7 @@ def test_log_dumps_dict_and_list_as_indented_json(tmp_path):
     assert dbg.set_enabled(True)
 
     payload = {"a": 1, "b": [1, 2, 3]}
-    dbg.log("payload", payload)
+    dbg._log("payload", payload)
 
     contents = read(dbg._path)
     assert json.dumps(payload, indent=2) in contents
@@ -233,7 +233,7 @@ def test_log_dumps_dict_and_list_as_indented_json(tmp_path):
 def test_header_and_timestamp_format(tmp_path):
     dbg = DebugLog(str(tmp_path), "Test App", max_bytes=2000, keep_older=3)
     assert dbg.set_enabled(True)
-    dbg.log("hello")
+    dbg._log("hello")
 
     contents = read(dbg._path)
     assert "=== Test App debug log ===" in contents
@@ -253,7 +253,8 @@ def test_prune_warning_is_also_written_into_active_log(tmp_path, monkeypatch):
     assert dbg.set_enabled(True)
 
     assert len(warnings) == 1
-    assert os.path.basename(str(locked)) in read(dbg._path)
+    assert "old log not deleted" in read(dbg._path)
+    assert os.path.basename(str(locked)) not in read(dbg._path)
 
 
 def test_reenable_after_write_failure_starts_a_fresh_file(tmp_path, monkeypatch):
@@ -271,12 +272,12 @@ def test_reenable_after_write_failure_starts_a_fresh_file(tmp_path, monkeypatch)
         return real_open(file, mode, *args, **kwargs)
 
     monkeypatch.setattr(debug_log_module, "open", fake_open, raising=False)
-    dbg.log("should fail")
+    dbg._log("should fail")
     monkeypatch.undo()
 
     assert dbg.set_enabled(True)
     assert dbg._path != first_path
-    dbg.log("after recovery")
+    dbg._log("after recovery")
     assert "after recovery" in read(dbg._path)
 
 
@@ -292,12 +293,19 @@ def test_failed_rollover_keeps_the_active_file_before_pruning(tmp_path, monkeypa
         make_log(tmp_path, stamp, size=50)
 
     monkeypatch.setattr(dbg, "_write_new_file", lambda path: None)
-    dbg.log("roll over", "x" * 3000)
+    dbg._log("roll over", "x" * 3000)
 
     assert os.path.exists(active_path)
     assert dbg.is_enabled() is False
     assert len(warnings) == 1
 
+
+def test_describe_error_drops_marker_text():
+    assert describe_error(PermissionError(13, "MARKERWORD")) == "PermissionError: EACCES"
+    error = OSError("MARKERWORD")
+    error.winerror = 5
+    assert "WinError 5" in describe_error(error)
+    assert describe_error(ValueError("MARKERWORD")) == "ValueError"
 
 def test_existing_picked_name_is_not_overwritten(tmp_path, monkeypatch):
     existing = tmp_path / _stamped_name("01012026_010000")

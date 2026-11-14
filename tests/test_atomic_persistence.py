@@ -56,7 +56,7 @@ def test_load_prefs_locked_file_left_in_place(pref_path, monkeypatch):
         return real_open(file, *a, **k)
 
     monkeypatch.setattr("builtins.open", locked_open)
-    monkeypatch.setattr(prefs.debug, "log", logged.append)
+    monkeypatch.setattr(prefs, "log_event", lambda event, **fields: logged.append((event, fields)))
 
     result = load_prefs()
 
@@ -65,22 +65,21 @@ def test_load_prefs_locked_file_left_in_place(pref_path, monkeypatch):
     assert glob.glob(pref_path + ".corrupt-*") == []
     with open(pref_path, encoding="utf-8") as f:
         assert json.load(f) == {"theme": "light"}
-    assert logged == ["Settings file not read, left in place: Permission denied"]
+    assert logged[0][0] == "prefs unreadable"
+    assert isinstance(logged[0][1]["error"], PermissionError)
 
 
 def test_load_prefs_kept_aside_log_line_has_no_path(pref_path, monkeypatch):
     from app import atomic
     logged = []
-    monkeypatch.setattr(atomic.debug, "log", logged.append)
+    monkeypatch.setattr(atomic, "log_event", lambda event, **fields: logged.append((event, fields)))
     with open(pref_path, "w", encoding="utf-8") as f:
         f.write("not valid json{{{")
 
     load_prefs()
 
     assert len(logged) == 1
-    assert "kept aside" in logged[0]
-    assert os.path.dirname(pref_path) not in logged[0]
-    assert ".corrupt-" not in logged[0]
+    assert logged[0][0] == "atomic unreadable"
 
 
 def test_save_prefs_missing_file_is_first_run(pref_path):

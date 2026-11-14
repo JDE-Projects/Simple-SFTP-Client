@@ -4,7 +4,7 @@ import os
 import time
 import threading
 import posixpath
-from app.debug import debug
+from app.debug import log_event
 from app.errors import friendly_error
 from app.paths import is_temp_part
 
@@ -116,7 +116,7 @@ def start_watch(api, local_dir, remote_dir):
                         api._ensure_remote_dir(rdir)
                         finished = api._put_file(api._sftp, fp, rp, _cb, stop.is_set)
                     if finished:
-                        api._worker_log(f"Watch: uploaded {rel}", "ok")
+                        api._worker_log(f"Watch: uploaded {rel}", "ok", "watch upload", outcome="ok")
                         refreshed_folders.add(posixpath.dirname(rp))
                         # Accept this state so it is not re-sent.
                         last[fp] = cur[fp]
@@ -127,7 +127,7 @@ def start_watch(api, local_dir, remote_dir):
                         seen_changed.pop(fp, None)
                         break
                 except Exception as e:
-                    api._worker_log(f"Watch error: {rel} - {friendly_error(e)}", "error")
+                    api._worker_log(f"Watch error: {rel} - {friendly_error(e)}", "error", "watch upload", outcome="failed", error=e)
                     # Keep the change pending: leave last unadvanced so a
                     # later poll retries. Reset the stability gate so a
                     # transient failure does not skip the next steadiness
@@ -150,7 +150,7 @@ def start_watch(api, local_dir, remote_dir):
         api._watch_stop = stop
         api._watch_thread = t
     t.start()
-    debug.log("WATCH start", {"local": local_dir, "remote": remote_dir})
+    log_event("watch start")
     return {"ok": True}
 
 
@@ -171,7 +171,7 @@ def stop_watch(api):
     if thread is not None and thread is not threading.current_thread():
         thread.join(3)
         if thread.is_alive():
-            debug.log("WATCH: thread still running 3s after stop")
+            log_event("watch stop delayed")
             return {"ok": True}
     with api._watch_lock:
         if api._watch_thread is thread:
