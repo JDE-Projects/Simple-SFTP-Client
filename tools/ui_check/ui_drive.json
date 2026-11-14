@@ -8,6 +8,16 @@
       "script": "tools/ui_check/smoke.js",
       "fixture": "tools/ui_check/fixture.py",
       "timeout_s": 180
+    },
+    "window-fit-oversized": {
+      "script": "tools/ui_check/window_fit.js",
+      "fixture": "tools/ui_check/window_fit_oversized_fixture.py",
+      "timeout_s": 120
+    },
+    "window-fit-offscreen": {
+      "script": "tools/ui_check/window_fit.js",
+      "fixture": "tools/ui_check/window_fit_offscreen_fixture.py",
+      "timeout_s": 120
     }
   }
 }
