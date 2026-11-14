@@ -169,3 +169,84 @@ def test_corrupt_json_still_preserved_aside_as_before(api, tmp_path):
     assert result == []
     import os
     assert not os.path.exists(paths.SESSIONS_FILE)
+
+
+# ───────────── keep a copy before a rewrite would drop entries ─────────────
+
+def _copies():
+    import glob
+    return glob.glob(paths.SESSIONS_FILE + ".skipped-*")
+
+
+def _new_session():
+    return {"name": "new", "host": "other.example.com", "port": "22",
+            "username": "bob", "auth": "password",
+            "remember": False}
+
+
+def test_save_with_skipped_entry_keeps_a_copy_first(api, monkeypatch):
+    notices = []
+    monkeypatch.setattr(api, "_vlog", lambda msg, level="info": notices.append(msg))
+    original = json.dumps({"sessions": [base_entry(name="good"), "not a dict"]})
+    _write_raw(paths.SESSIONS_FILE, original)
+
+    result = api.save_session(_new_session())
+
+    assert result["ok"] is True
+    assert [x["name"] for x in api._load_sessions()] == ["good", "new"]
+    copies = _copies()
+    assert len(copies) == 1
+    with open(copies[0], encoding="utf-8") as f:
+        assert f.read() == original
+    assert any("copy of the original file was kept" in m for m in notices)
+
+
+def test_save_with_wrong_shape_file_keeps_a_copy_first(api):
+    original = json.dumps(["not", "a", "dict"])
+    _write_raw(paths.SESSIONS_FILE, original)
+
+    assert api.save_session(_new_session())["ok"] is True
+
+    copies = _copies()
+    assert len(copies) == 1
+    with open(copies[0], encoding="utf-8") as f:
+        assert f.read() == original
+
+
+def test_delete_with_skipped_entry_keeps_a_copy_first(api):
+    original = json.dumps({"sessions": [base_entry(name="good"), "not a dict"]})
+    _write_raw(paths.SESSIONS_FILE, original)
+
+    assert api.delete_session("good")["ok"] is True
+
+    assert api._load_sessions() == []
+    copies = _copies()
+    assert len(copies) == 1
+    with open(copies[0], encoding="utf-8") as f:
+        assert f.read() == original
+
+
+def test_save_refused_when_copy_cannot_be_made(api, monkeypatch):
+    import shutil
+
+    def boom(*a, **k):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(shutil, "copy2", boom)
+    original = json.dumps({"sessions": [base_entry(name="good"), "not a dict"]})
+    _write_raw(paths.SESSIONS_FILE, original)
+
+    result = api.save_session(_new_session())
+
+    assert result["ok"] is False
+    assert "nothing was changed" in result["error"]
+    with open(paths.SESSIONS_FILE, encoding="utf-8") as f:
+        assert f.read() == original
+
+
+def test_save_with_clean_file_makes_no_copy(api):
+    _write_raw(paths.SESSIONS_FILE, json.dumps({"sessions": [base_entry(name="good")]}))
+
+    assert api.save_session(_new_session())["ok"] is True
+
+    assert _copies() == []

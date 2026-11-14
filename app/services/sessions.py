@@ -1,6 +1,10 @@
 """Service functions for the sessions area."""
 
 import json
+import os
+import shutil
+import time
+
 from app import paths
 from app.atomic import _atomic_write_json, _preserve_corrupt
 from app.debug import debug
@@ -10,6 +14,10 @@ from app.validation import INVALID_PORT_ERROR, _valid_session_entry, cred_key, p
 SESSIONS_UNREADABLE_ERROR = (
     "Could not open the saved sessions file to update it. Nothing was changed. "
     "Close any program that may be using it and try again.")
+SESSIONS_COPY_ERROR = (
+    "Some saved sessions could not be read, and a safety copy of the file "
+    "could not be made, so nothing was changed. Check that the app's folder "
+    "can be written to and try again.")
 
 
 def _load_sessions(api):
@@ -17,7 +25,7 @@ def _load_sessions(api):
     access) is left in place and reported with a visible notice, and the
     list comes up empty for this load."""
     try:
-        return _read_sessions(api)
+        return _read_sessions(api)[0]
     except SessionsUnreadable as e:
         api._sessions_notice(
             f"Saved sessions could not be opened ({e.reason}). The file was left "
@@ -27,18 +35,20 @@ def _load_sessions(api):
 
 def _read_sessions(api):
     """Load saved sessions and validate every entry before it can reach
-    the UI or a connect attempt. A file that cannot be opened raises
+    the UI or a connect attempt. Returns (sessions, lossy): lossy is True
+    when the file held something that was ignored or skipped, so writing
+    the list back would lose it. A file that cannot be opened raises
     SessionsUnreadable and is left in place. A file that opens but fails
     to parse is kept aside via _preserve_corrupt. Entries that parsed fine
     as JSON but have the wrong shape are dropped, so nothing malformed or
     hostile (e.g. a bad port or an unsupported auth value) ever gets that
-    far. Dropped entries are never rewritten back to servers.json by this
-    load: the file is left untouched."""
+    far. This load leaves the file untouched. Before a save or delete
+    rewrites a lossy file, _keep_copy_before_rewrite keeps the original."""
     try:
         with open(paths.SESSIONS_FILE, "rb") as f:
             raw = f.read()
     except FileNotFoundError:
-        return []
+        return [], False
     except OSError as e:
         reason = e.strerror or type(e).__name__
         debug.log(f"Saved sessions file not read, left in place: {reason}")
@@ -47,14 +57,14 @@ def _read_sessions(api):
         data = json.loads(raw.decode("utf-8"))
     except Exception as e:
         _preserve_corrupt(paths.SESSIONS_FILE, e)
-        return []
+        return [], False
     if not isinstance(data, dict):
         api._sessions_notice("Saved sessions file has an unexpected format and was ignored.")
-        return []
+        return [], True
     raw = data.get("sessions", [])
     if not isinstance(raw, list):
         api._sessions_notice("Saved sessions file has an unexpected format and was ignored.")
-        return []
+        return [], True
     valid = [x for x in raw if _valid_session_entry(x)]
     dropped = len(raw) - len(valid)
     if dropped:
@@ -62,7 +72,26 @@ def _read_sessions(api):
         api._sessions_notice(
             f"Skipped {dropped} saved session {word} that could not be read. "
             f"{paths.SESSIONS_FILE} was left unchanged.")
-    return valid
+    return valid, bool(dropped)
+
+
+def _keep_copy_before_rewrite(api):
+    """The saved sessions file holds entries this app could not read, and a
+    save or delete is about to write back only the ones it could. Copy the
+    original aside under a dated name first, and tell the user. A copy, not
+    a move, so the original stays in place if the write that follows fails.
+    Returns False when the copy could not be made; the caller then refuses
+    the write rather than lose those entries."""
+    aside = f"{paths.SESSIONS_FILE}.skipped-{time.strftime('%Y%m%d-%H%M%S')}"
+    try:
+        shutil.copy2(paths.SESSIONS_FILE, aside)
+    except OSError as e:
+        debug.log(f"Saved sessions copy not made: {e.strerror or type(e).__name__}")
+        return False
+    api._sessions_notice(
+        f"Some saved sessions could not be read, so a copy of the original "
+        f"file was kept as {os.path.basename(aside)} before saving.")
+    return True
 
 
 def _sessions_notice(api, msg):
@@ -89,9 +118,11 @@ def save_session(api, s):
         return {"ok": False,
                 "error": INVALID_PORT_ERROR}
     try:
-        sessions = api._read_sessions()
+        sessions, lossy = api._read_sessions()
     except SessionsUnreadable:
         return {"ok": False, "error": SESSIONS_UNREADABLE_ERROR}
+    if lossy and not _keep_copy_before_rewrite(api):
+        return {"ok": False, "error": SESSIONS_COPY_ERROR}
     # optional remembered password -> OS keychain. The session may only
     # claim a saved password when one was actually written, so a failed
     # write, or "remember" ticked with no password to save (key auth, or
@@ -156,9 +187,11 @@ def save_session(api, s):
 
 def delete_session(api, name):
     try:
-        sessions = api._read_sessions()
+        sessions, lossy = api._read_sessions()
     except SessionsUnreadable:
         return {"ok": False, "error": SESSIONS_UNREADABLE_ERROR}
+    if lossy and not _keep_copy_before_rewrite(api):
+        return {"ok": False, "error": SESSIONS_COPY_ERROR}
     target = next((x for x in sessions if x.get("name") == name), None)
     sessions = [x for x in sessions if x.get("name") != name]
     saved_ok = api._save_sessions(sessions)
