@@ -1,6 +1,7 @@
 """Service functions for the updates area."""
 
 import json
+import urllib.parse
 import webbrowser
 from urllib.request import Request, urlopen
 from app.constants import GITHUB_REPO
@@ -46,7 +47,30 @@ def _is_newer(api, latest, current):
         return False
 
 
+# The only site the page may open in the system browser (the header byline).
+ALLOWED_URL_HOST = "jde-projects.com"
+
+
+def _is_allowed_url(url):
+    """True only for a plain https address on the JDE-Projects website: no
+    other host, scheme, port, login part, or whitespace/control characters."""
+    if not isinstance(url, str) or any(c.isspace() or ord(c) < 32 for c in url):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    # Comparing the whole netloc rules out ports and user@host tricks.
+    return parts.scheme == "https" and parts.netloc == ALLOWED_URL_HOST
+
+
 def open_url(api, url):
+    """Open a link in the system browser, never by navigating the app window.
+    Only the JDE-Projects website is allowed (see _is_allowed_url), because any
+    script that gets into the page can call this bridge."""
+    if not _is_allowed_url(url):
+        debug.log("open_url refused an address outside the allowed site")
+        return {"ok": False, "error": "That link isn't allowed."}
     try:
         webbrowser.open(url)
         return {"ok": True}

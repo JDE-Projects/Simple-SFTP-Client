@@ -1169,8 +1169,7 @@ function fadeNotice(){ const notice=$("updateNotice");
 async function doUpdate(manual){ const r=await API.check_update();
   const notice=$("updateNotice");
   if(r.update){
-    notice.innerHTML='Update available: <a href="#" id="updateLink">v'+esc(r.version)+'</a>';
-    $("updateLink").onclick=(e)=>{ e.preventDefault(); API.open_url("https://github.com/JDE-Projects/Simple-SFTP-Client/blob/main/README.md#updating"); };
+    notice.innerHTML='Update available: <a href="https://github.com/JDE-Projects/Simple-SFTP-Client/blob/main/README.md#updating" target="_blank" rel="noopener">v'+esc(r.version)+'</a>';
   } else if(r.offline){
     notice.textContent="Couldn't reach GitHub to check for updates.";
     fadeNotice();
