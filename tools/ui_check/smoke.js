@@ -11,9 +11,15 @@
 // server folder downloaded onto a symlinked local folder, with the console
 // warning and the file landing in the link's target; a connect to a closed
 // port failing with a plain-language message; a theme round trip with a
-// screenshot of each theme; and a clean disconnect at the end. Does not cover sessions, key-based auth, sync/compare, or watch: see
+// screenshot of each theme; and a clean disconnect at the end. The debug log
+// is switched on for the whole run, then read back: it must hold the fixed
+// events for what happened and none of the typed values, paths, or file
+// names. Does not cover sessions, key-based auth, sync/compare, or watch: see
 // tools/ui_check/run_ui_check.py's scenario.js for those, driven headlessly
 // against a stand-in bridge instead of the real window.
+
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 async function names(side, { evaluate }) {
   return evaluate(`state.${side}.entries.map(e=>e.name)`);
@@ -40,11 +46,17 @@ export default async function smoke(helpers) {
 
   // a) the page-to-Python link answers, with the real version.
   await waitFor("typeof API !== 'undefined' && API", 10000);
+  await waitFor("document.getElementById('verLabel').textContent !== ''", 10000).catch(() => {});
   const verLabel = await evaluate("document.getElementById('verLabel').textContent");
   check("version label shows a version", /^v\d+\.\d+\.\d+$/.test(verLabel), verLabel);
   const meta = await evaluate("API.get_meta()");
   check("bridge get_meta answers with the version shown on screen", "v" + meta.version === verLabel,
     JSON.stringify(meta));
+
+  // Debug log on for the whole run; read back at the end.
+  await click(".dbg-track");
+  const debugOn = await waitFor("$('dbgToggle').checked === true", 5000).then(() => true).catch(() => false);
+  check("debug log switches on", debugOn);
 
   async function connectAndExpectSuccess(port, expectHostKeyPrompt) {
     await type("#host", "127.0.0.1");
@@ -166,4 +178,21 @@ export default async function smoke(helpers) {
   await click("#connBtn");
   const disconnected = await waitFor("connected === false", 10000).then(() => true).catch(() => false);
   check("disconnects cleanly with no active session left behind", disconnected);
+
+  // g) the debug log holds fixed events only, never typed values or names.
+  await click(".dbg-track");
+  await waitFor("$('dbgToggle').checked === false", 5000).catch(() => {});
+  const logFiles = readdirSync(fixture.app_dir).filter((n) => /^Debug_Log_\d{8}_\d{6}(_\d+)?\.txt$/.test(n));
+  check("a debug log file was written next to the app", logFiles.length > 0, JSON.stringify(logFiles));
+  const logText = logFiles.map((n) => readFileSync(join(fixture.app_dir, n), "utf-8")).join("\n");
+  for (const event of ["debug enabled", "connect\nauth=password", "] connected\n", "remote list\nitems=",
+    "transfer\noutcome=ok", "symlink target", "connect failed", "disconnected"]) {
+    check(`debug log records the fixed event: ${JSON.stringify(event)}`, logText.includes(event));
+  }
+  const forbidden = [fixture.password, "127.0.0.1", fixture.local_dir, fixture.link_target,
+    "fixture_local", "fixture_server", fixture.link_folder, fixture.link_file,
+    ...fixture.server_files, ...fixture.local_files];
+  const leaked = forbidden.filter((v) => v && logText.includes(v));
+  if (new RegExp(`\\b${fixture.user}\\b(?! connection)`).test(logText)) leaked.push(fixture.user);
+  check("debug log holds no typed value, path, or file name", leaked.length === 0, JSON.stringify(leaked));
 }
