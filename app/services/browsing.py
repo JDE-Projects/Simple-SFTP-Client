@@ -67,7 +67,7 @@ def list_remote(api, path):
             entries.append({"name": a.filename, "is_dir": stat.S_ISDIR(a.st_mode),
                             "size": a.st_size, "mtime": int(a.st_mtime or 0)})
         parent = posixpath.dirname(path.rstrip("/")) or "/"
-        api._vlog(f"ls {path} → {len(entries)} item(s)")
+        api._vlog(f"ls {path} → {len(entries)} item(s)", event="remote list", items=len(entries))
         return {"ok": True, "cwd": path, "parent": parent, "entries": entries}
     except Exception as e:
         return {"ok": False, "error": friendly_error(e)}
@@ -80,7 +80,7 @@ def make_dir(api, side, path, name):
         else:
             target = posixpath.join(path, name)
             api._sftp.mkdir(target)
-            api._vlog(f"mkdir {target}")
+            api._vlog(f"mkdir {target}", event="remote mkdir")
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": friendly_error(e)}
@@ -92,7 +92,7 @@ def rename(api, side, path, old, new):
             os.rename(os.path.join(path, old), os.path.join(path, new))
         else:
             api._sftp.rename(posixpath.join(path, old), posixpath.join(path, new))
-            api._vlog(f"rename {posixpath.join(path, old)} → {new}")
+            api._vlog(f"rename {posixpath.join(path, old)} → {new}", event="remote rename")
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": friendly_error(e)}
@@ -109,7 +109,7 @@ def delete(api, side, path, items):
                 full = posixpath.join(path, it["name"])
                 api._rremove(full) if it["is_dir"] else api._sftp.remove(full)
                 if not it["is_dir"]:
-                    api._vlog(f"remove {full}")
+                    api._vlog(f"remove {full}", event="remote remove")
         except Exception as e:
             errs.append(f"{it['name']}: {e}")
     return {"ok": True, "errors": errs}
@@ -123,7 +123,7 @@ def _rremove(api, path):
         child = posixpath.join(path, a.filename)
         api._rremove(child) if stat.S_ISDIR(a.st_mode) else api._sftp.remove(child)
     api._sftp.rmdir(path)
-    api._vlog(f"rmdir {path}")
+    api._vlog(f"rmdir {path}", event="remote rmdir")
 
 
 def open_local(api, path, name):

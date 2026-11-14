@@ -45,8 +45,8 @@ def opened(monkeypatch):
 @pytest.fixture
 def logged(monkeypatch):
     lines = []
-    monkeypatch.setattr(updates.debug, "log",
-                        lambda label, content="": lines.append(label))
+    monkeypatch.setattr(updates, "log_event",
+                        lambda event, **fields: lines.append((event, fields)))
     return lines
 
 
@@ -78,5 +78,4 @@ def test_open_url_refuses_without_opening(url, opened, logged):
 def test_refusal_writes_a_log_line_without_the_address(opened, logged):
     Api("test").open_url("https://evil.example/secret-path")
     assert len(logged) == 1
-    assert "refused" in logged[0]
-    assert "evil.example" not in logged[0]
+    assert logged[0][0] == "open url refused"

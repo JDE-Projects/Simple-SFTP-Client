@@ -5,7 +5,7 @@ import urllib.parse
 import webbrowser
 from urllib.request import Request, urlopen
 from app.constants import GITHUB_REPO
-from app.debug import debug
+from app.debug import log_event
 from app.errors import _update_error_reason, friendly_error
 
 
@@ -24,11 +24,11 @@ def check_update(api):
         result["version"] = latest
         if latest and api._is_newer(latest, api._app_version):
             result["update"] = True
-        debug.log(f"check_update: found v{latest}, current v{api._app_version}")
+        log_event("update check", outcome="newer" if result["update"] else "current")
     except Exception as e:
         result["offline"] = True
         result["reason"] = _update_error_reason(e)
-        debug.log(f"check_update failed: {type(e).__name__}: {e}")
+        log_event("update check", outcome="failed", error=e)
     return result
 
 
@@ -69,7 +69,7 @@ def open_url(api, url):
     Only the JDE-Projects website is allowed (see _is_allowed_url), because any
     script that gets into the page can call this bridge."""
     if not _is_allowed_url(url):
-        debug.log("open_url refused an address outside the allowed site")
+        log_event("open url refused")
         return {"ok": False, "error": "That link isn't allowed."}
     try:
         webbrowser.open(url)

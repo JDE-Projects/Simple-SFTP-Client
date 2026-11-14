@@ -2,7 +2,7 @@ import json
 import os
 
 from app.atomic import _atomic_write_json, _preserve_corrupt
-from app.debug import debug
+from app.debug import log_event
 from app.paths import exe_dir
 
 # ----------------------------------------------------------------------------
@@ -28,8 +28,7 @@ def load_prefs() -> dict:
     except FileNotFoundError:
         return {}
     except OSError as e:
-        debug.log(f"Settings file not read, left in place: "
-                  f"{e.strerror or type(e).__name__}")
+        log_event("prefs unreadable", error=e)
         return {}
     try:
         data = json.loads(raw.decode("utf-8"))

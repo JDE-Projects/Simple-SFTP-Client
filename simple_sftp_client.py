@@ -25,7 +25,7 @@ import threading
 import webview
 
 from app.api import Api
-from app.debug import debug
+from app.debug import debug, log_event
 from app.geometry import _restore_geometry, _save_geometry
 from app.paths import resource_path
 
@@ -217,9 +217,9 @@ def main():
             pane = window.dom.get_element("#paneRemote")
             if pane:
                 pane.events.drop += api._on_external_drop
-                debug.log("External drop wired on remote pane")
+                log_event("external drop wired")
         except Exception as e:
-            debug.log("wire external drop failed", str(e))
+            log_event("external drop failed", error=e)
     window.events.loaded += _wire_external_drop
 
     # Geometry save/restore locates the window by enumerating this process's

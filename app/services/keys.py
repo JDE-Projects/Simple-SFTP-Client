@@ -7,7 +7,7 @@ import tempfile
 import posixpath
 import webview
 import paramiko
-from app.debug import debug
+from app.debug import log_event
 from app.errors import friendly_error
 from app.keyfiles import _protect_private_key
 
@@ -154,8 +154,7 @@ def generate_key(api, key_type, out_path, passphrase, overwrite=False):
                     # new key, never a truncated one. Say so, so the
                     # user isn't left with a pair that quietly no
                     # longer matches.
-                    debug.log("KEYGEN restore failed",
-                              {"path": out_path, "backup": kept_backup})
+                    log_event("keygen", outcome="restore failed")
                     return {"ok": False, "error": (
                         "The key couldn't be saved, and the old private key "
                         f"couldn't be put back. {out_path} now holds a new "
@@ -170,7 +169,7 @@ def generate_key(api, key_type, out_path, passphrase, overwrite=False):
                     pass
             raise
 
-        debug.log("KEYGEN", {"type": key_type, "path": out_path})
+        log_event("keygen", outcome="ok")
         if backup_path is not None:
             try:
                 os.remove(backup_path)

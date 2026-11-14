@@ -43,9 +43,10 @@ If you enjoyed this project and would like to buy me a coffee, check out my [Ko-
 - Remote directory size calculation (on demand) and a connection health
   indicator.
 - Built-in check for updates against GitHub Releases.
-- Optional debug log, off by default. The app never logs passwords or
-  passphrases, and the log scrubs credentials embedded in URLs and any
-  private-key material as a backstop.
+- Optional debug log, off by default. It records only what happened and the
+  outcome (for example "remote list, 42 items" or "transfer failed"), never
+  what you typed: no host names, user names, passwords, file or folder names,
+  or error messages.
 - Secure transport only: weak or vulnerable algorithms are disabled, so the
   app connects securely or fails with a clear message (no unsafe fallback).
 
@@ -142,9 +143,13 @@ pipeline from this repo. You can also check the file against the published
   `_2`, `_3`, and so on). Each file stops at 5 MiB and rolls over to a new
   one; the app keeps the active file plus at most 3 older ones (20 MiB
   total) and deletes only its own log files, next to the app, once there are
-  more. The app never logs passwords or passphrases; as a backstop, the log
-  also scrubs any credentials embedded in URLs and any private-key material
-  before writing. If a log file can't be written, the debug log turns itself
+  more. Each line is a fixed event name from the app's own list, with only
+  counts, fixed outcome words, and the kind of error plus its standard code.
+  Nothing you type, no host, user, password, passphrase, file or folder name,
+  and no error message text is written; the full detail stays in the
+  on-screen console. As a backstop, the log also scrubs any credentials
+  embedded in URLs and any private-key material before writing. If a log
+  file can't be written, the debug log turns itself
   off and shows a warning in the console rather than failing silently.
 - **Network use.** Other than the job you ask of it, this app makes one automatic network call: a check to GitHub for a newer release (at startup and when you press **Check for updates**), which sends only a version request. It collects and sends no personal data, usage data, or analytics.
 - **Privacy policy.** The full privacy policy for this app and the other JDE-Projects tools is at https://jde-projects.com/privacy.

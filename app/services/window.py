@@ -4,7 +4,7 @@ import os
 import json
 import time
 from datetime import datetime
-from app.debug import debug
+from app.debug import debug, log_event
 from app.errors import friendly_error
 from app.paths import exe_dir
 from app.prefs import load_prefs, save_prefs
@@ -39,7 +39,7 @@ def save_theme(api, theme):
 
 def set_debug(api, on):
     ok = debug.set_enabled(on)
-    debug.log("Debug enabled" if on and ok else "Debug disabled")
+    log_event("debug enabled" if on and ok else "debug disabled")
     return {"ok": ok, "enabled": debug.is_enabled(), "warnings": api._drain_debug_warnings()}
 
 
@@ -49,7 +49,7 @@ def _on_debug_warning(api, msg):
     the window. It only buffers; poll_queue()/set_debug()/
     drain_debug_warnings() are what deliver it to the page. The template
     already writes the warning into the log itself, so this must not call
-    debug.log() again, or evaluate_js, or it could deadlock or loop."""
+    log_event() again, or evaluate_js, or it could deadlock or loop."""
     with api._debug_warnings_lock:
         api._debug_warnings.append(msg)
 
@@ -92,18 +92,20 @@ def _emit(api, event, payload):
             pass
 
 
-def _vlog(api, msg, level="info"):
-    """Verbose, FileZilla-style operation line: to the console and debug log."""
+def _vlog(api, msg, level="info", event=None, **fields):
+    """Verbose operation line for the console, optionally with a safe event."""
     api._emit("console", {"msg": msg, "level": level})
-    debug.log(msg)
+    if event is not None:
+        log_event(event, **fields)
 
 
-def _worker_log(api, msg, level="info"):
+def _worker_log(api, msg, level="info", event=None, **fields):
     """Console line from the worker thread: never calls evaluate_js, just
-    buffers for the next poll_queue() and writes the debug log."""
+    buffers for the next poll_queue(), optionally recording a safe event."""
     with api._console_lock:
         api._console_buffer.append({"msg": msg, "level": level})
-    debug.log(msg)
+    if event is not None:
+        log_event(event, **fields)
 
 
 def shutdown(api):
@@ -158,26 +160,25 @@ def shutdown(api):
         # No silent failure: this is not a clean shutdown if threads are
         # still running, so say so instead of claiming otherwise.
         msg = f"Shutdown: {len(still_alive)} transfer thread(s) did not stop in time."
-        debug.log("SHUTDOWN: worker thread(s) still running after 5s wait", str(len(still_alive)))
-        api._worker_log(msg, "warn")
+        api._worker_log(msg, "warn", "shutdown workers delayed", items=len(still_alive))
 
     # Close the browsing session and transport. Each worker already
     # closes its own SFTP session in its own finally block once
     # cancelled above; this closes the shared session/transport that
     # workers open new sessions against and that the file browser uses.
-    close_errors = []
+    close_errors = 0
     if api._sftp is not None:
         try:
             api._sftp.close()
-        except Exception as e:
-            close_errors.append(str(e))
+        except Exception:
+            close_errors += 1
     if api._client is not None:
         try:
             api._client.close()
-        except Exception as e:
-            close_errors.append(str(e))
+        except Exception:
+            close_errors += 1
     if close_errors:
-        debug.log("SHUTDOWN: close error(s)", close_errors)
+        log_event("shutdown close errors", items=close_errors)
 
     api._connected = False
     api._client = None
@@ -189,8 +190,7 @@ def shutdown(api):
     # disconnect: a reconnect starts clean.
     with api._mtime_fallback_lock:
         api._mtime_fallback.clear()
-    debug.log("SHUTDOWN complete" if not still_alive else
-              "SHUTDOWN complete (worker thread(s) still running)")
+    log_event("shutdown complete", outcome="clean" if not still_alive else "workers delayed")
     return {"ok": True}
 
 

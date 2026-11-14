@@ -242,7 +242,7 @@ def _apply_download_mtime(api, lp, rp, mtime, size):
     if not mtime:
         api._worker_log(f"server reported no modification time for {rp}; "
                          "this file will be treated as unchanged by size "
-                         "for the rest of this connection", "warn")
+                         "for the rest of this connection", "warn", "mtime", outcome="missing")
         api._record_mtime_fallback(lp, rp, size)
         return
     try:
@@ -250,7 +250,7 @@ def _apply_download_mtime(api, lp, rp, mtime, size):
     except OSError as e:
         api._worker_log(f"could not set modification time on {lp}: {e}; "
                          "this file will be treated as unchanged by size "
-                         "for the rest of this connection", "warn")
+                         "for the rest of this connection", "warn", "mtime", outcome="local failed", error=e)
         api._record_mtime_fallback(lp, rp, size)
     else:
         api._clear_mtime_fallback(lp, rp)
@@ -274,7 +274,7 @@ def _apply_upload_mtime(api, sftp, rp, lp):
         api._worker_log(f"server refused to set modification time on {rp}: "
                          f"{friendly_error(e)}; this file will be treated "
                          "as unchanged by size for the rest of this "
-                         "connection", "warn")
+                         "connection", "warn", "mtime", outcome="remote failed", error=e)
         api._record_mtime_fallback(lp, rp, local_stat.st_size)
     else:
         api._clear_mtime_fallback(lp, rp)

@@ -1,11 +1,12 @@
 """
-The debug log is off by default and, when turned on, is the single
-chokepoint every message funnels through (including paramiko's own
-protocol logging). This covers the pattern-based scrub applied there: it
+The debug log is off by default. When turned on, it records only fixed
+events, and a pattern-based scrub stays in place as a second guard. This
+covers that scrub: it
 masks passwords embedded in URLs and any private-key material, and leaves
 everything else untouched.
 """
-from app.debug import AppDebugLog, _scrub
+from app.debug import _scrub
+from app.debug_log import DebugLog
 
 
 def test_scrub_masks_sftp_url_password():
@@ -59,12 +60,12 @@ def test_scrub_passes_through_ordinary_text_unchanged():
 
 
 def test_debug_log_off_by_default(tmp_path):
-    dbg = AppDebugLog(str(tmp_path), "Test App", redact=_scrub)
+    dbg = DebugLog(str(tmp_path), "Test App", redact=_scrub)
     assert dbg.is_enabled() is False
 
 
 def test_debug_log_writes_nothing_when_off(tmp_path):
-    dbg = AppDebugLog(str(tmp_path), "Test App", redact=_scrub)
-    # Off by default, so log() must be a no-op even if a path were ever set.
-    dbg.log("some label", "some content")
+    dbg = DebugLog(str(tmp_path), "Test App", redact=_scrub)
+    # Off by default, so _log() must be a no-op even if a path were ever set.
+    dbg._log("some label", "some content")
     assert dbg._path is None

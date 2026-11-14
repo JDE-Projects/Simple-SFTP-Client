@@ -3,7 +3,7 @@ import os
 import tempfile
 import time
 
-from app.debug import debug
+from app.debug import log_event
 
 
 def _atomic_write_json(path, obj, **dump_kwargs) -> bool:
@@ -28,7 +28,7 @@ def _atomic_write_json(path, obj, **dump_kwargs) -> bool:
             except Exception:
                 pass
         try:
-            debug.log(f"Could not write {os.path.basename(path)}: {e}")
+            log_event("atomic write failed", error=e)
         except Exception:
             pass
         return False
@@ -41,9 +41,9 @@ def _preserve_corrupt(path, error) -> None:
         if os.path.exists(path):
             aside = f"{path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
             os.replace(path, aside)
-            debug.log(f"{os.path.basename(path)} unreadable, kept aside: {error}")
+            log_event("atomic unreadable", error=error)
         else:
-            debug.log(f"{os.path.basename(path)} unreadable: {error}")
+            log_event("atomic unreadable", error=error)
     except Exception:
         pass
 

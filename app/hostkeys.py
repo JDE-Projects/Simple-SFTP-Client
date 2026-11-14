@@ -5,7 +5,7 @@ import tempfile
 
 import paramiko
 
-from app.debug import debug
+from app.debug import log_event
 from app import paths
 from app.errors import KnownHostsUnreadable, UnknownHostKey
 from app.validation import parse_port
@@ -77,7 +77,7 @@ def _save_host_keys_atomic(hk) -> bool:
             except Exception:
                 pass
         try:
-            debug.log(f"Could not write {os.path.basename(paths.KNOWN_HOSTS_FILE)}: {e}")
+            log_event("known hosts write failed", error=e)
         except Exception:
             pass
         return False
