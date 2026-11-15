@@ -14,6 +14,7 @@ other integration tests.
 import os
 import threading
 import time
+import types
 
 import paramiko
 
@@ -128,6 +129,33 @@ def test_watch_uploads_a_file_that_appears_after_start(sftp_env, wait_until):
     wait_until(lambda: (server_root / "new.txt").exists())
     api.stop_watch()
     assert (server_root / "new.txt").read_bytes() == b"hello"
+
+
+def test_watch_catches_a_file_written_before_its_thread_runs(
+        sftp_env, wait_until, monkeypatch):
+    """A file written right after start_watch returns must be uploaded even
+    when the watcher thread is slow to begin. The starting snapshot is taken
+    before start_watch returns, so the file counts as a new change rather
+    than as something already present when watching began."""
+    from app.services import watching
+
+    class SlowStartThread(threading.Thread):
+        def run(self):
+            time.sleep(0.3)  # the test writes its file during this delay
+            super().run()
+
+    monkeypatch.setattr(watching, "threading", types.SimpleNamespace(
+        Thread=SlowStartThread, Event=threading.Event,
+        current_thread=threading.current_thread))
+
+    api, server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    (local_dir / "early.txt").write_bytes(b"early")
+
+    wait_until(lambda: (server_root / "early.txt").exists())
+    api.stop_watch()
+    assert (server_root / "early.txt").read_bytes() == b"early"
 
 
 def test_watch_upload_is_buffered_with_its_remote_folder(sftp_env, wait_until):
