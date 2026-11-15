@@ -61,8 +61,7 @@ Three ways to get it - pick one. The installer and .zip are on the
 - **WinGet:** `winget install --exact --id JDE-Projects.SimpleSFTPClient`
 - **Installer (recommended):** download `SimpleSFTPClient-vX.Y.Z-setup.exe` and
   run it. Installs the app, adds a Start menu shortcut, and can be removed later
-  from Add or Remove Programs. Installs just for you by default (no admin); you can
-  choose all users during setup.
+  from Add or Remove Programs. Installs just for you, no admin needed.
 - **Portable .zip:** download `SimpleSFTPClient-vX.Y.Z.zip`, extract it, and run
   `Simple SFTP Client.exe` from inside the extracted folder. No install - good for
   a locked-down PC or a USB stick. Keep the folder together.
