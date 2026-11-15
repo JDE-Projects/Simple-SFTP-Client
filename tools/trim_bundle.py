@@ -17,7 +17,7 @@ from pathlib import Path
 
 # The trim list and licenses/THIRD-PARTY-LICENSES-QT.txt and
 # licenses/THIRD-PARTY-LICENSES-CHROMIUM.txt were checked against this version.
-CHECKED_PYSIDE6_VERSION = "6.11.2"
+CHECKED_PYSIDE6_VERSION = "6.12.0"
 
 # Qt developer tools. QtWebEngineProcess.exe is intentionally not listed.
 DEVELOPER_TOOLS = (
@@ -32,13 +32,14 @@ GPL_DLLS = tuple(
     f"{name}.dll"
     for name in (
         "Qt6CanvasPainter", "Qt6Charts", "Qt6ChartsQml", "Qt6DataVisualization",
-        "Qt6DataVisualizationQml", "Qt6Graphs", "Qt6GraphsWidgets", "Qt6HttpServer",
-        "Qt6Lottie", "Qt6LottieVectorImageGenerator", "Qt6LottieVectorImageHelpers",
-        "Qt6NetworkAuth", "Qt6Quick3D", "Qt6Quick3DAssetImport", "Qt6Quick3DAssetUtils",
-        "Qt6Quick3DEffects", "Qt6Quick3DGlslParser", "Qt6Quick3DHelpers",
-        "Qt6Quick3DHelpersImpl", "Qt6Quick3DIblBaker", "Qt6Quick3DParticleEffects",
-        "Qt6Quick3DParticles", "Qt6Quick3DRuntimeRender", "Qt6Quick3DSpatialAudio",
-        "Qt6Quick3DUtils", "Qt6Quick3DXr", "Qt6QuickTimeline",
+        "Qt6DataVisualizationQml", "Qt6Graphs", "Qt6Graphs2DImpl", "Qt6GraphsWidgets",
+        "Qt6HttpServer", "Qt6Lottie", "Qt6LottieVectorImageGenerator",
+        "Qt6LottieVectorImageHelpers", "Qt6NetworkAuth", "Qt6Quick3D",
+        "Qt6Quick3DAssetImport", "Qt6Quick3DAssetUtils", "Qt6Quick3DEffects",
+        "Qt6Quick3DGlslParser", "Qt6Quick3DHelpers", "Qt6Quick3DHelpersImpl",
+        "Qt6Quick3DIblBaker", "Qt6Quick3DParticleEffects", "Qt6Quick3DParticles",
+        "Qt6Quick3DPhysics", "Qt6Quick3DPhysicsHelpers", "Qt6Quick3DRuntimeRender",
+        "Qt6Quick3DSpatialAudio", "Qt6Quick3DUtils", "Qt6Quick3DXr", "Qt6QuickTimeline",
         "Qt6QuickTimelineBlendTrees", "Qt6VirtualKeyboard", "Qt6VirtualKeyboardQml",
         "Qt6VirtualKeyboardSettings",
     )
