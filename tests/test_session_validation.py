@@ -244,6 +244,23 @@ def test_save_refused_when_copy_cannot_be_made(api, monkeypatch):
         assert f.read() == original
 
 
+@pytest.mark.parametrize("remember", ["missing", "", None])
+def test_save_without_a_boolean_remember_loads_back(api, remember):
+    """A save with remember missing, blank, or null stores remember false, so
+    the entry passes the loader's check instead of being skipped."""
+    session = _new_session()
+    if remember == "missing":
+        del session["remember"]
+    else:
+        session["remember"] = remember
+
+    assert api.save_session(session)["ok"] is True
+
+    loaded = api._load_sessions()
+    assert [x["name"] for x in loaded] == ["new"]
+    assert loaded[0]["remember"] is False
+
+
 def test_save_with_clean_file_makes_no_copy(api):
     _write_raw(paths.SESSIONS_FILE, json.dumps({"sessions": [base_entry(name="good")]}))
 

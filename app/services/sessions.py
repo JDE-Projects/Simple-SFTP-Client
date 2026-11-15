@@ -113,6 +113,9 @@ def _save_sessions(api, sessions):
 def save_session(api, s):
     s = {k: s.get(k, "") for k in ("name", "host", "port", "username",
                                    "auth", "key_path", "start_path", "remember")}
+    # The loader accepts only true or false for remember and skips any other
+    # value, so a missing or non-boolean remember is saved as false.
+    s["remember"] = s["remember"] is True
     try:
         port = parse_port(s.get("port"))
     except InvalidPort:
