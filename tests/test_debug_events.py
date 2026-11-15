@@ -8,7 +8,7 @@ from app import paths, prefs
 from app.api import Api
 from app import debug as debug_module
 from app.debug_log import DebugLog
-from app.services import connections, scanning, sessions, updates
+from app.services import connections, keys, scanning, sessions, updates
 from simple_sftp_client import APP_VERSION
 
 
@@ -170,3 +170,127 @@ def test_real_service_failures_log_fixed_events_without_typed_markers(tmp_path, 
         assert f"] {event}\n" in text
     assert marker not in text
     dbg.set_enabled(False)
+
+
+def _debug_text(log_dir):
+    return "".join(path.read_text(encoding="utf-8") for path in log_dir.iterdir())
+
+
+def test_watch_upload_failure_logs_fixed_event_without_typed_marker(
+        tmp_path, monkeypatch, sftp_env, wait_until):
+    marker = "MARKERWORD"
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    dbg = DebugLog(str(log_dir), "Test App")
+    monkeypatch.setattr(debug_module, "debug", dbg)
+    assert dbg.set_enabled(True)
+    api, _server_root, local_dir = sftp_env
+    api._watch_interval = 0.02
+
+    def fail(*args, **kwargs):
+        raise OSError(13, marker, rf"C:\\{marker}")
+
+    monkeypatch.setattr(api._sftp, "open", fail)
+    try:
+        assert api.start_watch(str(local_dir), f"/{marker}")["ok"] is True
+        (local_dir / f"{marker}.txt").write_bytes(b"payload")
+        wait_until(lambda: "] watch upload\n" in _debug_text(log_dir), timeout=3)
+        text = _debug_text(log_dir)
+        assert "] watch upload\noutcome=failed " in text
+        assert marker not in text
+    finally:
+        api.stop_watch()
+        dbg.set_enabled(False)
+
+
+def test_external_upload_and_exhausted_retries_log_fixed_events_without_typed_markers(
+        tmp_path, monkeypatch, sftp_env, wait_for_drain):
+    marker = "MARKERWORD"
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    dbg = DebugLog(str(log_dir), "Test App")
+    monkeypatch.setattr(debug_module, "debug", dbg)
+    assert dbg.set_enabled(True)
+    api, _server_root, local_dir = sftp_env
+    dropped = local_dir / f"{marker}-dropped.txt"
+    retry_file = local_dir / f"{marker}-retry.txt"
+    dropped.write_bytes(b"drop")
+    retry_file.write_bytes(b"retry")
+
+    assert api.upload_paths([str(dropped)], f"/{marker}")["ok"] is True
+    wait_for_drain(api)
+
+    def fail(*args, **kwargs):
+        raise OSError(13, marker, rf"C:\\{marker}")
+
+    class FailingSftp:
+        stat = open = remove = fail
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(api._client, "open_sftp", lambda: FailingSftp())
+    try:
+        assert api.enqueue([{"name": retry_file.name, "is_dir": False}], "upload",
+                           str(local_dir), f"/{marker}")["ok"] is True
+        wait_for_drain(api)
+        text = _debug_text(log_dir)
+        assert "] external upload\n" in text
+        assert "] transfer retry\n" in text
+        assert "] transfer\noutcome=failed\n" in text
+        assert marker not in text
+    finally:
+        dbg.set_enabled(False)
+
+
+def test_compare_and_sync_listing_failures_log_fixed_events_without_typed_markers(
+        tmp_path, monkeypatch, sftp_env, wait_for_compare):
+    marker = "MARKERWORD"
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    dbg = DebugLog(str(log_dir), "Test App")
+    monkeypatch.setattr(debug_module, "debug", dbg)
+    assert dbg.set_enabled(True)
+    api, _server_root, local_dir = sftp_env
+    marker_dir = local_dir / marker
+    marker_dir.mkdir()
+
+    def fail(*args, **kwargs):
+        raise OSError(13, marker, rf"C:\\{marker}")
+
+    class FailingSftp:
+        listdir_iter = fail
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(api._client, "open_sftp", lambda: FailingSftp())
+    try:
+        assert api.compare(str(marker_dir), f"/{marker}")["ok"] is True
+        assert wait_for_compare(api, kind="compare")["ok"] is False
+        assert api.sync_plan(str(marker_dir), f"/{marker}", "upload")["ok"] is True
+        assert wait_for_compare(api, kind="sync")["ok"] is False
+        text = _debug_text(log_dir)
+        assert text.count("] compare failed\n") == 2
+        assert marker not in text
+    finally:
+        dbg.set_enabled(False)
+
+
+def test_key_generation_logs_fixed_event_without_typed_marker(tmp_path, monkeypatch):
+    marker = "MARKERWORD"
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    dbg = DebugLog(str(log_dir), "Test App")
+    monkeypatch.setattr(debug_module, "debug", dbg)
+    assert dbg.set_enabled(True)
+    key_path = tmp_path / f"{marker}-id_ed25519"
+    monkeypatch.setattr(keys, "_protect_private_key", lambda path: None)
+    try:
+        result = Api(APP_VERSION).generate_key("Ed25519", str(key_path), marker)
+        assert result["ok"] is True
+        text = _debug_text(log_dir)
+        assert "] keygen\noutcome=ok\n" in text
+        assert marker not in text
+    finally:
+        dbg.set_enabled(False)
