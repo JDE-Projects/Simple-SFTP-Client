@@ -68,12 +68,16 @@ def start_watch(api, local_dir, remote_dir):
                     pass
         return snap
 
+    # last: files whose current state has been accepted (uploaded, or present
+    # unchanged since start) and must not be re-sent. Taken here, before the
+    # thread starts, so any change made after start_watch returns is caught.
+    # Taken inside the thread instead, a file written in the moment before
+    # the thread ran would be recorded as already present and never uploaded.
+    last = snapshot()
+
     def loop():
-        # last: files whose current state has been accepted (uploaded, or
-        # present unchanged since start) and must not be re-sent.
         # seen_changed: a changed file's state at its previous sighting, used
         # to require one stable poll before uploading.
-        last = snapshot()
         seen_changed = {}
         while not stop.is_set():
             time.sleep(api._watch_interval)
