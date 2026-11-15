@@ -101,14 +101,18 @@ pipeline from this repo. You can also check the file against the published
 `.sha256`.
 
 ## Build from source (optional)
-- Python 3 on PATH.
-- `pip install -r requirements.txt` (pinned versions: PySide6, pywebview,
-  paramiko, cryptography, keyring, and PyInstaller)
+- 64-bit Python 3.14 on PATH.
+- `requirements.in` lists the direct packages (`pywebview`, `PySide6`, `qtpy`,
+  `pyinstaller`, `truststore`, `paramiko`, `cryptography`, `bcrypt`, `PyNaCl`,
+  and `keyring`). `requirements.txt` is the full locked list generated from it
+  by uv 0.12.17, with a checksum for every package; it is never edited by hand.
 - Keep `simple_sftp_client.py`, the `app/` folder,
   `simple_sftp_client-UI.html`, the `fonts/` folder, the `.ico`, and `.png`
   together.
-- Run from source: `python simple_sftp_client.py`
-- Build the .exe: `Build_Simple_SFTP_Client.bat` -> `dist\Simple SFTP Client\Simple SFTP Client.exe`
+- Run from source: `pip install --require-hashes -r requirements.txt`, then
+  `python simple_sftp_client.py`
+- Build the .exe: `Build_Simple_SFTP_Client.bat` uses a fresh `build\venv`, then
+  writes `dist\Simple SFTP Client\Simple SFTP Client.exe`.
 
 ## Using it
 1. Enter host, port, and username, then a password or a private key. Connect.
