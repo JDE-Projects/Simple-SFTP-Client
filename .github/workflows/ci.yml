@@ -9,4 +9,5 @@ jobs:
     permissions:
       contents: read
     with:
+      verify_runtime_lock: true
       entry_script: "simple_sftp_client.py"
