@@ -9,6 +9,11 @@
       "fixture": "tools/ui_check/fixture.py",
       "timeout_s": 180
     },
+    "name-clash": {
+      "script": "tools/ui_check/name_clash.js",
+      "fixture": "tools/ui_check/name_clash_fixture.py",
+      "timeout_s": 120
+    },
     "window-fit-oversized": {
       "script": "tools/ui_check/window_fit.js",
       "fixture": "tools/ui_check/window_fit_oversized_fixture.py",

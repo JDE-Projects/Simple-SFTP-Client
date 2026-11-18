@@ -40,6 +40,28 @@ try{
   await loadLocal(T.local);
   ok("setup: local pane at the test folder",()=>state.local.cwd===T.local,()=>state.local.cwd);
 
+  select("remote",["report.txt"]);
+  const namePrompt=startTransfer("download");
+  const prompted=await waitFor(()=>$("diffModal").classList.contains("show"),3000);
+  ok("case-variant download opens the overwrite prompt",()=>prompted);
+  ok("case-variant download prompt shows local size",()=>$("dfBody").textContent.includes(hsize(state.local.entries.find(e=>e.name==="Report.txt").size)),()=>$("dfBody").textContent);
+  $("dfCancel").click(); await namePrompt;
+
+  await fs("queue_clash");
+  $("qViewBtn").click();
+  const clashRendered=await waitFor(()=>$("qList").textContent.includes("report.txt"),3000);
+  ok("non-retryable clash row has no retry control",()=>clashRendered&&!$("qList").querySelector(".qretry"));
+  ok("Retry all is disabled for only a clash row",()=>$("qRetryFailedBtn").disabled===true);
+  qModalOpen=false; $("queueModal").classList.remove("show");
+
+  await fs("queue_retry_refusal");
+  $("qViewBtn").click();
+  const refusalRendered=await waitFor(()=>$("qList").querySelector(".qretry"),3000);
+  $("qList").querySelector(".qretry").click();
+  const refusalShown=await waitFor(()=>consoleText().includes("That item can't be retried."),3000);
+  ok("a refused retry shows a toast",()=>refusalRendered&&refusalShown,()=>consoleText());
+  qModalOpen=false; $("queueModal").classList.remove("show");
+
   // Selection survives an automatic refresh that inserts rows above it.
   select("local",["b.txt","c.txt"]); select("remote",["0dl.txt","dl1.txt"]);
   $("qMeta").textContent="";

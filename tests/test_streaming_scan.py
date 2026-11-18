@@ -287,6 +287,29 @@ def test_iter_remote_skips_temp_parts_and_confines_hostile_names(tmp_path):
     assert any("unsafe remote name" in m for m in messages)
 
 
+def test_remote_scan_skips_windows_unsafe_names(tmp_path):
+    api = Api(APP_VERSION)
+    root = str(tmp_path)
+    sftp = _FakeSftp({
+        "/top": [
+            _FakeAttr("good.bin", size=5, mtime=1_700_000_005),
+            _FakeAttr("CON.txt", size=5),
+            _FakeAttr("name.", size=5),
+            _FakeAttr("a:b", size=5),
+            _FakeAttr("AUX", is_dir=True),
+        ],
+        "/top/AUX": [_FakeAttr("inner.bin", size=5)],
+    })
+
+    results = list(api._iter_remote(sftp, "/top", str(tmp_path / "top"), True, root))
+
+    assert results == [(str(tmp_path / "top" / "good.bin"), "/top/good.bin", 5, 1_700_000_005, False)]
+    with api._console_lock:
+        messages = [line["msg"] for line in api._console_buffer]
+    for name in ("CON.txt", "name.", "a:b", "AUX"):
+        assert any("skipped unsafe remote name" in message and name in message for message in messages)
+
+
 def test_iter_remote_logs_and_stops_when_listing_raises():
     api = Api(APP_VERSION)
 

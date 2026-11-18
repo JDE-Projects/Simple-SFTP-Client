@@ -285,8 +285,8 @@ class Api:
     def _iter_local(self, lp, rp, is_dir, problems=None, include_dirs=False):
         return services.scanning._iter_local(self, lp, rp, is_dir, problems, include_dirs)
 
-    def _iter_remote(self, sftp, rp, lp, is_dir, root, problems=None, include_dirs=False):
-        return services.scanning._iter_remote(self, sftp, rp, lp, is_dir, root, problems, include_dirs)
+    def _iter_remote(self, sftp, rp, lp, is_dir, root, problems=None, include_dirs=False, clashes=None):
+        return services.scanning._iter_remote(self, sftp, rp, lp, is_dir, root, problems, include_dirs, clashes)
 
     def _scan_and_queue(self, roots, direction, on_conflict, scan_id, stop_event, local_root=None):
         return services.scanning._scan_and_queue(self, roots, direction, on_conflict, scan_id, stop_event, local_root)
@@ -316,6 +316,9 @@ class Api:
     def retry_all_failed(self):
         return services.transfers.retry_all_failed(self)
 
+    def match_download_names(self, remote_names, local_names):
+        return services.transfers.match_download_names(self, remote_names, local_names)
+
     def pause_queue(self):
         return services.transfers.pause_queue(self)
 
@@ -325,8 +328,8 @@ class Api:
     def enqueue(self, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"):
         return services.transfers.enqueue(self, jobs, direction, local_dir, remote_dir, on_conflict)
 
-    def _enqueue_files(self, files, direction, on_conflict):
-        return services.transfers._enqueue_files(self, files, direction, on_conflict)
+    def _enqueue_files(self, files, direction, on_conflict, local_root=None):
+        return services.transfers._enqueue_files(self, files, direction, on_conflict, local_root)
 
     def _ensure_worker(self):
         return services.transfers._ensure_worker(self)
@@ -420,8 +423,8 @@ class Api:
     def sync_plan(self, local_dir, remote_dir, direction, changed_only=True):
         return services.compare_sync.sync_plan(self, local_dir, remote_dir, direction, changed_only)
 
-    def _stream_sync_transfers(self, transfers, direction, on_conflict, scan_id, stop_event, token):
-        return services.compare_sync._stream_sync_transfers(self, transfers, direction, on_conflict, scan_id, stop_event, token)
+    def _stream_sync_transfers(self, transfers, direction, on_conflict, scan_id, stop_event, token, local_root=None):
+        return services.compare_sync._stream_sync_transfers(self, transfers, direction, on_conflict, scan_id, stop_event, token, local_root)
 
     def start_sync(self, token, on_conflict="overwrite"):
         return services.compare_sync.start_sync(self, token, on_conflict)

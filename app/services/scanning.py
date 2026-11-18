@@ -7,7 +7,7 @@ import threading
 import posixpath
 from app import constants
 from app.errors import friendly_error
-from app.paths import is_temp_part, safe_local_child
+from app.paths import is_temp_part, safe_local_child, windows_destination_key
 
 
 def _register_scan(api):
@@ -137,7 +137,7 @@ def _iter_local(api, lp, rp, is_dir, problems=None, include_dirs=False):
     return had_file
 
 
-def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=False):
+def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=False, clashes=None):
     """Same as _iter_local but over an sftp session for a remote file or
     folder, again without creating any directories. sftp must be a
     session owned by the caller (the scanner opens its own, never
@@ -158,7 +158,9 @@ def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=Fa
     problems, if given, is a list that a listing failure appends a short
     descriptor to (in addition to the usual log); see _iter_local for why
     the default is None. An unsafe remote name is skipped and logged only,
-    never recorded as a problem (see the ValueError branch below).
+    never recorded as a problem (see the ValueError branch below). clashes,
+    if given, collects sibling names that collide as Windows destinations;
+    without it those clashes are logged but otherwise skipped.
 
     listdir_iter() pipelines read-ahead READDIR requests on the sftp
     session, so starting a second listdir_iter() on the same session
@@ -174,6 +176,7 @@ def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=Fa
         return True
     had_file = False
     subdirs = []
+    siblings = {}
     try:
         for a in sftp.listdir_iter(rp):
             if is_temp_part(a.filename):
@@ -190,6 +193,19 @@ def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=Fa
                 # scan's skip-and-report behavior.
                 api._worker_log(f"skipped unsafe remote name {a.filename!r}: {e}", "error", "unsafe remote name", error=e)
                 continue
+            key = windows_destination_key(lchild)
+            other_remote = siblings.get(key)
+            if other_remote is not None:
+                api._worker_log(
+                    f"skipped {rchild}: same name on Windows as {other_remote}. "
+                    "To get it, download it on its own into a different local folder.",
+                    "error", "name clash")
+                if clashes is not None:
+                    clashes.append({"local_path": lchild, "remote_path": rchild,
+                                    "other_remote": other_remote,
+                                    "is_dir": stat.S_ISDIR(a.st_mode)})
+                continue
+            siblings[key] = rchild
             if stat.S_ISDIR(a.st_mode):
                 subdirs.append((rchild, lchild))
             else:
@@ -202,7 +218,8 @@ def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=Fa
         return False
     for rchild, lchild in subdirs:
         had = yield from api._iter_remote(
-            sftp, rchild, lchild, True, root, problems=problems, include_dirs=include_dirs)
+            sftp, rchild, lchild, True, root, problems=problems,
+            include_dirs=include_dirs, clashes=clashes)
         had_file = had_file or had
     if include_dirs and not had_file:
         yield (lp, rp, 0, 0, True)
@@ -224,6 +241,9 @@ def _scan_and_queue(api, roots, direction, on_conflict, scan_id, stop_event, loc
     confinement boundary passed to _iter_remote); unused for uploads."""
     sftp = None
     found = 0
+    clashes = []
+    admission_clashes = 0
+    scan_clashes = 0
     batch = []
     try:
         if direction == "download":
@@ -236,24 +256,46 @@ def _scan_and_queue(api, roots, direction, on_conflict, scan_id, stop_event, loc
                 return
 
         def flush():
-            nonlocal batch, found
+            nonlocal batch, found, admission_clashes
             if not batch:
                 return
             api._scan_wait_for_room(stop_event)
             if stop_event.is_set() or not api._connected:
                 return
-            found += len(batch)
-            api._bump_scan_found(scan_id, len(batch))
-            api._enqueue_files(batch, direction, on_conflict)
+            queued, clash_count = api._enqueue_files(
+                batch, direction, on_conflict, local_root=local_root)
+            found += queued
+            admission_clashes += clash_count
+            api._bump_scan_found(scan_id, queued)
             batch = []
 
+        def flush_clashes():
+            nonlocal clashes, scan_clashes
+            for clash in clashes:
+                api._queue.add_clash(direction, clash["local_path"], clash["remote_path"],
+                                     os.path.basename(clash["local_path"]),
+                                     clash["other_remote"], clash["is_dir"])
+                scan_clashes += 1
+            clashes = []
+
         stopped_early = False
+        root_keys = {}
         for lp, rp, is_dir in roots:
             if stop_event.is_set() or not api._connected:
                 stopped_early = True
                 break
-            gen = api._iter_local(lp, rp, is_dir, include_dirs=True) if direction == "upload" \
-                else api._iter_remote(sftp, rp, lp, is_dir, local_root, include_dirs=True)
+            if direction == "download":
+                key = windows_destination_key(lp)
+                other_remote = root_keys.get(key)
+                if other_remote is not None:
+                    clashes.append({"local_path": lp, "remote_path": rp,
+                                    "other_remote": other_remote, "is_dir": is_dir})
+                    continue
+                root_keys[key] = rp
+                gen = api._iter_remote(sftp, rp, lp, is_dir, local_root,
+                                       include_dirs=True, clashes=clashes)
+            else:
+                gen = api._iter_local(lp, rp, is_dir, include_dirs=True)
             for triple in gen:
                 if stop_event.is_set() or not api._connected:
                     stopped_early = True
@@ -262,16 +304,23 @@ def _scan_and_queue(api, roots, direction, on_conflict, scan_id, stop_event, loc
                 batch_cap = min(64, constants.SCAN_QUEUE_HIGH_WATER) or 64
                 if len(batch) >= batch_cap:
                     flush()
+                    flush_clashes()
                     if stop_event.is_set() or not api._connected:
                         stopped_early = True
                         break
             if stopped_early:
                 break
         flush()
+        flush_clashes()
+        clash_count = scan_clashes + admission_clashes
         if stop_event.is_set():
-            api._worker_log(f"Scan stopped ({found} file(s) queued before stopping)", "warn", "scan", outcome="stopped", items=found)
+            suffix = f", {clash_count} name clash(es) not downloaded" if clash_count else ""
+            api._worker_log(f"Scan stopped ({found} file(s) queued before stopping{suffix})", "warn", "scan", outcome="stopped", items=found)
         elif not api._connected:
-            api._worker_log(f"Scan halted: disconnected ({found} file(s) queued)", "warn", "scan", outcome="disconnected", items=found)
+            suffix = f", {clash_count} name clash(es) not downloaded" if clash_count else ""
+            api._worker_log(f"Scan halted: disconnected ({found} file(s) queued{suffix})", "warn", "scan", outcome="disconnected", items=found)
+        elif clash_count:
+            api._worker_log(f"Scan complete: {found} file(s) queued, {clash_count} name clash(es) not downloaded", "warn", "scan", outcome="complete", items=found)
         elif found:
             api._worker_log(f"Scan complete: {found} file(s) queued", event="scan", outcome="complete", items=found)
         else:

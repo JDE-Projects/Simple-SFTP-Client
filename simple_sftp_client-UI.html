@@ -445,14 +445,14 @@ const QSTATE_FINISHED={completed:1,skipped:1,failed:1,cancelled:1};
 // clear_finished doesn't return a counts object (only the trimmed items list),
 // so tally it client-side for the one place that needs it after a clear.
 function countsFromItems(items){
-  const c={waiting:0,active:0,completed:0,failed:0,cancelled:0,skipped:0};
-  (items||[]).forEach(i=>{ if(c[i.state]!==undefined)c[i.state]++; });
+  const c={waiting:0,active:0,completed:0,failed:0,cancelled:0,skipped:0,retryable_failed:0};
+  (items||[]).forEach(i=>{ if(c[i.state]!==undefined)c[i.state]++; if(i.state==="failed"&&i.retryable!==false)c.retryable_failed++; });
   return c;
 }
 
 function addRetryButton(row, id){
   const rt=document.createElement("span"); rt.className="qretry"; rt.textContent="↻"; rt.title="Retry";
-  rt.onclick=(ev)=>{ ev.stopPropagation(); API.retry_item(id).then(r=>{ if(r&&r.ok) startQueuePoll(); }); };
+  rt.onclick=(ev)=>{ ev.stopPropagation(); API.retry_item(id).then(r=>{ if(r&&r.ok) startQueuePoll(); else toast((r&&r.error)||"That item can't be retried.",true); }); };
   row.appendChild(rt);
 }
 
@@ -483,9 +483,9 @@ function renderQueueRows(items){
         const err=document.createElement("span"); err.className="qrow-err"; err.textContent=it.error; err.title=it.error;
         row.appendChild(err);
       }
-      addRetryButton(row, it.id);
+      if(it.retryable!==false)addRetryButton(row, it.id);
     } else if(it.state==="cancelled"){
-      addRetryButton(row, it.id);
+      if(it.retryable!==false)addRetryButton(row, it.id);
     } else if(it.state==="waiting"){
       const x=document.createElement("span"); x.className="qx"; x.textContent="×"; x.title="Cancel";
       x.onclick=(ev)=>{ ev.stopPropagation(); API.cancel_item(it.id); };
@@ -609,7 +609,7 @@ async function queueTick(){
     }
     renderQueueSummary(counts);
     if(qModalOpen)renderQueueRows(p.items);
-    const rfBtn=$("qRetryFailedBtn"); if(rfBtn)rfBtn.disabled=!((counts.failed||0)>0);
+    const rfBtn=$("qRetryFailedBtn"); if(rfBtn)rfBtn.disabled=!((p.retryable_failed||0)>0);
     queuePending=p.pending||0;
     updateCancelBtn();
     queuePaused=!!p.paused;
@@ -644,7 +644,7 @@ async function queueTick(){
       // The finished line above already reports failures; drop the live
       // summary so the same count doesn't show twice in the footer.
       $("qSummary").textContent="";
-      if(footerRetry)footerRetry.style.display=failed>0?"":"none";
+      if(footerRetry)footerRetry.style.display=(p.retryable_failed||0)>0?"":"none";
       // A bare Compare changes no files, so skip the end-of-batch refresh;
       // refreshing would clear the colors it just drew.
       const bareCompare=compareJustFinished&&!batchHadTransfers; compareJustFinished=false; batchHadTransfers=false;
@@ -683,7 +683,7 @@ async function init(){
   $("qViewBtn").onclick=()=>{ qModalOpen=true; $("queueModal").classList.add("show");
     API.poll_queue().then(p=>{ lastProgressById=p.progress||{}; renderQueueRows(p.items); renderQueueSummary(p.counts);
       showDebugWarnings(p.debug_warnings,p.debug_enabled);
-      const rfBtn=$("qRetryFailedBtn"); if(rfBtn)rfBtn.disabled=!((p.counts&&p.counts.failed)>0); }); };
+      const rfBtn=$("qRetryFailedBtn"); if(rfBtn)rfBtn.disabled=!((p.retryable_failed||0)>0); }); };
   $("qCloseBtn").onclick=()=>{ qModalOpen=false; $("queueModal").classList.remove("show"); };
   $("qClearBtn").onclick=async()=>{ const r=await API.clear_finished(); renderQueueRows(r.items);
     // clear_finished doesn't return a counts object, so tally the trimmed
@@ -692,15 +692,15 @@ async function init(){
     // The footer poll stops once a batch ends, so Clear must reset the footer
     // itself, otherwise the old "Done:"/summary text lingers over an empty queue.
     renderQueueSummary(counts);
-    const rfBtn=$("qRetryFailedBtn"); if(rfBtn)rfBtn.disabled=!(counts.failed>0);
+    const rfBtn=$("qRetryFailedBtn"); if(rfBtn)rfBtn.disabled=!(counts.retryable_failed>0);
     const footerRetry=$("qRetryFailedFooterBtn"); if(footerRetry)footerRetry.style.display="none";
     if(!r.pending){ if(!sizeCalculating)$("qName").textContent="Idle"; $("qMeta").textContent=""; $("qFill").style.width="0%"; } };
-  $("qRetryFailedBtn").onclick=async()=>{ const r=await API.retry_all_failed(); if(r&&r.ok){ startQueuePoll();
+  $("qRetryFailedBtn").onclick=async()=>{ const r=await API.retry_all_failed(); if(!r||!r.ok){toast((r&&r.error)||"Could not retry failed items",true);return;} if(!r.requeued){toast("Nothing could be retried. Name clash rows need the file downloaded on its own into a different folder.",true);return;} startQueuePoll();
     const p=await API.poll_queue(); lastProgressById=p.progress||{}; renderQueueRows(p.items); renderQueueSummary(p.counts);
     showDebugWarnings(p.debug_warnings,p.debug_enabled);
-    $("qRetryFailedBtn").disabled=!((p.counts&&p.counts.failed)>0); } };
-  $("qRetryFailedFooterBtn").onclick=async()=>{ const r=await API.retry_all_failed(); if(r&&r.ok){
-    $("qRetryFailedFooterBtn").style.display="none"; startQueuePoll(); } };
+    $("qRetryFailedBtn").disabled=!((p.retryable_failed||0)>0); };
+  $("qRetryFailedFooterBtn").onclick=async()=>{ const r=await API.retry_all_failed(); if(!r||!r.ok){toast((r&&r.error)||"Could not retry failed items",true);return;} if(!r.requeued){toast("Nothing could be retried. Name clash rows need the file downloaded on its own into a different folder.",true);return;}
+    $("qRetryFailedFooterBtn").style.display="none"; startQueuePoll(); };
   $("compareBtn").onclick=onCompare; $("syncUpBtn").onclick=()=>onSync("upload"); $("syncDownBtn").onclick=()=>onSync("download");
   $("watchBtn").onclick=onWatch; $("cancelBtn").onclick=()=>API.cancel();
   $("pauseBtn").onclick=async()=>{ if(queuePaused){ const r=await API.resume_queue(); if(r&&!r.ok){ clog(r.error||"Could not resume","error"); return; } startQueuePoll(); } else { await API.pause_queue(); } };
@@ -1009,10 +1009,18 @@ async function startTransfer(direction,forceIdx){
   if(!jobs.length)return;
   // safe overwrite: detect name collisions on the destination
   const destSide=direction==="upload"?"remote":"local";
-  const destNames=new Set(state[destSide].entries.map(e=>e.name));
-  const collide=jobs.filter(j=>destNames.has(j.name));
+  let collide, matches;
+  if(direction==="download"){
+    const matched=await API.match_download_names(jobs.map(j=>j.name),state.local.entries.map(e=>e.name));
+    if(!matched||!matched.ok){toast((matched&&matched.error)||"Could not check destination names",true);return;}
+    matches=matched.matches||{};
+    collide=jobs.filter(j=>Object.prototype.hasOwnProperty.call(matches,j.name));
+  } else {
+    const destNames=new Set(state[destSide].entries.map(e=>e.name));
+    collide=jobs.filter(j=>destNames.has(j.name));
+  }
   let policy="overwrite";
-  if(collide.length){ const srcSide=direction==="upload"?"local":"remote"; const choice=await confirmDiff(collide,srcSide,destSide);
+  if(collide.length){ const srcSide=direction==="upload"?"local":"remote"; const choice=await confirmDiff(collide,srcSide,destSide,matches);
     if(choice===null)return; policy=choice; }
   const r=await API.enqueue(jobs,direction,state.local.cwd,state.remote.cwd,policy);
   if(!r.ok){ toast(r.error||"Could not queue the transfer",true); return; }
@@ -1191,10 +1199,11 @@ function confirm3(title,text,okLabel,altLabel){ return new Promise(res=>{ $("cfT
   ok.onclick=()=>{$("confirmModal").classList.remove("show");alt.style.display="none";res("overwrite");};
   alt.onclick=()=>{$("confirmModal").classList.remove("show");alt.style.display="none";res("skip");};
   cancel.onclick=()=>{$("confirmModal").classList.remove("show");alt.style.display="none";res(null);}; }); }
-function confirmDiff(collide,srcSide,destSide){
+function confirmDiff(collide,srcSide,destSide,matches){
   const rows=collide.map(j=>{
     if(j.is_dir) return `<tr><td class="name">${esc(j.name)}<span class="meta" style="color:var(--text-dim);font-size:10px;border:1px solid var(--border);border-radius:4px;padding:1px 5px;margin-left:6px">folder</span></td><td class="size"><span class="dash">-</span></td><td class="size"><span class="dash">-</span></td><td><span class="dash">-</span></td></tr>`;
-    const loc=state.local.entries.find(e=>e.name===j.name), rem=state.remote.entries.find(e=>e.name===j.name);
+    const localName=(matches&&matches[j.name])||j.name;
+    const loc=state.local.entries.find(e=>e.name===localName), rem=state.remote.entries.find(e=>e.name===j.name);
     const locCell=loc?`${hsize(loc.size)}<br>${fmod(loc.mtime)}`:'<span class="dash">-</span>';
     const remCell=rem?`${hsize(rem.size)}<br>${fmod(rem.mtime)}`:'<span class="dash">-</span>';
     let newer='<span class="dash">-</span>';
