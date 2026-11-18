@@ -7,7 +7,8 @@ import threading
 import posixpath
 from app import constants
 from app.errors import friendly_error
-from app.paths import is_temp_part, safe_local_child, windows_destination_key
+from app.paths import safe_local_child, windows_destination_key
+from app.scratch_journal import is_active_local
 
 
 def _register_scan(api):
@@ -93,6 +94,9 @@ def _iter_local(api, lp, rp, is_dir, problems=None, include_dirs=False):
     (compare/sync) can tell; the default of None keeps the ordinary
     transfer scan's current behavior (log and continue) unchanged."""
     if not is_dir:
+        if is_active_local(lp):
+            api._worker_log(f"skipped {lp}: a download is still writing this scratch file", "info")
+            return False
         try:
             st = os.stat(lp)
             size, mtime = st.st_size, int(st.st_mtime)
@@ -106,7 +110,7 @@ def _iter_local(api, lp, rp, is_dir, problems=None, include_dirs=False):
     try:
         with os.scandir(lp) as it:
             for entry in it:
-                if is_temp_part(entry.name):
+                if is_active_local(entry.path):
                     continue
                 rchild = posixpath.join(rp, entry.name)
                 try:
@@ -171,6 +175,9 @@ def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=Fa
     only subfolder names, not the whole level, so the giant-flat-directory
     case (no subfolders) stays effectively unbuffered."""
     if not is_dir:
+        if api._is_active_remote_scratch(rp):
+            api._worker_log(f"skipped {rp}: an upload is still writing this scratch file", "info")
+            return False
         size, mtime = api._rstat(sftp, rp)
         yield (lp, rp, size, mtime, False)
         return True
@@ -179,9 +186,9 @@ def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=Fa
     siblings = {}
     try:
         for a in sftp.listdir_iter(rp):
-            if is_temp_part(a.filename):
-                continue
             rchild = posixpath.join(rp, a.filename)
+            if api._is_active_remote_scratch(rchild):
+                continue
             try:
                 lchild = safe_local_child(lp, a.filename, root)
             except ValueError as e:

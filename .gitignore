@@ -1,6 +1,10 @@
 # Saved sessions (host / user / key paths; never passwords) - keep private
 servers.json
 
+# Download scratch ownership journal
+scratch-journal.json
+scratch-journal.lock
+
 # Pinned SSH host keys (trust-on-first-use store)
 known_hosts
 

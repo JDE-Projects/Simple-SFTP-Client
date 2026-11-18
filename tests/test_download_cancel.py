@@ -1,11 +1,11 @@
 """Regression tests for bounded, cancellable SFTP downloads."""
 import os
+import re
 import threading
 import time
 
 import paramiko
 
-from app.paths import is_temp_part
 from app.services import transfer_io
 
 THROTTLED_BYTES_PER_SECOND = 5 * 1024 * 1024
@@ -58,7 +58,8 @@ def test_cancel_over_throttled_link_finishes_within_bound(sftp_env, monkeypatch)
     assert progress[-1] >= CANCEL_AFTER_BYTES
     assert elapsed < 6.5
     assert not destination.exists()
-    assert not any(is_temp_part(path.name) for path in local_dir.iterdir())
+    assert not any(re.fullmatch(r"\..+\.[0-9a-f]{8}\.sxtpart", path.name)
+                   for path in local_dir.iterdir())
 
 
 def test_cancel_after_first_chunk_then_session_close_leaves_no_prefetch_thread_or_crash(sftp_env):

@@ -1,7 +1,6 @@
 import ntpath
 import os
 import posixpath
-import re
 import sys
 
 
@@ -88,29 +87,10 @@ def local_link_target(path: str):
 
 TEMP_PART_SUFFIX = ".sxtpart"
 
-# Match only the exact shape local_temp_path / remote_temp_path build:
-# a leading dot, the original name, a dot, 8 lowercase hex characters from
-# os.urandom(4).hex(), then the suffix. Matching a bare ".sxtpart" suffix
-# would hide and later delete an ordinary user file that happened to end
-# that way; the full convention is what marks a file as ours to remove.
-# fullmatch (not match + "$") so a name ending in a literal newline before
-# the suffix cannot slip through: "$" would anchor before that newline.
-_TEMP_PART_RE = re.compile(r"\..+\.[0-9a-f]{8}" + re.escape(TEMP_PART_SUFFIX))
-
-
-def is_temp_part(name: str) -> bool:
-    """True for one of this app's own in-progress transfer scratch files, so
-    every place that lists a folder can hide a file still being written
-    (download or upload) instead of showing it, picking it up as a transfer
-    target, or letting it skew a Compare/Sync. Recognizing our own reserved
-    name shape is not a claim of ownership over any file matching it."""
-    return bool(name) and _TEMP_PART_RE.fullmatch(name) is not None
-
-
 def local_temp_path(final_path: str) -> str:
     """Build the local scratch path a download streams into before the
     atomic swap: a sibling of final_path in the same folder (so the final
-    os.replace stays on one drive), named so is_temp_part recognizes it."""
+    os.replace stays on one drive)."""
     folder = os.path.dirname(final_path)
     name = os.path.basename(final_path)
     return os.path.join(folder, f".{name}.{os.urandom(4).hex()}{TEMP_PART_SUFFIX}")
@@ -125,6 +105,10 @@ def remote_temp_path(final_path: str) -> str:
 
 
 SESSIONS_FILE = os.path.join(exe_dir(), "servers.json")
+
+SCRATCH_JOURNAL_FILE = os.path.join(exe_dir(), "scratch-journal.json")
+
+SCRATCH_LOCK_FILE = os.path.join(exe_dir(), "scratch-journal.lock")
 
 KNOWN_HOSTS_FILE = os.path.join(exe_dir(), "known_hosts")
 

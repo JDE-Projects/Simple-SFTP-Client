@@ -40,6 +40,9 @@ class _FakeApi:
     def _worker_log(self, message, *args, **kwargs):
         self.logs.append(message)
 
+    def _is_active_remote_scratch(self, _path):
+        return False
+
     def _iter_remote(self, *args, **kwargs):
         return _iter_remote(self, *args, **kwargs)
 

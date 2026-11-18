@@ -9,7 +9,6 @@ from app.debug import log_event
 from app.errors import InvalidPort, KeyUnusable, KnownHostsUnreadable, UnknownHostKey, error_tips, friendly_error
 from app.formatting import negotiated_summary
 from app.hostkeys import _TofuPolicy, _known_hosts_readable_or_raise, _save_host_keys_atomic, fingerprint_sha256, hostkey_name, load_known_hosts
-from app.paths import is_temp_part
 from app.validation import INVALID_PORT_ERROR, missing_fields, parse_port
 
 
@@ -153,7 +152,6 @@ def connect(api, p):
         if negotiated:
             api._vlog(f"Negotiated: {negotiated}")
         api._vlog(f"SFTP session opened, home folder {home}", "ok", "connected")
-        api._sweep_scratch_files()
         return {"ok": True, "home": home, "cwd": start, "transport": ti}
     except UnknownHostKey as e:
         api._cred_pass = ""
@@ -196,38 +194,6 @@ def connect(api, p):
         api._close_partial(new_client, new_sftp)
         log_event("connect failed", error=e)
         return {"ok": False, "error": friendly_error(e), "tips": error_tips(e)}
-
-
-def _sweep_scratch_files(api):
-    """Remove leftover .sxtpart scratch files (task 3's is_temp_part /
-    local_temp_path) from the local folder currently browsed. Scoped to
-    that one folder, not a recursive or whole-drive sweep: it is the
-    only place this app's own scratch files are ever written (a sibling
-    of the real file mid-download), so a narrower sweep can't be right
-    and a wider one risks touching a folder the user never asked about.
-    Runs after every successful connect in case the app was killed or
-    lost power mid-transfer and never reached its own atomic-swap
-    cleanup or the delete in the download failure path."""
-    folder = api._local_cwd or os.path.expanduser("~")
-    if not folder or folder == "DRIVES" or not os.path.isdir(folder):
-        return
-    swept = []
-    try:
-        names = os.listdir(folder)
-    except Exception as e:
-        log_event("scratch sweep list failed", error=e)
-        return
-    for name in names:
-        if not is_temp_part(name):
-            continue
-        full = os.path.join(folder, name)
-        try:
-            os.remove(full)
-            swept.append(name)
-        except Exception as e:
-            log_event("scratch sweep remove failed", error=e)
-    if swept:
-        api._vlog(f"Swept {len(swept)} leftover scratch file(s) from {folder}", "warn", "scratch sweep", items=len(swept))
 
 
 def trust_host_key(api):

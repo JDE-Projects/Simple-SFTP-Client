@@ -18,7 +18,7 @@ import types
 
 import paramiko
 
-from app.paths import is_temp_part
+from app import scratch_journal
 
 
 # ───────────── shared browsing session serialization ─────────────
@@ -374,7 +374,7 @@ def test_watch_does_not_upload_its_own_scratch_files(sftp_env, wait_until):
     api, server_root, local_dir = sftp_env
     api._watch_interval = 0.05
     scratch = local_dir / ".hidden.deadbeef.sxtpart"
-    assert is_temp_part(scratch.name)
+    scratch_journal.current.register(str(scratch), str(local_dir / "hidden"))
 
     assert api.start_watch(str(local_dir), "/")["ok"] is True
     scratch.write_bytes(b"partial data, never meant to be sent")
@@ -388,7 +388,7 @@ def test_watch_does_not_upload_its_own_scratch_files(sftp_env, wait_until):
     api.stop_watch()
 
     assert not (server_root / scratch.name).exists()
-    assert [n for n in os.listdir(server_root) if is_temp_part(n)] == []
+    assert not (server_root / scratch.name).exists()
 
 
 def test_start_watch_refused_while_previous_watch_thread_still_alive(sftp_env):
