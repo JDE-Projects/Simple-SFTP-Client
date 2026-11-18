@@ -17,6 +17,7 @@ function select(side,list){ const s=state[side]; s.sel=new Set(list.map(n=>s.ent
 async function clickOk(){ await waitFor(()=>$("confirmModal").classList.contains("show"),3000); $("cfOk").click(); }
 const batchDone=()=>waitFor(()=>$("qMeta").textContent.startsWith("Done:")&&queuePending===0,20000);
 const consoleText=()=>$("console").textContent;
+const consoleLines=()=>[...document.querySelectorAll("#console .cline")].map(el=>el.textContent);
 try{
   await waitFor(()=>typeof API!=="undefined"&&API);
   const bottom=document.querySelector(".bottom-bar"), q=document.querySelector(".queue"), barIds=[...bottom.querySelectorAll("[id]")].map(el=>el.id).sort();
@@ -39,6 +40,52 @@ try{
   ok("setup: connected, remote at /",()=>connected&&state.remote.cwd==="/");
   await loadLocal(T.local);
   ok("setup: local pane at the test folder",()=>state.local.cwd===T.local,()=>state.local.cwd);
+
+  const originalPrompt2=prompt2;
+  const localFile=()=>state.local.entries.find(e=>e.name==="a.txt");
+  const remoteFile=()=>state.remote.entries.find(e=>e.name==="report.txt");
+  const parentEntries=async()=>await API.list_local(T.local+"\\..");
+
+  const c1Log=consoleText().length;
+  prompt2=async()=>"..\\escaped.txt";
+  await renameItem("local",localFile());
+  prompt2=originalPrompt2;
+  const c1Parent=await parentEntries();
+  ok("C1: local rename refusal is shown and stays in the local folder",()=>consoleText().slice(c1Log).includes("Rename failed:")&&consoleText().slice(c1Log).includes("can't be used here")&&!c1Parent.entries.some(e=>e.name==="escaped.txt"),()=>consoleText().slice(c1Log));
+
+  const c2Log=consoleText().length;
+  prompt2=async()=>"..\\escaped";
+  await newFolder("local");
+  prompt2=originalPrompt2;
+  const c2Parent=await parentEntries();
+  ok("C2: local new-folder refusal is shown and creates nothing",()=>consoleText().slice(c2Log).includes("New folder failed:")&&consoleText().slice(c2Log).includes("can't be used here")&&!c2Parent.entries.some(e=>e.name==="escaped"),()=>consoleText().slice(c2Log));
+
+  const c3Log=consoleText().length, c3Before=names("remote").slice().sort().join("|");
+  prompt2=async()=>"../escaped.txt";
+  await renameItem("remote",remoteFile());
+  prompt2=originalPrompt2;
+  const c3After=await API.list_remote(state.remote.cwd);
+  ok("C3: remote rename refusal is shown and leaves the listing unchanged",()=>consoleText().slice(c3Log).includes("Rename failed:")&&consoleText().slice(c3Log).includes("can't be used here")&&c3Before===c3After.entries.map(e=>e.name).sort().join("|"),()=>consoleText().slice(c3Log));
+
+  const hostileOpen={name:"..\\x",is_dir:false,size:0,mtime:0};
+  state.local.entries.push(hostileOpen); renderPane("local");
+  const c4Log=consoleText().length;
+  const openRow=[...$("bodyLocal").querySelectorAll("tr")].find(row=>row.textContent.includes(hostileOpen.name));
+  await openRow.ondblclick();
+  const doubleClickLogged=await waitFor(()=>consoleText().slice(c4Log).includes("Open failed:")&&consoleText().slice(c4Log).includes("can't be used here"),3000);
+  const c4ContextLog=consoleText().length;
+  showCtx({clientX:0,clientY:0},"local",hostileOpen);
+  [...$("ctx").querySelectorAll("button")].find(button=>button.textContent==="Open").click();
+  const contextLogged=await waitFor(()=>consoleText().slice(c4ContextLog).includes("Open failed:")&&consoleText().slice(c4ContextLog).includes("can't be used here"),3000);
+  ok("C4: hostile local Open reports refusal from double-click and context menu",()=>doubleClickLogged&&contextLogged,()=>consoleText().slice(c4Log));
+
+  await fs("write",{path:T.local+"\\delete-real.txt",data:"delete"}); await loadLocal(T.local);
+  const hostileDelete={name:"..",is_dir:true,size:0,mtime:0};
+  state.local.entries.push(hostileDelete); renderPane("local"); select("local",[hostileDelete.name,"delete-real.txt"]);
+  const c5Log=consoleLines().length, deleting=deleteSel("local"); await clickOk(); await deleting;
+  const c5Deleted=await waitFor(async()=>!(await API.list_local(T.local)).entries.some(e=>e.name==="delete-real.txt"),3000);
+  const c5Lines=consoleLines().slice(c5Log);
+  ok("C5: mixed delete reports the hostile name separately and deletes the real file",()=>c5Deleted&&c5Lines.some(line=>line.includes("Deleted 1/2 from local, 1 could not be deleted"))&&c5Lines.some(line=>line.includes("..:")&&line.includes("can't be used here")),()=>c5Lines.join(" | "));
 
   select("remote",["report.txt"]);
   const namePrompt=startTransfer("download");

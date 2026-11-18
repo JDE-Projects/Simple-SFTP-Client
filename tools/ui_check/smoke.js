@@ -138,6 +138,25 @@ export default async function smoke(helpers) {
   // folder the local pane is showing.
   await evaluate(`API.list_local(${JSON.stringify(fixture.local_dir)})`);
 
+  // c3) a rename typed as a path that would leave the shown folder is
+  // refused with a plain message, and nothing appears beside the folder.
+  const renameStart = await evaluate(`$("console").textContent.length`);
+  await evaluate(`renameItem("local", state.local.entries.find(e=>e.name===${JSON.stringify(uploadName)})), true`);
+  await waitFor("$('promptModal').classList.contains('show')", 5000);
+  await type("#pmInput", "..\\escaped.txt");
+  await click("#pmOk");
+  const refused = await waitFor(`$("console").textContent.slice(${renameStart}).includes("Rename failed:")`, 10000)
+    .then(() => true).catch(() => false);
+  const refusalText = await evaluate(`$("console").textContent.slice(${renameStart})`);
+  check("a rename that would leave the shown folder is refused with a plain message",
+    refused && refusalText.includes("can't be used here"), refusalText);
+  const besideFolder = await evaluate(`API.list_local(${JSON.stringify(fixture.local_dir + "\\..")})`);
+  const stillHere = await evaluate(`API.list_local(${JSON.stringify(fixture.local_dir)})`);
+  check("the refused rename moved nothing out of the folder",
+    !!(besideFolder && besideFolder.ok && !besideFolder.entries.some((e) => e.name === "escaped.txt")
+      && stillHere && stillHere.ok && stillHere.entries.some((e) => e.name === uploadName)),
+    JSON.stringify(besideFolder && besideFolder.entries.map((e) => e.name)));
+
   // d) error path: connect to a closed port shows a plain-language message.
   await click("#connBtn"); // currently connected: this disconnects
   await waitFor("connected === false", 10000);
@@ -190,7 +209,7 @@ export default async function smoke(helpers) {
     check(`debug log records the fixed event: ${JSON.stringify(event)}`, logText.includes(event));
   }
   const forbidden = [fixture.password, "127.0.0.1", fixture.local_dir, fixture.link_target,
-    "fixture_local", "fixture_server", fixture.link_folder, fixture.link_file,
+    "fixture_local", "fixture_server", "escaped.txt", fixture.link_folder, fixture.link_file,
     ...fixture.server_files, ...fixture.local_files];
   const leaked = forbidden.filter((v) => v && logText.includes(v));
   if (new RegExp(`\\b${fixture.user}\\b(?! connection)`).test(logText)) leaked.push(fixture.user);
