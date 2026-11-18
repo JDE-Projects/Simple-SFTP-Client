@@ -316,6 +316,9 @@ class Api:
     def retry_all_failed(self):
         return services.transfers.retry_all_failed(self)
 
+    def match_download_names(self, remote_names, local_names):
+        return services.transfers.match_download_names(self, remote_names, local_names)
+
     def pause_queue(self):
         return services.transfers.pause_queue(self)
 

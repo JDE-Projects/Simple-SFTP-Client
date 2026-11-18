@@ -4,10 +4,12 @@ import stat
 import threading
 import time
 
+from app.api import Api
 from app.services.compare_sync import _stream_sync_transfers
 from app.services.scanning import _iter_remote
 from app.services.transfers import _download_claims
 from app.transfer_queue import ACTIVE, FAILED, WAITING, TransferQueue
+from simple_sftp_client import APP_VERSION
 
 
 class _FakeAttr:
@@ -195,6 +197,40 @@ def test_snapshot_reports_retryable():
     q = TransferQueue()
     q.append("upload", "L/file", "/file", "file")
     assert q.snapshot()[0]["retryable"] is True
+
+
+def test_retryable_failed_counts_only_retryable_rows():
+    q = TransferQueue()
+    q.add_clash("download", "L/report.txt", "/b/report.txt", "report.txt", "/a/Report.txt", False)
+    item_id = q.append("upload", "L/file", "/file", "file")
+    q.claim()
+    q.mark_failed(item_id, "network")
+
+    counts = q.counts()
+
+    assert counts[FAILED] == 2
+    assert q.retryable_failed() == 1
+    assert "retryable_failed" not in counts
+
+
+def test_match_download_names_case_variants():
+    result = Api(APP_VERSION).match_download_names(["report.txt"], ["Report.txt"])
+
+    assert result == {"ok": True, "matches": {"report.txt": "Report.txt"}}
+
+
+def test_match_download_names_exact_and_none():
+    result = Api(APP_VERSION).match_download_names(
+        ["report.txt", "other.txt"], ["report.txt", "different.txt"]
+    )
+
+    assert result == {"ok": True, "matches": {"report.txt": "report.txt"}}
+
+
+def test_match_download_names_unicode_forms_distinct():
+    result = Api(APP_VERSION).match_download_names(["caf\u00e9.txt"], ["cafe\u0301.txt"])
+
+    assert result == {"ok": True, "matches": {}}
 
 
 def test_concurrent_admits_admit_one_source_per_key():

@@ -66,11 +66,14 @@ def make_fixture(work):
         (os.path.join(other_local, "up.txt"), "up"),
         (os.path.join(server_root, "0dl.txt"), "d0"),
         (os.path.join(server_root, "dl1.txt"), "d1"),
+        (os.path.join(server_root, "report.txt"), "remote"),
         (os.path.join(server_root, "other", "o.txt"), "o"),
     ]
     for path, data in files:
         with open(path, "w") as f:
             f.write(data)
+    with open(os.path.join(local, "Report.txt"), "w") as f:
+        f.write("local")
     return server_root, {"local": local, "sub": os.path.join(local, "sub"), "other": other_local}
 
 
@@ -96,7 +99,9 @@ def main(argv):
         print("Microsoft Edge not found; cannot run the UI check.")
         return 2
 
-    work = tempfile.mkdtemp(prefix="sftp-ui-check-")
+    work = tempfile.mkdtemp(
+        prefix="sftp-ui-check-", dir=os.environ.get("SFTP_UI_CHECK_TEMP_DIR")
+    )
     server_root, targets = make_fixture(work)
     fs_cls = sftp_server_core.make_fs(server_root)
     srv_sock, port = sftp_server_core.start(fs_cls, paramiko.RSAKey.generate(2048))
@@ -175,6 +180,27 @@ def main(argv):
                     return self._send({"ok": True})
                 if op == "calls":
                     return self._send(dict(calls))
+                if op == "queue_clash":
+                    api._queue.add_clash(
+                        "download", r"C:\ui-check\report.txt", "/report.txt",
+                        "report.txt", "/Report.txt", False,
+                    )
+                    return self._send({"ok": True})
+                if op == "queue_retry_refusal":
+                    api._queue.clear_finished()
+                    first, _ = api._queue.admit(
+                        "download", r"C:\ui-check\Report.txt", "/one/Report.txt",
+                        "Report.txt", 0, "overwrite", False,
+                        ((r"C:\UI-CHECK\REPORT.TXT", "file", "/one/Report.txt"),),
+                    )
+                    api._queue.claim()
+                    api._queue.mark_failed(first, "network")
+                    api._queue.admit(
+                        "download", r"C:\ui-check\report.txt", "/two/report.txt",
+                        "report.txt", 0, "overwrite", False,
+                        ((r"C:\UI-CHECK\REPORT.TXT", "file", "/two/report.txt"),),
+                    )
+                    return self._send({"ok": True, "item_id": first})
             if self.path == "/report":
                 results.update(body)
                 done.set()

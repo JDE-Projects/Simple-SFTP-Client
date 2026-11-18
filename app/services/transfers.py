@@ -12,6 +12,23 @@ from app.paths import local_link_target, safe_local_child, windows_destination_k
 from app.workers import worker_target
 
 
+def match_download_names(api, remote_names, local_names):
+    """Match sibling names that would resolve to one Windows destination."""
+    folder = r"C:\simple-sftp-name-match"
+    local_by_key = {
+        windows_destination_key(os.path.join(folder, name)): name
+        for name in local_names
+    }
+    matches = {}
+    for remote_name in remote_names:
+        local_name = local_by_key.get(
+            windows_destination_key(os.path.join(folder, remote_name))
+        )
+        if local_name is not None:
+            matches[remote_name] = local_name
+    return {"ok": True, "matches": matches}
+
+
 def cancel(api):
     """Cancel-all, wired to the footer Cancel button: cancels every waiting
     queue item and flags every active one so each worker's byte loop stops
@@ -93,6 +110,7 @@ def poll_queue(api):
         "compare_found": api._compare_found_total(),
         "compare_done": compare_done,
         "counts": api._queue.counts(),
+        "retryable_failed": api._queue.retryable_failed(),
         "debug_warnings": api._drain_debug_warnings(),
         "debug_enabled": debug.is_enabled(),
     }

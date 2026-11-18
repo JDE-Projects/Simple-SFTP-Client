@@ -318,6 +318,12 @@ class TransferQueue:
                 for item in self._items
             ]
 
+    def retryable_failed(self):
+        """How many FAILED items Retry can still put back in line. Kept out
+        of counts(), whose values are one total per state."""
+        with self._lock:
+            return sum(1 for item in self._items if item.state == FAILED and item.retryable)
+
     def counts(self):
         with self._lock:
             result = {state: 0 for state in ALL_STATES}
