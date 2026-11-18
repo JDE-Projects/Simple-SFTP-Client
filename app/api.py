@@ -2,6 +2,7 @@
 
 import threading
 import functools
+import posixpath
 
 
 from app import services
@@ -47,6 +48,8 @@ class Api:
         # call can nest another (see _browsing). Transfer workers and the
         # scanner use their own sessions and are intentionally not on this lock.
         self._sftp_lock = threading.RLock()
+        self._active_remote_scratch = set()
+        self._active_remote_scratch_lock = threading.Lock()
         self._cancel = threading.Event()
         # Watcher lifecycle. _watch_lock guards start/stop/replace of the two
         # fields below so a stop can never null them while a restart is setting
@@ -109,10 +112,6 @@ class Api:
         # later disconnect runs the full sequence again.
         self._shutdown_lock = threading.Lock()
         self._shutdown_done = False
-        # Last folder list_local() actually listed (never the synthetic
-        # "DRIVES" placeholder); connect() sweeps this folder for leftover
-        # .sxtpart scratch files. See _sweep_scratch_files.
-        self._local_cwd = None
         # First worker to notice the shared transport itself is dead (as
         # opposed to one file failing) reports it and stops the batch; this
         # keeps that report to one console line instead of one per worker.
@@ -198,9 +197,6 @@ class Api:
 
     def connect(self, p):
         return services.connections.connect(self, p)
-
-    def _sweep_scratch_files(self):
-        return services.connections._sweep_scratch_files(self)
 
     def trust_host_key(self):
         return services.connections.trust_host_key(self)
@@ -353,6 +349,18 @@ class Api:
 
     def _put_file(self, sftp, lp, rp, cb, cancel_check):
         return services.transfer_io._put_file(self, sftp, lp, rp, cb, cancel_check)
+
+    def _add_active_remote_scratch(self, path):
+        with self._active_remote_scratch_lock:
+            self._active_remote_scratch.add(posixpath.normpath(path))
+
+    def _discard_active_remote_scratch(self, path):
+        with self._active_remote_scratch_lock:
+            self._active_remote_scratch.discard(posixpath.normpath(path))
+
+    def _is_active_remote_scratch(self, path):
+        with self._active_remote_scratch_lock:
+            return posixpath.normpath(path) in self._active_remote_scratch
 
     def _get_file(self, sftp, rp, lp, cb, cancel_check):
         return services.transfer_io._get_file(self, sftp, rp, lp, cb, cancel_check)

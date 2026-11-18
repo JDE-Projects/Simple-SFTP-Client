@@ -10,6 +10,7 @@ posix-rename-unsupported variant, sftp_env_no_posix_rename).
 import builtins
 import errno
 import os
+import re
 import stat
 import time
 from pathlib import Path
@@ -18,17 +19,20 @@ import paramiko
 import pytest
 
 from app import scratch_journal
-from app.paths import is_temp_part
 from app.services import transfer_io
 from app.transfer_queue import CANCELLED, COMPLETED, FAILED, WAITING
 
 
 def _local_temp_files(folder):
-    return [n for n in os.listdir(folder) if is_temp_part(n)]
+    return [n for n in os.listdir(folder) if _matches_scratch_name(n)]
 
 
 def _remote_temp_files(server_root):
-    return [n for n in os.listdir(server_root) if is_temp_part(n)]
+    return [n for n in os.listdir(server_root) if _matches_scratch_name(n)]
+
+
+def _matches_scratch_name(name):
+    return re.fullmatch(r"\..+\.[0-9a-f]{8}\.sxtpart", name) is not None
 
 
 def _wait_until_active(api, item_id, state_of, timeout=15):
@@ -195,7 +199,7 @@ def test_download_does_not_delete_replaced_scratch(sftp_env, monkeypatch, tmp_pa
                               lambda *_: (_ for _ in ()).throw(RuntimeError("stop")),
                               lambda: False)
     assert replaced and Path(replaced[0]).read_bytes() == b"replacement"
-    assert scratch_journal.current.owns(replaced[0])
+    assert not scratch_journal.current.owns(replaced[0])
 
 
 def test_download_name_collision_retries(sftp_env, monkeypatch):
@@ -512,7 +516,7 @@ def test_upload_overwrite_chmods_scratch_to_target_mode_before_rename(
     assert (server_root / name).read_bytes() == b"NEW CONTENT"
     assert len(chmod_calls) == 1
     chmod_path, chmod_mode = chmod_calls[0]
-    assert is_temp_part(os.path.basename(chmod_path))
+    assert _matches_scratch_name(os.path.basename(chmod_path))
     assert chmod_mode == expected_mode
     # the chmod on the scratch file must land before it is swapped in
     assert chmod_path == rename_calls[0][0]
@@ -670,25 +674,29 @@ def test_upload_refuses_when_target_reports_no_permissions(
 def test_list_local_hides_temp_part_files(sftp_env):
     api, server_root, local_dir = sftp_env
     (local_dir / "real.bin").write_bytes(b"data")
-    (local_dir / ".real.bin.deadbeef.sxtpart").write_bytes(b"partial")
+    scratch = local_dir / ".real.bin.deadbeef.sxtpart"
+    scratch.write_bytes(b"partial")
+    scratch_journal.current.register(str(scratch), str(local_dir / "real.bin"))
 
     result = api.list_local(str(local_dir))
     assert result["ok"] is True
     names = [e["name"] for e in result["entries"]]
     assert "real.bin" in names
-    assert not any(is_temp_part(n) for n in names)
+    assert scratch.name not in names
 
 
 def test_list_remote_hides_temp_part_files(sftp_env):
     api, server_root, local_dir = sftp_env
     (server_root / "real.bin").write_bytes(b"data")
-    (server_root / ".real.bin.deadbeef.sxtpart").write_bytes(b"partial")
+    scratch = "/.real.bin.deadbeef.sxtpart"
+    (server_root / scratch[1:]).write_bytes(b"partial")
+    api._add_active_remote_scratch(scratch)
 
     result = api.list_remote("/")
     assert result["ok"] is True
     names = [e["name"] for e in result["entries"]]
     assert "real.bin" in names
-    assert not any(is_temp_part(n) for n in names)
+    assert scratch[1:] not in names
 
 
 def test_delete_remote_folder_removes_leftover_scratch_file(sftp_env):
@@ -805,10 +813,15 @@ def test_compare_hides_temp_part_files_on_both_sides(sftp_env):
     api, server_root, local_dir = sftp_env
     (local_dir / "same.bin").write_bytes(b"AAAA")
     (server_root / "same.bin").write_bytes(b"AAAA")
-    (local_dir / ".same.bin.deadbeef.sxtpart").write_bytes(b"scratch")
-    (server_root / ".other.bin.cafebabe.sxtpart").write_bytes(b"scratch")
+    local_scratch = local_dir / ".same.bin.deadbeef.sxtpart"
+    local_scratch.write_bytes(b"scratch")
+    scratch_journal.current.register(str(local_scratch), str(local_dir / "same.bin"))
+    remote_scratch = "/.other.bin.cafebabe.sxtpart"
+    (server_root / remote_scratch[1:]).write_bytes(b"scratch")
+    api._add_active_remote_scratch(remote_scratch)
 
     data = api._compute_compare(api._sftp, str(local_dir), "/")
     assert data is not None
-    assert not any(is_temp_part(n) for n in data["files"])
+    assert ".same.bin.deadbeef.sxtpart" not in data["files"]
+    assert ".other.bin.cafebabe.sxtpart" not in data["files"]
     assert data["files"]["same.bin"] == "same"

@@ -10,6 +10,7 @@ import json
 import msvcrt
 import os
 import re
+import stat
 import threading
 
 from app import paths
@@ -177,6 +178,52 @@ class ScratchJournal:
         with self._lock:
             return path_key(path) in self._owned
 
+    def recover(self):
+        """Remove only leftovers whose recorded file identity still proves ownership."""
+        deleted = 0
+        left_in_place = []
+        unreachable = []
+        with self._lock:
+            for entry in list(self._entries):
+                if not self._valid_entry(entry):
+                    continue
+                scratch = entry["scratch"]
+                try:
+                    current_stat = os.lstat(scratch)
+                except FileNotFoundError:
+                    self._entries.remove(entry)
+                    self._owned.pop(path_key(scratch), None)
+                    continue
+                except OSError as error:
+                    unreachable.append(scratch)
+                    log_event("scratch recovery unreachable", error=error)
+                    continue
+                identity = entry["identity"]
+                current_identity = [current_stat.st_dev, current_stat.st_ino]
+                if (identity is None or not stat.S_ISREG(current_stat.st_mode)
+                        or current_identity != identity):
+                    left_in_place.append(scratch)
+                    self._entries.remove(entry)
+                    self._owned.pop(path_key(scratch), None)
+                    log_event("scratch recovery left in place")
+                    continue
+                try:
+                    os.remove(scratch)
+                except FileNotFoundError:
+                    self._entries.remove(entry)
+                    self._owned.pop(path_key(scratch), None)
+                except OSError as error:
+                    log_event("scratch recovery delete failed", error=error)
+                else:
+                    deleted += 1
+                    self._entries.remove(entry)
+                    self._owned.pop(path_key(scratch), None)
+            if not self._write(durable=False):
+                log_event("scratch journal write failed",
+                          error=OSError("could not update scratch journal"))
+        return {"deleted": deleted, "left_in_place": left_in_place,
+                "unreachable": unreachable}
+
     def entries(self):
         with self._lock:
             return copy.deepcopy(self._entries)
@@ -199,3 +246,8 @@ class ScratchJournal:
 
 
 current = None
+
+
+def is_active_local(path):
+    """True only when the active journal has recorded this local scratch file."""
+    return current is not None and current.owns(path)

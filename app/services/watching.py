@@ -6,7 +6,7 @@ import threading
 import posixpath
 from app.debug import log_event
 from app.errors import friendly_error
-from app.paths import is_temp_part
+from app.scratch_journal import is_active_local
 
 
 def start_watch(api, local_dir, remote_dir):
@@ -28,7 +28,7 @@ def start_watch(api, local_dir, remote_dir):
     working one, and the remote file's modification time is stamped from
     the local source on success. A server that cannot do that atomic swap
     has the upload refused rather than risking a partial file. The watch
-    snapshot skips this app's own scratch files, so a transfer in progress
+    snapshot skips active local scratch files, so a transfer in progress
     is never mistaken for a new local change.
 
     A stop only clears the watcher's shared state once its thread has
@@ -58,9 +58,9 @@ def start_watch(api, local_dir, remote_dir):
         snap = {}
         for root, _d, files in os.walk(local_dir):
             for fn in files:
-                if is_temp_part(fn):
-                    continue
                 fp = os.path.join(root, fn)
+                if is_active_local(fp):
+                    continue
                 try:
                     st = os.stat(fp)
                     snap[fp] = (st.st_mtime, st.st_size)

@@ -11,7 +11,7 @@ import time
 
 from app import constants
 from app.api import Api
-from app.paths import is_temp_part
+from app import scratch_journal
 from app.transfer_queue import COMPLETED
 from simple_sftp_client import APP_VERSION
 
@@ -105,10 +105,11 @@ def test_folder_upload_leaves_out_local_scratch_files(sftp_env, wait_for_drain):
     queue it or copy it to the server."""
     api, server_root, local_dir = sftp_env
     scratch = ".a.bin.0123abcd.sxtpart"
-    assert is_temp_part(scratch)
     (local_dir / "top").mkdir()
     (local_dir / "top" / "a.bin").write_bytes(os.urandom(500))
     (local_dir / "top" / scratch).write_bytes(os.urandom(200))
+    scratch_journal.current.register(str(local_dir / "top" / scratch),
+                                     str(local_dir / "top" / "a.bin"))
 
     result = api.enqueue([{"name": "top", "is_dir": True}], "upload",
                           str(local_dir), "/", "overwrite")
@@ -204,8 +205,10 @@ def test_iter_local_yields_every_file_in_a_nested_tree_in_any_order(tmp_path):
     (root / "mid" / "c.bin").write_bytes(b"c" * 30)
     (root / "mid" / "deep").mkdir()
     (root / "mid" / "deep" / "d.bin").write_bytes(b"d" * 40)
-    # in-progress transfer scratch file must stay hidden
-    (root / ".e.bin.deadbeef.sxtpart").write_bytes(b"e" * 50)
+    # An active scratch file stays hidden.
+    scratch = root / ".e.bin.deadbeef.sxtpart"
+    scratch.write_bytes(b"e" * 50)
+    scratch_journal.current.register(str(scratch), str(root / "e.bin"))
     # distinct, known mtimes so the 4th field can be asserted exactly, not
     # just type-checked
     stamps = {
@@ -268,7 +271,7 @@ def test_iter_remote_yields_every_file_in_a_nested_tree_in_any_order(tmp_path):
     }
 
 
-def test_iter_remote_skips_temp_parts_and_confines_hostile_names(tmp_path):
+def test_iter_remote_skips_active_scratch_and_confines_hostile_names(tmp_path):
     api = Api(APP_VERSION)
     root = str(tmp_path)
     sftp = _FakeSftp({
@@ -278,6 +281,7 @@ def test_iter_remote_skips_temp_parts_and_confines_hostile_names(tmp_path):
             _FakeAttr("../escape.bin", size=5),
         ],
     })
+    api._add_active_remote_scratch("/top/.upload.bin.deadbeef.sxtpart")
 
     results = list(api._iter_remote(sftp, "/top", str(tmp_path / "top"), True, root))
 

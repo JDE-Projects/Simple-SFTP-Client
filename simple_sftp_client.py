@@ -172,6 +172,18 @@ def _focus_existing_window(title: str) -> None:
         pass
 
 
+def _report_recovery(api, summary):
+    deleted = summary["deleted"]
+    if deleted:
+        api._vlog(f"Cleaned up {deleted} leftover download scratch file(s)", "ok")
+    for path in summary["left_in_place"]:
+        api._vlog("Found a leftover download scratch file the app could not prove it made, "
+                  f"so it was left alone (delete it yourself if you do not need it): {path}", "warn")
+    for path in summary["unreachable"]:
+        api._vlog("Could not check a leftover download scratch file (its drive or folder may be "
+                  f"unavailable). It was not deleted and will be checked again next start: {path}", "warn")
+
+
 def main():
     # Qt's shader disk cache would leave an empty
     # %LOCALAPPDATA%\<exe name>\cache\qtpipelinecache-* folder behind that
@@ -207,6 +219,7 @@ def main():
     journal = scratch_journal.ScratchJournal()
     if journal.open():
         scratch_journal.current = journal
+        _report_recovery(api, journal.recover())
     else:
         api._vlog(
             "Another copy may be running or the scratch record file could not be read, "

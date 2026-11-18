@@ -461,7 +461,6 @@ def test_successful_password_login_stamps_identity(api, monkeypatch):
 
     monkeypatch.setattr(Api, "_open", fake_open)
     monkeypatch.setattr(Api, "_transport_info", lambda self, client=None: {})
-    monkeypatch.setattr(Api, "_sweep_scratch_files", lambda self: None)
 
     result = api.connect({"host": " example.com ", "port": "22", "username": " alice ",
                            "password": "hunter2", "key_path": "", "passphrase": ""})

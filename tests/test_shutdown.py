@@ -5,9 +5,8 @@ remaining file through its retries, a shutdown mid-transfer must leave the
 real destination untouched and stop worker threads within a bounded time, a
 failed connect() must never leak a client or corrupt state for the next
 attempt, a mid-batch server drop must stop the queue promptly and report the
-failure once (not once per remaining file), the scratch sweep on connect must
-touch only this app's own scratch files, and _shutdown() must be safe to call
-more than once.
+failure once (not once per remaining file), and _shutdown() must be safe to
+call more than once.
 
 Runs against the in-process SFTP server from conftest.py (sftp_env) plus a
 few pure Api(APP_VERSION) instances with a stubbed _open for the connect-only cases.
@@ -20,12 +19,11 @@ from app import paths
 from app.transfer_queue import FAILED, WAITING
 
 from app.api import Api
-from app.paths import is_temp_part
 from simple_sftp_client import APP_VERSION
 
 
 def _remote_temp_files(server_root):
-    return [n for n in os.listdir(server_root) if is_temp_part(n)]
+    return [n for n in os.listdir(server_root) if n.endswith(".sxtpart")]
 
 
 def _wait_until_not_waiting(api, item_id, timeout=15):
@@ -167,8 +165,6 @@ class _FakeClientNormalizeFail:
 
 def test_connect_failure_then_success_leaves_no_dangling_client(monkeypatch, tmp_path):
     api = Api(APP_VERSION)
-    # Keep the post-connect scratch sweep off the real home directory.
-    api._local_cwd = str(tmp_path)
     calls = []
     attempts = [_FakeClientFail(calls), _FakeClientOk(calls)]
 
@@ -201,7 +197,6 @@ def test_connect_normalize_failure_leaves_state_unpublished(monkeypatch, tmp_pat
     # while the app reports "connected". Fails against the pre-fix code, which
     # set self._client/_sftp/_connected before normalizing and left them set.
     api = Api(APP_VERSION)
-    api._local_cwd = str(tmp_path)
     calls = []
     monkeypatch.setattr(api, "_open", lambda *a, **k: _FakeClientNormalizeFail(calls))
 
@@ -220,7 +215,6 @@ def test_connect_normalize_failure_leaves_state_unpublished(monkeypatch, tmp_pat
 
 def test_connect_normalize_failure_then_success(monkeypatch, tmp_path):
     api = Api(APP_VERSION)
-    api._local_cwd = str(tmp_path)
     calls = []
     attempts = [_FakeClientNormalizeFail(calls), _FakeClientOk(calls)]
     monkeypatch.setattr(api, "_open", lambda *a, **k: attempts.pop(0))
@@ -241,7 +235,6 @@ def test_connect_normalize_failure_then_success(monkeypatch, tmp_path):
 
 def test_disconnect_after_normalize_failure_is_clean(monkeypatch, tmp_path):
     api = Api(APP_VERSION)
-    api._local_cwd = str(tmp_path)
     calls = []
     monkeypatch.setattr(api, "_open", lambda *a, **k: _FakeClientNormalizeFail(calls))
     assert api.connect({"host": "h", "username": "u", "password": "p"})["ok"] is False
@@ -255,7 +248,6 @@ def test_disconnect_after_normalize_failure_is_clean(monkeypatch, tmp_path):
 
 def test_failed_reconnect_preserves_prior_good_connection(monkeypatch, tmp_path):
     api = Api(APP_VERSION)
-    api._local_cwd = str(tmp_path)
     calls = []
     attempts = [_FakeClientOk(calls), _FakeClientNormalizeFail(calls)]
     monkeypatch.setattr(api, "_open", lambda *a, **k: attempts.pop(0))
@@ -324,51 +316,12 @@ def test_mid_batch_server_drop_stops_queue_and_reports_once(sftp_env, wait_for_q
     assert len(conn_lost_lines) == 1
 
 
-# ───────────── scratch sweep on connect ─────────────
-
-def test_scratch_sweep_on_connect_removes_only_matching_files(monkeypatch, tmp_path):
-    local_dir = tmp_path / "browse"
-    local_dir.mkdir()
-    (local_dir / "real.bin").write_bytes(b"data")
-    (local_dir / ".not_scratch.txt").write_bytes(b"x")
-    # Ordinary files that merely share the .sxtpart suffix must survive: a bare
-    # suffix, a leading-dot file with no random token, and a wrong-length token.
-    (local_dir / "notes.sxtpart").write_bytes(b"user")
-    (local_dir / ".notes.sxtpart").write_bytes(b"user")
-    (local_dir / ".short.bin.dead.sxtpart").write_bytes(b"user")
-    # A directory whose name matches the full scratch shape must also survive:
-    # the app only ever writes scratch files, never folders.
-    (local_dir / ".dir.bin.deadbeef.sxtpart").mkdir()
-    # Genuine scratch files in the exact generated shape get swept.
-    (local_dir / ".foo.bin.deadbeef.sxtpart").write_bytes(b"partial")
-    (local_dir / ".bar.bin.cafebabe.sxtpart").write_bytes(b"partial2")
-
-    api = Api(APP_VERSION)
-    api._local_cwd = str(local_dir)
-    calls = []
-    monkeypatch.setattr(api, "_open", lambda *a, **k: _FakeClientOk(calls))
-
-    result = api.connect({"host": "h", "username": "u", "password": "p"})
-    assert result["ok"] is True
-
-    remaining = {p.name for p in local_dir.iterdir()}
-    assert remaining == {
-        "real.bin",
-        ".not_scratch.txt",
-        "notes.sxtpart",
-        ".notes.sxtpart",
-        ".short.bin.dead.sxtpart",
-        ".dir.bin.deadbeef.sxtpart",
-    }
-
-
 # ───────────── real connect() end to end ─────────────
 
-def test_real_connect_lifecycle_sweeps_scratch_and_shuts_down(
+def test_real_connect_lifecycle_and_shutdown(
         sftp_server, wait_for_drain, monkeypatch, tmp_path):
     """Drive the actual Api.connect() against a live server: trust-on-first-use,
-    the on-connect scratch sweep against the browsed folder, a real transfer
-    over the freshly opened session, and an orderly disconnect. The pre-wired
+    a real transfer over the freshly opened session, and an orderly disconnect. The pre-wired
     sftp_env fixtures skip connect() entirely, so this is the only coverage of
     the connect path the shutdown work rewrote."""
     params, server_root, local_dir = sftp_server
@@ -378,12 +331,6 @@ def test_real_connect_lifecycle_sweeps_scratch_and_shuts_down(
                         str(tmp_path / "known_hosts"))
 
     api = Api(APP_VERSION)
-    # Browse the local folder first so the sweep is scoped to it, then drop a
-    # leftover scratch file there for connect() to clean up.
-    api.list_local(str(local_dir))
-    scratch = local_dir / ".ghost.bin.deadbeef.sxtpart"
-    scratch.write_bytes(b"orphan")
-
     # First contact with an unknown host: trust-on-first-use asks, it does not
     # silently accept.
     r1 = api.connect(params)
@@ -398,9 +345,6 @@ def test_real_connect_lifecycle_sweeps_scratch_and_shuts_down(
     assert api._connected is True
     assert api._client is not None and api._sftp is not None
     assert "home" in r2 and "cwd" in r2
-    # The on-connect sweep removed the orphaned scratch file.
-    assert not scratch.exists()
-
     # A real transfer works through the freshly connected session.
     (local_dir / "hello.txt").write_bytes(b"hello world")
     assert api.enqueue([{"name": "hello.txt", "is_dir": False}], "upload",

@@ -43,6 +43,7 @@ def _put_file(api, sftp, lp, rp, cb, cancel_check):
     published = False
     try:
         with open(lp, "rb") as src:
+            api._add_active_remote_scratch(temp)
             with sftp.open(temp, "w") as dst:
                 dst.set_pipelined(True)
                 sent = 0
@@ -106,6 +107,7 @@ def _put_file(api, sftp, lp, rp, cb, cancel_check):
                 sftp.remove(temp)
             except Exception:
                 pass
+        api._discard_active_remote_scratch(temp)
 
 
 def _get_file(api, sftp, rp, lp, cb, cancel_check):
@@ -229,6 +231,8 @@ def _get_file(api, sftp, rp, lp, cb, cancel_check):
                 current_identity = (current_stat.st_dev, current_stat.st_ino)
                 if not stat.S_ISREG(current_stat.st_mode) or current_identity != identity:
                     log_event("scratch identity mismatch")
+                    if journal is not None:
+                        journal.retire(temp)
                 else:
                     try:
                         os.remove(temp)

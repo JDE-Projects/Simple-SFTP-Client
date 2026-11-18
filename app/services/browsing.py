@@ -8,7 +8,7 @@ import posixpath
 import webview
 from app.errors import friendly_error
 from app.formatting import human_size
-from app.paths import is_temp_part
+from app.scratch_journal import is_active_local
 
 
 def ping(api):
@@ -34,9 +34,9 @@ def list_local(api, path):
     try:
         entries = []
         for name in os.listdir(path):
-            if is_temp_part(name):
-                continue
             full = os.path.join(path, name)
+            if is_active_local(full):
+                continue
             try:
                 st = os.stat(full)
                 entries.append({"name": name, "is_dir": os.path.isdir(full),
@@ -46,10 +46,6 @@ def list_local(api, path):
         parent = os.path.dirname(path.rstrip("\\/")) or ("DRIVES" if os.name == "nt" else "/")
         if os.name == "nt" and len(path.rstrip("\\/")) <= 2:
             parent = "DRIVES"
-        # Remembered so a later connect() knows which real folder to
-        # sweep for leftover scratch files (see _sweep_scratch_files).
-        # Never set from the DRIVES branch above, which isn't one.
-        api._local_cwd = path
         return {"ok": True, "cwd": path, "parent": parent, "entries": entries}
     except Exception as e:
         return {"ok": False, "error": friendly_error(e)}
@@ -62,7 +58,7 @@ def list_remote(api, path):
         path = api._sftp.normalize(path or ".")
         entries = []
         for a in api._sftp.listdir_attr(path):
-            if is_temp_part(a.filename):
+            if api._is_active_remote_scratch(posixpath.join(path, a.filename)):
                 continue
             entries.append({"name": a.filename, "is_dir": stat.S_ISDIR(a.st_mode),
                             "size": a.st_size, "mtime": int(a.st_mtime or 0)})
@@ -151,7 +147,7 @@ def calc_remote_size(api, remote_dir, name):
         for a in attrs:
             if api._cancel.is_set():
                 return
-            if is_temp_part(a.filename):
+            if api._is_active_remote_scratch(posixpath.join(p, a.filename)):
                 continue
             if stat.S_ISDIR(a.st_mode):
                 walk(posixpath.join(p, a.filename))
