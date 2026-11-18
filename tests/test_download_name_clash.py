@@ -91,7 +91,7 @@ def test_admit_conflicting_source_becomes_failed_row():
     row = next(item for item in q.snapshot() if item["id"] == second)
     assert other == "/a/Report.txt"
     assert row["state"] == FAILED and row["retryable"] is False
-    assert "/a/Report.txt" in row["error"]
+    assert row["error"].startswith("Same name on Windows as Report.txt.")
     assert q.counts()[FAILED] == 1
 
 
@@ -157,7 +157,7 @@ def test_retry_rechecks_claims():
     q.mark_failed(item_id, "network")
     holder_id, _ = _admit(q, "L/report.txt", "/b/report.txt")
     assert q.requeue(item_id) is False
-    assert "/b/report.txt" in q.snapshot()[0]["error"]
+    assert q.snapshot()[0]["error"].startswith("Same name on Windows as report.txt.")
     assert q.retry_all_failed() == 0
     q.claim()
     q.mark_completed(holder_id)

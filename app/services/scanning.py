@@ -197,7 +197,8 @@ def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=Fa
             other_remote = siblings.get(key)
             if other_remote is not None:
                 api._worker_log(
-                    f"skipped {rchild}: same name on Windows as {other_remote}",
+                    f"skipped {rchild}: same name on Windows as {other_remote}. "
+                    "To get it, download it on its own into a different local folder.",
                     "error", "name clash")
                 if clashes is not None:
                     clashes.append({"local_path": lchild, "remote_path": rchild,

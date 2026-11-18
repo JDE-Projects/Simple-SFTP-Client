@@ -7,6 +7,7 @@ grabbing the same one; claim() is what makes the worker pool in
 app/services/transfers.py (2 workers by default, up to 5 for a batch of many
 small files) safe.
 """
+import posixpath
 import threading
 from dataclasses import dataclass
 
@@ -103,8 +104,10 @@ class TransferQueue:
 
     @staticmethod
     def _clash_error(other_remote):
-        return ("Not downloaded: on Windows this has the same name as "
-                f"{other_remote}. To get it, download it on its own into a different local folder.")
+        # The key fact comes first so it stays readable in a narrow queue
+        # row; the full remote paths are in the console line.
+        return (f"Same name on Windows as {posixpath.basename(other_remote)}. "
+                "Not downloaded: download it alone into a different folder.")
 
     def _conflicting_source(self, claims):
         for key, kind, source in claims:
