@@ -316,6 +316,7 @@ def _run_compare(api, cid, local_dir, remote_dir, stop_event, direction=None, ch
                 e = api._compares.get(cid)
                 if e is not None:
                     e["direction"] = direction
+                    e["local_root"] = local_dir
             total_bytes = sum(t[2] for t in transfers if t[2] and t[2] > 0)
             result = {"count": len(transfers), "total_bytes": total_bytes,
                       "sample": plan[:200], "more": max(0, len(plan) - 200), "token": cid,
@@ -392,7 +393,7 @@ def sync_plan(api, local_dir, remote_dir, direction, changed_only=True):
     return {"ok": True, "comparing": True}
 
 
-def _stream_sync_transfers(api, transfers, direction, on_conflict, scan_id, stop_event, token):
+def _stream_sync_transfers(api, transfers, direction, on_conflict, scan_id, stop_event, token, local_root=None):
     """Streams an already-resolved sync-plan transfer list onto the
     normal transfer queue in backpressured batches, reusing the same
     scan registry (and so the same "Scanning… N" / drain UI and
@@ -402,18 +403,20 @@ def _stream_sync_transfers(api, transfers, direction, on_conflict, scan_id, stop
     the job for logging; deregistering it here is a harmless no-op.
     Always deregisters the scan registry entry."""
     found = 0
+    clash_count = 0
     batch = []
     try:
         def flush():
-            nonlocal batch, found
+            nonlocal batch, found, clash_count
             if not batch:
                 return
             api._scan_wait_for_room(stop_event)
             if stop_event.is_set() or not api._connected:
                 return
-            found += len(batch)
-            api._bump_scan_found(scan_id, len(batch))
-            api._enqueue_files(batch, direction, on_conflict)
+            queued, clashes = api._enqueue_files(batch, direction, on_conflict, local_root=local_root)
+            found += queued
+            clash_count += clashes
+            api._bump_scan_found(scan_id, queued)
             batch = []
 
         batch_cap = min(64, constants.SCAN_QUEUE_HIGH_WATER) or 64
@@ -426,10 +429,13 @@ def _stream_sync_transfers(api, transfers, direction, on_conflict, scan_id, stop
                 if stop_event.is_set() or not api._connected:
                     break
         flush()
+        suffix = f", {clash_count} name clash(es) not downloaded" if clash_count else ""
         if stop_event.is_set():
-            api._worker_log(f"Sync stopped ({found} item(s) queued before stopping)", "warn", "sync", outcome="stopped", items=found)
+            api._worker_log(f"Sync stopped ({found} item(s) queued before stopping{suffix})", "warn", "sync", outcome="stopped", items=found)
         elif not api._connected:
-            api._worker_log(f"Sync halted: disconnected ({found} item(s) queued)", "warn", "sync", outcome="disconnected", items=found)
+            api._worker_log(f"Sync halted: disconnected ({found} item(s) queued{suffix})", "warn", "sync", outcome="disconnected", items=found)
+        elif clash_count:
+            api._worker_log(f"Sync: {found} item(s) queued{suffix}", "warn", "sync", outcome="complete", items=found)
         elif found:
             api._worker_log(f"Sync: {found} item(s) queued", event="sync", outcome="complete", items=found)
         else:
@@ -467,9 +473,10 @@ def start_sync(api, token, on_conflict="overwrite"):
         return {"ok": False, "error": "That sync plan is no longer available. Run Sync again."}
     transfers = entry["transfers"]
     direction = entry["direction"]
+    local_root = entry.get("local_root")
     scan_id, stop_event = api._register_scan()
     t = threading.Thread(target=api._stream_sync_transfers,
-                          args=(transfers, direction, on_conflict, scan_id, stop_event, token),
+                          args=(transfers, direction, on_conflict, scan_id, stop_event, token, local_root),
                           daemon=True)
     t.start()
     return {"ok": True, "scanning": True}

@@ -8,7 +8,7 @@ import posixpath
 from app.constants import MTIME_TOL, WORKER_COUNT
 from app.debug import debug, log_event
 from app.formatting import human_size
-from app.paths import local_link_target, safe_local_child
+from app.paths import local_link_target, safe_local_child, windows_destination_key
 from app.workers import worker_target
 
 
@@ -195,10 +195,28 @@ def enqueue(api, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"
     return {"ok": True, "scanning": True}
 
 
-def _enqueue_files(api, files, direction, on_conflict):
+def _download_claims(local_path, remote_path, is_dir, local_root):
+    """Return destination claims for one download below local_root."""
+    claims = [(windows_destination_key(local_path), "dir" if is_dir else "file", remote_path)]
+    root_key = windows_destination_key(local_root)
+    local_parent = os.path.dirname(local_path)
+    remote_parent = posixpath.dirname(remote_path)
+    while windows_destination_key(local_parent) != root_key:
+        next_parent = os.path.dirname(local_parent)
+        if next_parent == local_parent:
+            break
+        claims.append((windows_destination_key(local_parent), "dir", remote_parent))
+        next_remote = posixpath.dirname(remote_parent)
+        if next_remote == remote_parent:
+            break
+        local_parent, remote_parent = next_parent, next_remote
+    return tuple(claims)
+
+
+def _enqueue_files(api, files, direction, on_conflict, local_root=None):
     """Append (local_path, remote_path, size, mtime, is_dir) tuples to the
     queue as per-item jobs and wake the worker pool. Returns the count
-    enqueued. Shared by pane transfers (enqueue) and external drops
+    enqueued and clashes. Shared by pane transfers (enqueue) and external drops
     (upload_paths). Sizes are carried from enumeration (real local size
     for uploads, real remote size for downloads), never re-stat here.
     mtime is part of the enumeration tuple but unused here: timestamp
@@ -211,12 +229,24 @@ def _enqueue_files(api, files, direction, on_conflict):
     down under a still-draining pool, so a mid-batch top-up never shrinks
     workers already running."""
     sizes = []
+    queued = 0
+    clashes = 0
     for lp, rp, size, _mtime, is_dir in files:
         name = os.path.basename(lp)
         sizes.append(size)
         queue_size = size if size and size > 0 else 0
-        api._queue.append(direction, lp, rp, name, size=queue_size, on_conflict=on_conflict,
-                           is_dir=is_dir)
+        if direction == "download" and local_root is not None:
+            claims = _download_claims(lp, rp, is_dir, local_root)
+            _item_id, other_remote = api._queue.admit(
+                direction, lp, rp, name, queue_size, on_conflict, is_dir, claims)
+            if other_remote is None:
+                queued += 1
+            else:
+                clashes += 1
+        else:
+            api._queue.append(direction, lp, rp, name, size=queue_size, on_conflict=on_conflict,
+                               is_dir=is_dir)
+            queued += 1
     batch_target = worker_target(sizes)
     with api._worker_lock:
         if not api._workers:
@@ -224,7 +254,7 @@ def _enqueue_files(api, files, direction, on_conflict):
         else:
             api._target_workers = max(api._target_workers, batch_target)
     api._ensure_worker()
-    return len(files)
+    return queued, clashes
 
 
 def _ensure_worker(api):

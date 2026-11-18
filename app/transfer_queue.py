@@ -42,6 +42,8 @@ class TransferItem:
     cancel_requested: bool = False
     on_conflict: str = "overwrite"
     is_dir: bool = False
+    retryable: bool = True
+    claims: tuple = ()
 
 
 class TransferQueue:
@@ -64,6 +66,7 @@ class TransferQueue:
         # never has to re-scan self._items to know whether it is over
         # RETAIN_FINISHED.
         self._finished_live = 0
+        self._claims = {}  # destination key -> (kind, source, holder count)
 
     def pause(self):
         """Stop claim() from handing out new items. Items already ACTIVE are
@@ -98,6 +101,69 @@ class TransferQueue:
             self._by_id[item.id] = item
             return item.id
 
+    @staticmethod
+    def _clash_error(other_remote):
+        return ("Not downloaded: on Windows this has the same name as "
+                f"{other_remote}. To get it, download it on its own into a different local folder.")
+
+    def _conflicting_source(self, claims):
+        for key, kind, source in claims:
+            held = self._claims.get(key)
+            if held is not None and (held[0] != kind or held[1] != source):
+                return held[1]
+        return None
+
+    def _take_claims(self, claims):
+        for key, kind, source in claims:
+            held = self._claims.get(key)
+            if held is None:
+                self._claims[key] = (kind, source, 1)
+            else:
+                self._claims[key] = (kind, source, held[2] + 1)
+
+    def _release_claims(self, item):
+        for key, _kind, _source in item.claims:
+            held = self._claims.get(key)
+            if held is None:
+                continue
+            if held[2] == 1:
+                del self._claims[key]
+            else:
+                self._claims[key] = (held[0], held[1], held[2] - 1)
+
+    def admit(self, direction, local_path, remote_path, name, size, on_conflict, is_dir, claims):
+        """Atomically admit a download only when all destination claims are free."""
+        claims = tuple(claims)
+        with self._lock:
+            other_remote = self._conflicting_source(claims)
+            item = TransferItem(
+                id=self._next_id, direction=direction, local_path=local_path,
+                remote_path=remote_path, name=name, size=size,
+                state=FAILED if other_remote else WAITING,
+                error=self._clash_error(other_remote) if other_remote else "",
+                on_conflict=on_conflict, is_dir=is_dir,
+                retryable=other_remote is None, claims=claims if other_remote is None else (),
+            )
+            self._next_id += 1
+            self._items.append(item)
+            self._by_id[item.id] = item
+            if other_remote is None:
+                self._take_claims(claims)
+            return item.id, other_remote
+
+    def add_clash(self, direction, local_path, remote_path, name, other_remote, is_dir):
+        """Record a scan-discovered Windows destination clash without a claim."""
+        with self._lock:
+            item = TransferItem(
+                id=self._next_id, direction=direction, local_path=local_path,
+                remote_path=remote_path, name=name, state=FAILED,
+                error=self._clash_error(other_remote), is_dir=is_dir, retryable=False,
+            )
+            self._next_id += 1
+            self._items.append(item)
+            self._by_id[item.id] = item
+            return item.id
+
     def claim(self):
         """Atomically find the oldest WAITING item, mark it ACTIVE, and return it."""
         with self._lock:
@@ -125,6 +191,7 @@ class TransferQueue:
             item.state = new_state
             if error:
                 item.error = error
+            self._release_claims(item)
             if new_state in (COMPLETED, SKIPPED):
                 # Only one item can cross into COMPLETED/SKIPPED per call, so
                 # the count can be at most one over the cap: drop the single
@@ -165,6 +232,7 @@ class TransferQueue:
                 return False
             if item.state == WAITING:
                 item.state = CANCELLED
+                self._release_claims(item)
                 return True
             if item.state == ACTIVE:
                 item.cancel_requested = True
@@ -177,11 +245,16 @@ class TransferQueue:
         False (no change) for any other state or an unknown id."""
         with self._lock:
             item = self._find(item_id)
-            if item is None or item.state not in (FAILED, CANCELLED):
+            if item is None or not item.retryable or item.state not in (FAILED, CANCELLED):
+                return False
+            other_remote = self._conflicting_source(item.claims)
+            if other_remote is not None:
+                item.error = self._clash_error(other_remote)
                 return False
             item.state = WAITING
             item.error = ""
             item.cancel_requested = False
+            self._take_claims(item.claims)
             return True
 
     def retry_all_failed(self):
@@ -192,10 +265,15 @@ class TransferQueue:
         with self._lock:
             requeued = 0
             for item in self._items:
-                if item.state == FAILED:
+                if item.state == FAILED and item.retryable:
+                    other_remote = self._conflicting_source(item.claims)
+                    if other_remote is not None:
+                        item.error = self._clash_error(other_remote)
+                        continue
                     item.state = WAITING
                     item.error = ""
                     item.cancel_requested = False
+                    self._take_claims(item.claims)
                     requeued += 1
             return requeued
 
@@ -204,6 +282,7 @@ class TransferQueue:
             for item in self._items:
                 if item.state == WAITING:
                     item.state = CANCELLED
+                    self._release_claims(item)
                 elif item.state == ACTIVE:
                     item.cancel_requested = True
 
@@ -219,11 +298,12 @@ class TransferQueue:
                 if item.state == WAITING:
                     item.state = FAILED
                     item.error = error
+                    self._release_claims(item)
                     failed += 1
             return failed
 
     def snapshot(self):
-        """Plain dicts (id, direction, name, state, error, is_dir) in FIFO order, copies only."""
+        """Plain dicts (id, direction, name, state, error, is_dir, retryable) in FIFO order."""
         with self._lock:
             return [
                 {
@@ -233,6 +313,7 @@ class TransferQueue:
                     "state": item.state,
                     "error": item.error,
                     "is_dir": item.is_dir,
+                    "retryable": item.retryable,
                 }
                 for item in self._items
             ]
@@ -276,6 +357,7 @@ class TransferQueue:
                     "state": item.state,
                     "error": item.error,
                     "is_dir": item.is_dir,
+                    "retryable": item.retryable,
                 }
                 for item in self._items
             ]
