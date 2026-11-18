@@ -9,6 +9,7 @@ from app.constants import MTIME_TOL, WORKER_COUNT
 from app.debug import debug, log_event
 from app.formatting import human_size
 from app.paths import (
+    local_link_kind,
     local_link_target,
     remote_leaf_problem,
     safe_local_child,
@@ -206,6 +207,15 @@ def enqueue(api, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"
                                 "unsafe upload name", error=e)
                 continue
             rp = posixpath.join(remote_dir, name)
+            try:
+                kind = local_link_kind(lp)
+            except OSError as e:
+                api._worker_log(f"could not read {lp}: {e}", "error", "link skipped", error=e)
+                continue
+            if kind:
+                api._worker_log(f"skipped {lp}: it is a {kind}; links are not uploaded",
+                                "warn", "link skipped")
+                continue
         else:
             rp = posixpath.join(remote_dir, name)
             try:
@@ -500,6 +510,7 @@ def upload_paths(api, paths, remote_dir, on_conflict="overwrite"):
     if api._legacy_active.is_set():
         return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}
     roots = []   # (local_path, remote_path, is_dir)
+    skipped_links = 0
     try:
         for raw in paths or []:
             lp = api._normalize_drop_path(raw)
@@ -507,6 +518,16 @@ def upload_paths(api, paths, remote_dir, on_conflict="overwrite"):
                 continue
             name = os.path.basename(lp.rstrip("\\/"))
             rp = posixpath.join(remote_dir, name)
+            try:
+                kind = local_link_kind(lp)
+            except OSError as e:
+                api._worker_log(f"could not read {lp}: {e}", "error", "link skipped", error=e)
+                continue
+            if kind:
+                skipped_links += 1
+                api._worker_log(f"skipped {lp}: it is a {kind}; links are not uploaded",
+                                "warn", "link skipped")
+                continue
             if os.path.isdir(lp):
                 roots.append((lp, rp, True))
             elif os.path.isfile(lp):
@@ -514,6 +535,8 @@ def upload_paths(api, paths, remote_dir, on_conflict="overwrite"):
     except Exception as e:
         return {"ok": False, "error": f"Could not read the dropped items: {e}"}
     if not roots:
+        if skipped_links:
+            return {"ok": False, "error": "Links are not uploaded."}
         return {"ok": False, "error": "No files were found in the dropped items."}
     log_event("external upload", items=len(roots))
     scan_id, stop_event = api._register_scan()

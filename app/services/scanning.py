@@ -7,7 +7,7 @@ import threading
 import posixpath
 from app import constants
 from app.errors import friendly_error
-from app.paths import safe_local_child, windows_destination_key
+from app.paths import _local_link_kind, is_local_link, safe_local_child, windows_destination_key
 from app.scratch_journal import is_active_local
 
 
@@ -70,7 +70,8 @@ def _scan_wait_for_room(api, stop_event):
         break
 
 
-def _iter_local(api, lp, rp, is_dir, problems=None, include_dirs=False):
+def _iter_local(api, lp, rp, is_dir, problems=None, include_dirs=False, excluded=None,
+                allow_root_link=False):
     """Stream (local_path, remote_path, size, mtime, is_dir) one file (or
     folder marker) at a time from a local file or folder, without
     creating any directories. A single file yields one tuple with
@@ -93,12 +94,40 @@ def _iter_local(api, lp, rp, is_dir, problems=None, include_dirs=False):
     log), so a caller that needs to know the walk was incomplete
     (compare/sync) can tell; the default of None keeps the ordinary
     transfer scan's current behavior (log and continue) unchanged."""
+    def report_detection_error(path, error):
+        message = f"could not read {path}: {error}"
+        api._worker_log(message, "error", "link skipped", error=error)
+        if problems is not None:
+            problems.append(message)
+
+    def skip_link(path, st):
+        if excluded is not None:
+            excluded.append(path)
+        api._worker_log(
+            f"skipped {path}: it is a {_local_link_kind(st)}; links are not uploaded",
+            "warn", "link skipped")
+
+    if not allow_root_link:
+        try:
+            root_st = os.lstat(lp)
+        except OSError as e:
+            if is_dir:
+                message = f"could not list {lp}: {e}"
+                api._worker_log(message, "error", "list failed", error=e)
+                if problems is not None:
+                    problems.append(message)
+            else:
+                report_detection_error(lp, e)
+            return False
+        if is_local_link(root_st):
+            skip_link(lp, root_st)
+            return False
     if not is_dir:
         if is_active_local(lp):
             api._worker_log(f"skipped {lp}: a download is still writing this scratch file", "info")
             return False
         try:
-            st = os.stat(lp)
+            st = os.lstat(lp)
             size, mtime = st.st_size, int(st.st_mtime)
         except OSError as e:
             size, mtime = 0, 0
@@ -114,16 +143,25 @@ def _iter_local(api, lp, rp, is_dir, problems=None, include_dirs=False):
                     continue
                 rchild = posixpath.join(rp, entry.name)
                 try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError as e:
+                    report_detection_error(entry.path, e)
+                    continue
+                if is_local_link(st):
+                    skip_link(entry.path, st)
+                    continue
+                try:
                     child_is_dir = entry.is_dir(follow_symlinks=False)
-                except OSError:
-                    child_is_dir = False
+                except OSError as e:
+                    report_detection_error(entry.path, e)
+                    continue
                 if child_is_dir:
                     had = yield from api._iter_local(
-                        entry.path, rchild, True, problems=problems, include_dirs=include_dirs)
+                        entry.path, rchild, True, problems=problems, include_dirs=include_dirs,
+                        excluded=excluded)
                     had_file = had_file or had
                 else:
                     try:
-                        st = entry.stat(follow_symlinks=False)
                         size, mtime = st.st_size, int(st.st_mtime)
                     except OSError as e:
                         size, mtime = 0, 0
@@ -251,6 +289,7 @@ def _scan_and_queue(api, roots, direction, on_conflict, scan_id, stop_event, loc
     clashes = []
     admission_clashes = 0
     scan_clashes = 0
+    excluded = []
     batch = []
     try:
         if direction == "download":
@@ -302,7 +341,7 @@ def _scan_and_queue(api, roots, direction, on_conflict, scan_id, stop_event, loc
                 gen = api._iter_remote(sftp, rp, lp, is_dir, local_root,
                                        include_dirs=True, clashes=clashes)
             else:
-                gen = api._iter_local(lp, rp, is_dir, include_dirs=True)
+                gen = api._iter_local(lp, rp, is_dir, include_dirs=True, excluded=excluded)
             for triple in gen:
                 if stop_event.is_set() or not api._connected:
                     stopped_early = True
@@ -320,14 +359,18 @@ def _scan_and_queue(api, roots, direction, on_conflict, scan_id, stop_event, loc
         flush()
         flush_clashes()
         clash_count = scan_clashes + admission_clashes
+        link_suffix = f", {len(excluded)} link(s) skipped" if excluded else ""
         if stop_event.is_set():
             suffix = f", {clash_count} name clash(es) not downloaded" if clash_count else ""
+            suffix += link_suffix
             api._worker_log(f"Scan stopped ({found} file(s) queued before stopping{suffix})", "warn", "scan", outcome="stopped", items=found)
         elif not api._connected:
             suffix = f", {clash_count} name clash(es) not downloaded" if clash_count else ""
+            suffix += link_suffix
             api._worker_log(f"Scan halted: disconnected ({found} file(s) queued{suffix})", "warn", "scan", outcome="disconnected", items=found)
-        elif clash_count:
-            api._worker_log(f"Scan complete: {found} file(s) queued, {clash_count} name clash(es) not downloaded", "warn", "scan", outcome="complete", items=found)
+        elif clash_count or excluded:
+            suffix = f", {clash_count} name clash(es) not downloaded" if clash_count else ""
+            api._worker_log(f"Scan complete: {found} file(s) queued{suffix}{link_suffix}", "warn", "scan", outcome="complete", items=found)
         elif found:
             api._worker_log(f"Scan complete: {found} file(s) queued", event="scan", outcome="complete", items=found)
         else:

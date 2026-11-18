@@ -1,7 +1,32 @@
 import ntpath
 import os
 import posixpath
+import stat
 import sys
+
+
+_NAME_SURROGATE_BIT = 0x20000000
+_IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
+
+
+def is_local_link(st):
+    """Return whether an lstat-style result describes a local link."""
+    return stat.S_ISLNK(st.st_mode) or bool(
+        getattr(st, "st_reparse_tag", 0) & _NAME_SURROGATE_BIT)
+
+
+def _local_link_kind(st):
+    if stat.S_ISLNK(st.st_mode):
+        return "symlink"
+    if getattr(st, "st_reparse_tag", 0) == _IO_REPARSE_TAG_MOUNT_POINT:
+        return "junction"
+    return "link"
+
+
+def local_link_kind(path):
+    """Return a local link kind, or None. Propagates lstat failures."""
+    st = os.lstat(path)
+    return _local_link_kind(st) if is_local_link(st) else None
 
 
 # ───────────── paths ─────────────

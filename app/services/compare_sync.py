@@ -1,5 +1,6 @@
 """Service functions for the compare_sync area."""
 
+import os
 import threading
 import posixpath
 from app import constants
@@ -7,7 +8,8 @@ from app.constants import MTIME_TOL
 from app.errors import ScanIncomplete, friendly_error
 
 
-def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_event=None):
+def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_event=None,
+                       excluded=None):
     """Builds rel -> (size, mtime, local_path, remote_path, is_dir) maps
     for both sides of a folder pair, by streaming the same
     _iter_local/_iter_remote enumerators the background scanner uses
@@ -52,8 +54,10 @@ def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_
             f"Too many files to compare (more than "
             f"{constants.COMPARE_SYNC_ENTRY_LIMIT:,}). Pick a smaller folder.")
 
+    local_excluded = []
     for lp, rp, size, mtime, is_dir in api._iter_local(
-            local_dir, remote_dir, True, problems=problems, include_dirs=True):
+            local_dir, remote_dir, True, problems=problems, include_dirs=True,
+            excluded=local_excluded, allow_root_link=True):
         if stop_event is not None and stop_event.is_set():
             return None, None
         rel = posixpath.relpath(rp, remote_dir)
@@ -67,6 +71,10 @@ def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_
     # rather than running the whole remote (network) walk just to discard it.
     if problems:
         _raise_incomplete()
+    excluded_rels = [os.path.relpath(path, local_dir).replace("\\", "/")
+                     for path in local_excluded]
+    if excluded is not None:
+        excluded.extend(excluded_rels)
     for lp, rp, size, mtime, is_dir in api._iter_remote(
             sftp, remote_dir, local_dir, True, local_dir, problems=problems, include_dirs=True):
         if stop_event is not None and stop_event.is_set():
@@ -78,6 +86,10 @@ def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_
             _raise_too_many()
         remote_map[rel] = (size, mtime, lp, rp, is_dir)
         bump()
+    for rel in list(remote_map):
+        if any(rel == excluded_rel or rel.startswith(excluded_rel + "/")
+               for excluded_rel in excluded_rels):
+            del remote_map[rel]
     if on_progress and seen_since_report:
         on_progress(seen_since_report)
     if stop_event is not None and stop_event.is_set():
@@ -141,8 +153,10 @@ def _compute_compare(api, sftp, local_dir, remote_dir, on_progress=None, stop_ev
     rel (a file on one side, an empty folder on the other) is added to
     BOTH "files" and "folders", so whichever pane is showing it (the file
     row in one, the folder row in the other) is colored to flag it."""
+    excluded = []
     local_map, remote_map = api._compute_pair_maps(
-        sftp, local_dir, remote_dir, on_progress=on_progress, stop_event=stop_event)
+        sftp, local_dir, remote_dir, on_progress=on_progress, stop_event=stop_event,
+        excluded=excluded)
     if local_map is None:
         return None
     statuses = {rel: api._classify(rel, local_map, remote_map)
@@ -171,11 +185,11 @@ def _compute_compare(api, sftp, local_dir, remote_dir, on_progress=None, stop_ev
         while parent not in ("", "."):
             folders.setdefault(parent, "has_changes")
             parent = posixpath.dirname(parent)
-    return {"files": files, "folders": folders}
+    return {"files": files, "folders": folders, "excluded_links": excluded}
 
 
 def _compute_sync(api, sftp, local_dir, remote_dir, direction, changed_only=True,
-                   on_progress=None, stop_event=None):
+                   on_progress=None, stop_event=None, excluded=None):
     """Pure recursive sync-plan core (see _compute_compare). Returns
     (plan, transfers, conflicts): plan is the list the UI shows (name is
     the rel path, so a nested file's plan entry still reads as its full
@@ -190,7 +204,8 @@ def _compute_sync(api, sftp, local_dir, remote_dir, direction, changed_only=True
     to resolve it. Returns (None, None, None) if stop_event fired before
     the walk finished."""
     local_map, remote_map = api._compute_pair_maps(
-        sftp, local_dir, remote_dir, on_progress=on_progress, stop_event=stop_event)
+        sftp, local_dir, remote_dir, on_progress=on_progress, stop_event=stop_event,
+        excluded=excluded)
     if local_map is None:
         return None, None, None
     wanted = ("local_only", "newer_local") if direction == "upload" else ("remote_only", "newer_remote")
@@ -306,9 +321,10 @@ def _run_compare(api, cid, local_dir, remote_dir, stop_event, direction=None, ch
             return
         on_progress = lambda n: api._bump_compare_found(cid, n)  # noqa: E731
         if kind == "sync":
+            excluded = []
             plan, transfers, conflicts = api._compute_sync(
                 sftp, local_dir, remote_dir, direction, changed_only,
-                on_progress=on_progress, stop_event=stop_event)
+                on_progress=on_progress, stop_event=stop_event, excluded=excluded)
             if plan is None:
                 _finish(False, error="Cancelled.")
                 return
@@ -320,7 +336,12 @@ def _run_compare(api, cid, local_dir, remote_dir, stop_event, direction=None, ch
             total_bytes = sum(t[2] for t in transfers if t[2] and t[2] > 0)
             result = {"count": len(transfers), "total_bytes": total_bytes,
                       "sample": plan[:200], "more": max(0, len(plan) - 200), "token": cid,
-                      "conflicts": conflicts}
+                      "conflicts": conflicts, "excluded_links": excluded[:200],
+                      "excluded_more": max(0, len(excluded) - 200)}
+            if excluded:
+                api._worker_log(
+                    f"{len(excluded)} local link(s) left out of compare/sync: "
+                    f"{', '.join(excluded[:200])}", "warn", "link skipped")
             _finish(True, result=result, transfers=transfers)
         else:
             data = api._compute_compare(
@@ -330,6 +351,11 @@ def _run_compare(api, cid, local_dir, remote_dir, stop_event, direction=None, ch
                 return
             data["root_local"] = local_dir
             data["root_remote"] = remote_dir
+            excluded = data["excluded_links"]
+            if excluded:
+                api._worker_log(
+                    f"{len(excluded)} local link(s) left out of compare/sync: "
+                    f"{', '.join(excluded[:200])}", "warn", "link skipped")
             _finish(True, result=data)
     except ScanIncomplete as e:
         api._worker_log(f"compare: {e}", "error", "compare failed", error=e)

@@ -6,7 +6,59 @@ import threading
 import posixpath
 from app.debug import log_event
 from app.errors import friendly_error
+from app.paths import local_link_kind
 from app.scratch_journal import is_active_local
+
+
+def snapshot(api, local_dir, excluded):
+    """Return the watchable files below local_dir, excluding local links.
+    excluded carries the paths already reported across polls, so a link or
+    unreadable entry is logged once while it stays that way."""
+    snap = {}
+    active_links = set()
+
+    def skip(path, kind):
+        active_links.add(path)
+        if path not in excluded:
+            excluded.add(path)
+            api._worker_log(f"skipped {path}: it is a {kind}; links are not uploaded",
+                            "warn", "link skipped")
+
+    def unreadable(path, error):
+        active_links.add(path)
+        if path not in excluded:
+            excluded.add(path)
+            api._worker_log(f"could not read {path}: {error}", "error", "link skipped", error=error)
+
+    # The watched folder itself is the one shown in the pane, so it is
+    # watched even if it is a link; only links inside it are left out.
+    for root, dirs, files in os.walk(local_dir):
+        for name in dirs[:]:
+            path = os.path.join(root, name)
+            try:
+                kind = local_link_kind(path)
+            except OSError as e:
+                unreadable(path, e)
+                dirs.remove(name)
+                continue
+            if kind:
+                skip(path, kind)
+                dirs.remove(name)
+        for fn in files:
+            fp = os.path.join(root, fn)
+            if is_active_local(fp):
+                continue
+            try:
+                kind = local_link_kind(fp)
+                if kind:
+                    skip(fp, kind)
+                    continue
+                st = os.stat(fp)
+                snap[fp] = (st.st_mtime, st.st_size)
+            except OSError:
+                pass
+    excluded.intersection_update(active_links)
+    return snap
 
 
 def start_watch(api, local_dir, remote_dir):
@@ -54,26 +106,14 @@ def start_watch(api, local_dir, remote_dir):
     # replace it, and this local reference stays valid for this run alone.
     stop = threading.Event()
 
-    def snapshot():
-        snap = {}
-        for root, _d, files in os.walk(local_dir):
-            for fn in files:
-                fp = os.path.join(root, fn)
-                if is_active_local(fp):
-                    continue
-                try:
-                    st = os.stat(fp)
-                    snap[fp] = (st.st_mtime, st.st_size)
-                except Exception:
-                    pass
-        return snap
+    excluded_links = set()
 
     # last: files whose current state has been accepted (uploaded, or present
     # unchanged since start) and must not be re-sent. Taken here, before the
     # thread starts, so any change made after start_watch returns is caught.
     # Taken inside the thread instead, a file written in the moment before
     # the thread ran would be recorded as already present and never uploaded.
-    last = snapshot()
+    last = snapshot(api, local_dir, excluded_links)
 
     def loop():
         # seen_changed: a changed file's state at its previous sighting, used
@@ -83,7 +123,7 @@ def start_watch(api, local_dir, remote_dir):
             time.sleep(api._watch_interval)
             if stop.is_set():
                 break
-            cur = snapshot()
+            cur = snapshot(api, local_dir, excluded_links)
             changed = [fp for fp in cur if last.get(fp) != cur[fp]]
             # A queue worker uses its own session, but this shared-session
             # upload path is deliberately kept clear of an active batch.
