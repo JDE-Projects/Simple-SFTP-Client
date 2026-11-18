@@ -153,20 +153,27 @@ def test_active_download_scratch_is_hidden_locally(sftp_env):
 
 def test_remote_user_file_matching_pattern_is_visible(sftp_env):
     api, server_root, local_dir = sftp_env
-    (server_root / ".foo.deadbeef.sxtpart").write_bytes(b"user")
-    assert ".foo.deadbeef.sxtpart" in [entry["name"] for entry in api.list_remote("/")["entries"]]
-    assert list(api._iter_remote(api._sftp, "/.foo.deadbeef.sxtpart", str(local_dir / "x"), False, str(local_dir)))
-    assert api.calc_remote_size("/", ".") ["files"] == 1
+    (server_root / "folder").mkdir()
+    (server_root / "folder" / ".foo.deadbeef.sxtpart").write_bytes(b"user")
+    assert ".foo.deadbeef.sxtpart" in [entry["name"] for entry in api.list_remote("/folder")["entries"]]
+    assert list(api._iter_remote(api._sftp, "/folder/.foo.deadbeef.sxtpart", str(local_dir / "x"), False, str(local_dir)))
+    size = api.calc_remote_size("/", "folder")
+    assert size["ok"] is True
+    assert (size["files"], size["bytes"]) == (1, 4)
 
 
 def test_active_upload_scratch_is_hidden_remotely(sftp_env):
     api, server_root, local_dir = sftp_env
-    scratch = "/.foo.deadbeef.sxtpart"
-    (server_root / scratch[1:]).write_bytes(b"partial")
+    scratch = "/folder/.foo.deadbeef.sxtpart"
+    (server_root / "folder").mkdir()
+    (server_root / "folder" / ".foo.deadbeef.sxtpart").write_bytes(b"partial")
+    (server_root / "folder" / "real.txt").write_bytes(b"real")
     api._add_active_remote_scratch(scratch)
-    assert scratch[1:] not in [entry["name"] for entry in api.list_remote("/")["entries"]]
+    assert ".foo.deadbeef.sxtpart" not in [entry["name"] for entry in api.list_remote("/folder")["entries"]]
     assert list(api._iter_remote(api._sftp, scratch, str(local_dir / "x"), False, str(local_dir))) == []
-    assert api.calc_remote_size("/", ".")["files"] == 0
+    size = api.calc_remote_size("/", "folder")
+    assert size["ok"] is True
+    assert (size["files"], size["bytes"]) == (1, 4)
 
 
 def test_directly_selected_active_scratch_is_skipped(sftp_env):

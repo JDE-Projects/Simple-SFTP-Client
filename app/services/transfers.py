@@ -1,14 +1,19 @@
 """Service functions for the transfers area."""
 
 import os
-import stat
-import time
-import threading
 import posixpath
+import stat
+import threading
+import time
 from app.constants import MTIME_TOL, WORKER_COUNT
 from app.debug import debug, log_event
 from app.formatting import human_size
-from app.paths import local_link_target, safe_local_child, windows_destination_key
+from app.paths import (
+    local_link_target,
+    remote_leaf_problem,
+    safe_local_child,
+    windows_destination_key,
+)
 from app.workers import worker_target
 
 
@@ -192,7 +197,14 @@ def enqueue(api, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"
         name = j["name"]
         is_dir = bool(j.get("is_dir"))
         if direction == "upload":
-            lp = os.path.join(local_dir, name)
+            try:
+                lp = safe_local_child(local_dir, name, local_dir)
+                if remote_leaf_problem(name):
+                    raise ValueError(f"unsafe remote name {name!r}")
+            except ValueError as e:
+                api._worker_log(f"skipped unsafe upload name {name!r}: {e}", "error",
+                                "unsafe upload name", error=e)
+                continue
             rp = posixpath.join(remote_dir, name)
         else:
             rp = posixpath.join(remote_dir, name)

@@ -45,6 +45,23 @@ def windows_destination_key(path: str) -> str:
     return "".join(key)
 
 
+def remote_leaf_problem(name: str) -> str | None:
+    """Return why name cannot safely be used as one remote path component.
+
+    This stops path injection through names. It cannot stop a dishonest
+    server's own links or metadata from referring outside the shown folder.
+    """
+    if not name:
+        return "empty"
+    if name in (".", ".."):
+        return "dot component"
+    if "/" in name:
+        return "contains slash"
+    if "\x00" in name:
+        return "contains NUL"
+    return None
+
+
 def safe_local_child(parent: str, name: str, root: str) -> str:
     """Validate a single server-supplied filename before it becomes part of a
     local path, and confirm the result stays under root (the local folder the
