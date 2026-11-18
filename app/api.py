@@ -278,8 +278,10 @@ class Api:
     def _scan_wait_for_room(self, stop_event):
         return services.scanning._scan_wait_for_room(self, stop_event)
 
-    def _iter_local(self, lp, rp, is_dir, problems=None, include_dirs=False):
-        return services.scanning._iter_local(self, lp, rp, is_dir, problems, include_dirs)
+    def _iter_local(self, lp, rp, is_dir, problems=None, include_dirs=False, excluded=None,
+                    allow_root_link=False):
+        return services.scanning._iter_local(
+            self, lp, rp, is_dir, problems, include_dirs, excluded, allow_root_link)
 
     def _iter_remote(self, sftp, rp, lp, is_dir, root, problems=None, include_dirs=False, clashes=None):
         return services.scanning._iter_remote(self, sftp, rp, lp, is_dir, root, problems, include_dirs, clashes)
@@ -386,12 +388,14 @@ class Api:
     def _apply_download_mtime(self, lp, rp, mtime, size):
         return services.transfer_io._apply_download_mtime(self, lp, rp, mtime, size)
 
-    def _apply_upload_mtime(self, sftp, rp, lp):
-        return services.transfer_io._apply_upload_mtime(self, sftp, rp, lp)
+    def _apply_upload_mtime(self, sftp, rp, lp, mtime, size):
+        return services.transfer_io._apply_upload_mtime(self, sftp, rp, lp, mtime, size)
 
     # ───────────── compare / sync plan / download-changed ─────────────
-    def _compute_pair_maps(self, sftp, local_dir, remote_dir, on_progress=None, stop_event=None):
-        return services.compare_sync._compute_pair_maps(self, sftp, local_dir, remote_dir, on_progress, stop_event)
+    def _compute_pair_maps(self, sftp, local_dir, remote_dir, on_progress=None, stop_event=None,
+                           excluded=None):
+        return services.compare_sync._compute_pair_maps(
+            self, sftp, local_dir, remote_dir, on_progress, stop_event, excluded)
 
     def _classify(self, rel, local_map, remote_map):
         return services.compare_sync._classify(self, rel, local_map, remote_map)
@@ -400,8 +404,10 @@ class Api:
         return services.compare_sync._compute_compare(self, sftp, local_dir, remote_dir, on_progress, stop_event)
 
     def _compute_sync(self, sftp, local_dir, remote_dir, direction, changed_only=True,
-                       on_progress=None, stop_event=None):
-        return services.compare_sync._compute_sync(self, sftp, local_dir, remote_dir, direction, changed_only, on_progress, stop_event)
+                       on_progress=None, stop_event=None, excluded=None):
+        return services.compare_sync._compute_sync(
+            self, sftp, local_dir, remote_dir, direction, changed_only, on_progress, stop_event,
+            excluded)
 
     # ───────────── compare / sync background jobs (own thread, own session) ─────────────
     def _start_compare(self, kind):

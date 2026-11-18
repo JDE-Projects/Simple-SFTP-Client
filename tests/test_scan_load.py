@@ -69,6 +69,8 @@ def _drive_synthetic_upload(api, monkeypatch, n, path_fn):
             yield (plp, prp, 16, FIXED_MTIME, False)
 
     monkeypatch.setattr(api, "_iter_local", fake_iter_local)
+    # The synthetic upload root does not exist on disk; it is not a link.
+    monkeypatch.setattr("app.services.transfers.local_link_kind", lambda path: None)
 
     result = api.enqueue([{"name": "top", "is_dir": True}], "upload",
                           "/fake_local", "/", "overwrite")

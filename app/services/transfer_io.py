@@ -8,7 +8,7 @@ import stat
 from app import scratch_journal
 from app.debug import log_event
 from app.errors import friendly_error
-from app.paths import local_temp_path, remote_temp_path
+from app.paths import is_local_link, local_temp_path, remote_temp_path
 
 
 DOWNLOAD_READV_BATCH_SIZE = 16 * 1024 * 1024
@@ -41,8 +41,18 @@ def _put_file(api, sftp, lp, rp, cb, cancel_check):
     temp = remote_temp_path(rp)
     finished = True
     published = False
+    path_stat = os.lstat(lp)
+    if is_local_link(path_stat):
+        raise IOError(f"{lp} is a link; links are not uploaded")
     try:
         with open(lp, "rb") as src:
+            source_stat = os.fstat(src.fileno())
+            if (source_stat.st_ino == 0 or
+                    (source_stat.st_ino, source_stat.st_dev) !=
+                    (path_stat.st_ino, path_stat.st_dev)):
+                raise IOError(f"{lp} was replaced; links are not uploaded")
+            source_size = source_stat.st_size
+            source_mtime = int(source_stat.st_mtime)
             api._add_active_remote_scratch(temp)
             with sftp.open(temp, "w") as dst:
                 dst.set_pipelined(True)
@@ -58,11 +68,10 @@ def _put_file(api, sftp, lp, rp, cb, cancel_check):
                     sent += len(chunk)
                     cb(sent, 0)
         if finished:
-            src_size = os.path.getsize(lp)
             temp_size = sftp.stat(temp).st_size
-            if temp_size != src_size:
+            if temp_size != source_size:
                 raise IOError(
-                    f"upload incomplete: wrote {temp_size} of {src_size} bytes")
+                    f"upload incomplete: wrote {temp_size} of {source_size} bytes")
             try:
                 existing_attr = sftp.stat(rp)
             except Exception as e:
@@ -95,7 +104,7 @@ def _put_file(api, sftp, lp, rp, cb, cancel_check):
                     "server does not support safe atomic replace; "
                     "file not written to protect the existing copy") from e
             published = True
-            api._apply_upload_mtime(sftp, rp, lp)
+            api._apply_upload_mtime(sftp, rp, lp, source_mtime, source_size)
         return finished
     finally:
         # Anything other than a proven, published swap leaves nothing
@@ -308,7 +317,7 @@ def _apply_download_mtime(api, lp, rp, mtime, size):
         api._clear_mtime_fallback(lp, rp)
 
 
-def _apply_upload_mtime(api, sftp, rp, lp):
+def _apply_upload_mtime(api, sftp, rp, lp, mtime, size):
     """Stamp an uploaded remote file with the local source's modification
     time. If the server refuses to set the time, the file is
     remembered for the rest of this connection: a later compare or skip
@@ -316,17 +325,12 @@ def _apply_upload_mtime(api, sftp, rp, lp):
     even though its time does not match. This memory does not survive a
     disconnect/reconnect."""
     try:
-        local_stat = os.stat(lp)
-        mtime = int(local_stat.st_mtime)
-    except OSError:
-        return
-    try:
         sftp.utime(rp, (mtime, mtime))
     except Exception as e:
         api._worker_log(f"server refused to set modification time on {rp}: "
                          f"{friendly_error(e)}; this file will be treated "
                          "as unchanged by size for the rest of this "
                          "connection", "warn", "mtime", outcome="remote failed", error=e)
-        api._record_mtime_fallback(lp, rp, local_stat.st_size)
+        api._record_mtime_fallback(lp, rp, size)
     else:
         api._clear_mtime_fallback(lp, rp)

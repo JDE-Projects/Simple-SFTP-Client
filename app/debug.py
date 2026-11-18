@@ -48,7 +48,7 @@ EVENTS = {
     "remote list": {"items": int}, "remote mkdir": {}, "remote rename": {}, "remote remove": {}, "remote rmdir": {},
     "connection lost": {"items": int}, "unknown event": {},
     "queue": {"outcome": ("paused", "resumed", "drained", "session failed"), "items": int},
-    "unsafe remote name": {"error": "error"}, "symlink target": {},
+    "unsafe remote name": {"error": "error"}, "symlink target": {}, "link skipped": {"error": "error"},
     "mtime": {"outcome": ("missing", "local failed", "remote failed"), "error": "error"},
 }
 

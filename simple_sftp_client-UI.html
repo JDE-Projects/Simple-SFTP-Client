@@ -1068,7 +1068,9 @@ function applyCompareResult(result){
   const local=[`<span style="color:var(--green)">${c.newer_local} newer here</span>`, `<span style="color:var(--blue)">${c.local_only} local-only</span>`];
   const remote=[`<span style="color:var(--amber)">${c.newer_remote} newer remote</span>`, `<span style="color:var(--blue)">${c.remote_only} remote-only</span>`];
   if(c.conflict>0){const clash=`<span style="color:var(--red)">${c.conflict} name clash${c.conflict===1?"":"es"}</span>`;local.push(clash);remote.push(clash);}
-  const localText=`${c.newer_local} newer here, ${c.local_only} local-only${c.conflict?`, ${c.conflict} name clash${c.conflict===1?"":"es"}`:""}`;
+  const links=result.excluded_links||[];
+  if(links.length)local.push(`<span style="color:var(--amber)">${links.length} link(s) left out</span>`);
+  const localText=`${c.newer_local} newer here, ${c.local_only} local-only${c.conflict?`, ${c.conflict} name clash${c.conflict===1?"":"es"}`:""}${links.length?`, ${links.length} link(s) left out: ${links.join(", ")}`:""}`;
   const remoteText=`${c.newer_remote} newer remote, ${c.remote_only} remote-only${c.conflict?`, ${c.conflict} name clash${c.conflict===1?"":"es"}`:""}`;
   $("localCompare").innerHTML=local.join(", "); $("localCompare").title=localText;
   $("remoteCompare").innerHTML=remote.join(", "); $("remoteCompare").title=remoteText;
@@ -1081,7 +1083,12 @@ async function onSync(direction){ if(!connected)return;
   const done=await new Promise(res=>{pendingSyncResolve=res;});
   if(!done.ok){toast(done.error||"Sync failed",true);return;}
   const result=done.result;
-  if(!result.count&&!(result.conflicts&&result.conflicts.length)){toast("Already in sync, nothing to transfer");return;}
+  if(!result.count&&!(result.conflicts&&result.conflicts.length)){
+    const links=result.excluded_links||[];
+    const total=links.length+(result.excluded_more||0);
+    if(total){clog(`Nothing to transfer, but ${total} local link(s) were left out: ${links.join(", ")}${result.excluded_more>0?` and ${result.excluded_more} more`:""}`,"warn");return;}
+    toast("Already in sync, nothing to transfer");return;
+  }
   if(!await confirmSyncPlan(result)){API.discard_sync(result.token);return;}
   const rr=await API.start_sync(result.token,"overwrite");
   if(!rr.ok){API.discard_sync(result.token);toast(rr.error||"Could not queue the transfer",true);return;}
@@ -1246,6 +1253,12 @@ function confirmSyncPlan(result){
   if(conflicts.length){
     const names=conflicts.map(c=>esc(c.name)).join(", ");
     text+=`<br><br><span style="color:var(--red)">${conflicts.length} name clash${conflicts.length===1?"":"es"} will not be synced (a file on one side and a folder with the same name on the other): ${names}</span>`;
+  }
+  const links=result.excluded_links||[];
+  if(links.length){
+    const names=links.map(n=>esc(n)).join(", ");
+    const more=result.excluded_more>0?` and ${result.excluded_more} more`:"";
+    text+=`<br><br><span style="color:var(--amber)">${links.length+(result.excluded_more||0)} local link(s) left out, not synced in either direction: ${names}${more}</span>`;
   }
   $("syText").innerHTML=text;
   $("syOk").textContent=`Transfer (${result.count} item${result.count===1?"":"s"})`;
