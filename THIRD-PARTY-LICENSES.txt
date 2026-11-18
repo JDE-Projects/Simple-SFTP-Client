@@ -3614,7 +3614,7 @@ necessary.  Here is a sample; alter the names:
 That's all there is to it!
 
 ============================================================
-cryptography 50.0.1
+cryptography 50.0.2
 ============================================================
 
 This software is made available under the terms of *either* of the licenses
@@ -4436,17 +4436,17 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ============================================================
-cryptography 50.0.1 embedded native dependencies
+cryptography 50.0.2 embedded native dependencies
 ============================================================
 The package's SBOMs identify the Rust components linked into cryptography. Their stated license expressions are listed below. The cryptography package supplies the full Apache-2.0 and BSD-3-Clause texts in the preceding section; it supplies no separate license text for these components.
 
-- cryptography-cffi 0.50.1: Apache-2.0 OR BSD-3-Clause
-- cryptography-crypto 0.50.1: Apache-2.0 OR BSD-3-Clause
-- cryptography-keepalive 0.50.1: Apache-2.0 OR BSD-3-Clause
-- cryptography-key-parsing 0.50.1: Apache-2.0 OR BSD-3-Clause
-- cryptography-openssl 0.50.1: Apache-2.0 OR BSD-3-Clause
-- cryptography-x509 0.50.1: Apache-2.0 OR BSD-3-Clause
-- cryptography-x509-verification 0.50.1: Apache-2.0 OR BSD-3-Clause
+- cryptography-cffi 0.50.2: Apache-2.0 OR BSD-3-Clause
+- cryptography-crypto 0.50.2: Apache-2.0 OR BSD-3-Clause
+- cryptography-keepalive 0.50.2: Apache-2.0 OR BSD-3-Clause
+- cryptography-key-parsing 0.50.2: Apache-2.0 OR BSD-3-Clause
+- cryptography-openssl 0.50.2: Apache-2.0 OR BSD-3-Clause
+- cryptography-x509 0.50.2: Apache-2.0 OR BSD-3-Clause
+- cryptography-x509-verification 0.50.2: Apache-2.0 OR BSD-3-Clause
 - asn1 0.24.1: BSD-3-Clause
 - asn1_derive 0.24.1: BSD-3-Clause
 - base64 0.23.0: MIT OR Apache-2.0
@@ -4467,11 +4467,11 @@ The package's SBOMs identify the Rust components linked into cryptography. Their
 - pkg-config 0.3.33: MIT OR Apache-2.0
 - portable-atomic 1.14.0: Apache-2.0 OR MIT
 - proc-macro2 1.0.107: MIT OR Apache-2.0
-- pyo3-build-config 0.29.0: MIT OR Apache-2.0
-- pyo3-ffi 0.29.0: MIT OR Apache-2.0
-- pyo3-macros-backend 0.29.0: MIT OR Apache-2.0
-- pyo3-macros 0.29.0: MIT OR Apache-2.0
-- pyo3 0.29.0: MIT OR Apache-2.0
+- pyo3-build-config 0.29.2: MIT OR Apache-2.0
+- pyo3-ffi 0.29.2: MIT OR Apache-2.0
+- pyo3-macros-backend 0.29.2: MIT OR Apache-2.0
+- pyo3-macros 0.29.2: MIT OR Apache-2.0
+- pyo3 0.29.2: MIT OR Apache-2.0
 - quote 1.0.47: MIT OR Apache-2.0
 - self_cell 1.3.0: Apache-2.0 OR GPL-2.0-only
 - shlex 2.0.1: MIT OR Apache-2.0
@@ -4480,7 +4480,7 @@ The package's SBOMs identify the Rust components linked into cryptography. Their
 - unicode-ident 1.0.24: (MIT OR Apache-2.0) AND Unicode-3.0
 - vcpkg 0.2.15: MIT OR Apache-2.0
 
-OpenSSL 4.0.2 is statically linked into cryptography\hazmat\bindings\_rust.pyd. It is a separate copy from the OpenSSL 3.5.7 DLLs that ship with CPython (see the CPython section). OpenSSL 3.0 and later is licensed under the Apache License 2.0; the full text is in the cryptography section above.
+OpenSSL 4.0.3 is statically linked into cryptography\hazmat\bindings\_rust.pyd. It is a separate copy from the OpenSSL 3.5.7 DLLs that ship with CPython (see the CPython section). OpenSSL 3.0 and later is licensed under the Apache License 2.0; the full text is in the cryptography section above.
 
 ============================================================
 Fonts - Sora and JetBrains Mono, OFL-1.1
