@@ -958,7 +958,7 @@ function renderPane(side){
     tr.onclick=(ev)=>{ if(ev.shiftKey&&s.anchor!=null){ selectRange(side,s.anchor,idx); }
       else if(ev.ctrlKey||ev.metaKey){ s.sel.has(idx)?s.sel.delete(idx):s.sel.add(idx); s.anchor=idx; }
       else { s.sel=new Set([idx]); s.anchor=idx; } renderPane(side); updateXfer(); };
-    tr.ondblclick=()=>{ if(e.is_dir){ (side==="local"?loadLocal:loadRemote)(joinp(side,s.cwd,e.name)); } else if(side==="remote"){ startTransfer("download",[idx]); } else { API.open_local(s.cwd,e.name); } };
+    tr.ondblclick=async()=>{ if(e.is_dir){ (side==="local"?loadLocal:loadRemote)(joinp(side,s.cwd,e.name)); } else if(side==="remote"){ startTransfer("download",[idx]); } else { await openLocal(e.name); } };
     tr.oncontextmenu=(ev)=>{ ev.preventDefault(); if(!s.sel.has(idx)){s.sel=new Set([idx]);s.anchor=idx;renderPane(side);updateXfer();} showCtx(ev,side,e); };
     tr.ondragstart=(ev)=>{ if(!s.sel.has(idx)){s.sel=new Set([idx]);s.anchor=idx;renderPane(side);updateXfer();} ev.dataTransfer.setData("text/side",side); };
     frag.appendChild(tr); });
@@ -1100,7 +1100,7 @@ async function onWatch(){ if(!connected)return;
 function showCtx(ev,side,e){ const m=$("ctx"); m.innerHTML="";
   const add=(label,fn,danger)=>{const b=document.createElement("button");b.textContent=label;if(danger)b.className="danger";b.onclick=()=>{m.style.display="none";fn();};m.appendChild(b);};
   const sep=()=>{const d=document.createElement("div");d.className="sepd";m.appendChild(d);};
-  if(side==="local"){ add("Upload",()=>startTransfer("upload")); if(!e.is_dir)add("Open",()=>API.open_local(state.local.cwd,e.name)); }
+  if(side==="local"){ add("Upload",()=>startTransfer("upload")); if(!e.is_dir)add("Open",async()=>await openLocal(e.name)); }
   else { add("Download",()=>startTransfer("download")); if(e.is_dir)add("Calculate size",()=>calcSize(e.name)); }
   sep(); add("Rename",()=>renameItem(side,e)); add("New folder",()=>newFolder(side)); sep();
   add("Delete",()=>deleteSel(side),true);
@@ -1111,11 +1111,12 @@ async function renameItem(side,e){ const nn=await prompt2("Rename","New name",e.
 async function newFolder(side){ const nn=await prompt2("New folder","Folder name"); if(!nn)return;
   const r=await API.make_dir(side,state[side].cwd,nn); if(!r.ok){clog("New folder failed: "+(r.error||""),"error");return;}
   clog(`Created folder ${nn} (${side})`,"ok"); refresh(side); }
+async function openLocal(name){ const r=await API.open_local(state.local.cwd,name); if(!r.ok)clog("Open failed: "+(r.error||""),"error"); }
 async function deleteSel(side){ const items=selItems(side); if(!items.length)return;
   if(!await confirm2("Delete",`Delete ${items.length} item(s) from ${side}? This cannot be undone.`))return;
   const r=await API.delete(side,state[side].cwd,items);
   const failed=(r.errors&&r.errors.length)||0, okCount=items.length-failed;
-  if(failed) clog(`Deleted ${okCount}/${items.length} from ${side}, ${failed} could not be deleted`,"error");
+  if(failed){ clog(`Deleted ${okCount}/${items.length} from ${side}, ${failed} could not be deleted`,"error"); (r.errors||[]).forEach(error=>clog(error,"error")); }
   else clog(`Deleted ${items.length} item(s) from ${side}`,"ok");
   refresh(side); }
 async function calcSize(name){
