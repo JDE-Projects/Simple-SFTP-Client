@@ -17,6 +17,35 @@ def exe_dir():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def windows_name_problem(name: str) -> str | None:
+    """Return why one path component cannot be a distinct Windows name."""
+    if ntpath.isreserved(name):
+        return "reserved Windows filename"
+    if ":" in name:
+        return "contains ':'"
+    return None
+
+
+def windows_destination_key(path: str) -> str:
+    """Return a conservative Windows destination comparison key for path.
+
+    The folding comes from Python's Unicode tables, not Windows' own table.
+    Against Windows' table over the Basic Multilingual Plane it misses no pair
+    Windows treats as one file, and treats roughly 260 rare letters as
+    matching when Windows would keep them apart, so it errs toward reporting
+    a clash. Unicode normalization is deliberately not applied because NTFS
+    keeps composed and decomposed forms as different files.
+    """
+    normalized = ntpath.normpath(ntpath.abspath(path))
+    key = []
+    for c in normalized:
+        lower = c.lower()
+        folded = lower if len(lower) == 1 else c
+        upper = folded.upper()
+        key.append(upper if len(upper) == 1 else folded)
+    return "".join(key)
+
+
 def safe_local_child(parent: str, name: str, root: str) -> str:
     """Validate a single server-supplied filename before it becomes part of a
     local path, and confirm the result stays under root (the local folder the
@@ -32,6 +61,9 @@ def safe_local_child(parent: str, name: str, root: str) -> str:
         raise ValueError(f"unsafe name {name!r}")
     if os.path.isabs(name) or os.path.splitdrive(name)[0] or ntpath.splitdrive(name)[0]:
         raise ValueError(f"unsafe name {name!r}")
+    problem = windows_name_problem(name)
+    if problem:
+        raise ValueError(f"unsafe name {name!r}: {problem}")
     candidate = os.path.join(parent, name)
     root_abs = os.path.abspath(root)
     try:
