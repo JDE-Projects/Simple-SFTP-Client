@@ -163,6 +163,35 @@ def test_download_failure_deletes_and_retires(sftp_env, monkeypatch):
     assert scratch_journal.current.entries() == []
 
 
+def test_download_short_data_with_unchanged_source_is_refused(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    name = "short-data.bin"
+    destination = local_dir / name
+    destination.write_bytes(b"original")
+    (server_root / name).write_bytes(b"new remote bytes")
+    real_stat = api._sftp.stat
+    stats = []
+    real_readv = paramiko.SFTPFile.readv
+
+    def unchanged_stat(path):
+        result = real_stat(path)
+        stats.append((result.st_size, result.st_mtime))
+        return result
+
+    def short_readv(self, chunks, *args, **kwargs):
+        yield from list(real_readv(self, chunks, *args, **kwargs))[:-1]
+
+    monkeypatch.setattr(api._sftp, "stat", unchanged_stat)
+    monkeypatch.setattr(paramiko.SFTPFile, "readv", short_readv)
+    with pytest.raises(IOError, match="download incomplete"):
+        transfer_io._get_file(api, api._sftp, f"/{name}", str(destination),
+                              lambda *_: None, lambda: False)
+    assert stats[0] == stats[1]
+    assert destination.read_bytes() == b"original"
+    assert _local_temp_files(local_dir) == []
+    assert scratch_journal.current.entries() == []
+
+
 def test_download_failure_keeps_entry_when_delete_fails(sftp_env, monkeypatch):
     api, server_root, local_dir = sftp_env
     name = "delete-fails.bin"
