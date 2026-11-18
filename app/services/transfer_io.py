@@ -27,10 +27,12 @@ def _put_file(api, sftp, lp, rp, cb, cancel_check):
     # read, or the server refuses to set them on the scratch file, the
     # upload is refused rather than publishing a file with the wrong
     # permissions; the existing file is left in place. Once the
-    # permissions are settled the scratch file is swapped in with
-    # posix_rename, which is atomic: a cancel, dropped connection, or
-    # exhausted retry can only ever leave the scratch file behind, never
-    # a half-written rp.
+    # permissions are settled, the local source is checked again before
+    # the scratch file is swapped in with posix_rename, which is atomic:
+    # a cancel, dropped connection, or exhausted retry can only ever leave
+    # the scratch file behind, never a half-written rp. The check compares
+    # local size, nanosecond mtime, and file identity. It cannot catch a
+    # change that finishes with the same size and time.
     #
     # Check cancel_check() only once there is another chunk actually to
     # send, and only after confirming there is more file left (the read
@@ -67,44 +69,59 @@ def _put_file(api, sftp, lp, rp, cb, cancel_check):
                     dst.write(chunk)
                     sent += len(chunk)
                     cb(sent, 0)
-        if finished:
-            temp_size = sftp.stat(temp).st_size
-            if temp_size != source_size:
-                raise IOError(
-                    f"upload incomplete: wrote {temp_size} of {source_size} bytes")
-            try:
-                existing_attr = sftp.stat(rp)
-            except Exception as e:
-                if getattr(e, "errno", None) == errno.ENOENT:
-                    existing_attr = None
-                else:
+            if finished:
+                temp_size = sftp.stat(temp).st_size
+                if temp_size != source_size:
                     raise IOError(
-                        "could not read the remote file's current "
-                        f"permissions ({e}); existing file left in "
-                        "place to protect its permissions") from e
-            if existing_attr is not None:
-                if existing_attr.st_mode is None:
-                    raise IOError(
-                        "could not read the remote file's current "
-                        "permissions (the server did not report them); "
-                        "existing file left in place to protect its "
-                        "permissions")
-                mode = stat.S_IMODE(existing_attr.st_mode) & 0o777
+                        f"upload incomplete: wrote {temp_size} of {source_size} bytes")
                 try:
-                    sftp.chmod(temp, mode)
+                    existing_attr = sftp.stat(rp)
+                except Exception as e:
+                    if getattr(e, "errno", None) == errno.ENOENT:
+                        existing_attr = None
+                    else:
+                        raise IOError(
+                            "could not read the remote file's current "
+                            f"permissions ({e}); existing file left in "
+                            "place to protect its permissions") from e
+                if existing_attr is not None:
+                    if existing_attr.st_mode is None:
+                        raise IOError(
+                            "could not read the remote file's current "
+                            "permissions (the server did not report them); "
+                            "existing file left in place to protect its "
+                            "permissions")
+                    mode = stat.S_IMODE(existing_attr.st_mode) & 0o777
+                    try:
+                        sftp.chmod(temp, mode)
+                    except Exception as e:
+                        raise IOError(
+                            "server refused to set the target's permissions "
+                            "on the new file; upload refused to protect the "
+                            "existing copy") from e
+                try:
+                    final_source_stat = os.fstat(src.fileno())
+                    final_path_stat = os.stat(lp)
+                except OSError as e:
+                    api._clear_mtime_fallback(lp, rp)
+                    raise IOError(
+                        f"{lp}: source file changed during upload; "
+                        "existing file left in place") from e
+                if (final_source_stat.st_size != source_stat.st_size or
+                        final_source_stat.st_mtime_ns != source_stat.st_mtime_ns or
+                        (final_path_stat.st_dev, final_path_stat.st_ino) !=
+                        (final_source_stat.st_dev, final_source_stat.st_ino)):
+                    api._clear_mtime_fallback(lp, rp)
+                    raise IOError(f"{lp}: source file changed during upload; "
+                                  "existing file left in place")
+                try:
+                    sftp.posix_rename(temp, rp)
                 except Exception as e:
                     raise IOError(
-                        "server refused to set the target's permissions "
-                        "on the new file; upload refused to protect the "
-                        "existing copy") from e
-            try:
-                sftp.posix_rename(temp, rp)
-            except Exception as e:
-                raise IOError(
-                    "server does not support safe atomic replace; "
-                    "file not written to protect the existing copy") from e
-            published = True
-            api._apply_upload_mtime(sftp, rp, lp, source_mtime, source_size)
+                        "server does not support safe atomic replace; "
+                        "file not written to protect the existing copy") from e
+                published = True
+                api._apply_upload_mtime(sftp, rp, lp, source_mtime, source_size)
         return finished
     finally:
         # Anything other than a proven, published swap leaves nothing
@@ -122,10 +139,13 @@ def _put_file(api, sftp, lp, rp, cb, cancel_check):
 def _get_file(api, sftp, rp, lp, cb, cancel_check):
     # Same idea as _put_file: stream into a local scratch file next to
     # the real destination, confirm its size once the loop finishes, then
-    # publish with os.replace, which is atomic on the same drive. A
-    # cancel, dropped connection, or exhausted retry only ever leaves the
-    # scratch file behind; the real destination is never opened for
-    # writing until the new copy is proven complete.
+    # publish with os.replace, which is atomic on the same drive. The
+    # remote source is checked again before publishing by size and
+    # whole-second modification time. A change that finishes with the same
+    # size and time is not caught. A cancel, dropped connection, or
+    # exhausted retry only ever leaves the scratch file behind; the real
+    # destination is never opened for writing until the new copy is proven
+    # complete.
     #
     # Downloads use bounded readv batches instead of unlimited prefetch.
     # Batching keeps a cancel's drain-and-close latency bounded: a bigger
@@ -141,7 +161,9 @@ def _get_file(api, sftp, rp, lp, cb, cancel_check):
         # Read the size once before downloading so every readv request is an
         # exact 32 KB chunk within the known remote extent.
         try:
-            expected_size = sftp.stat(rp).st_size
+            pre_read_stat = sftp.stat(rp)
+            expected_size = pre_read_stat.st_size
+            expected_mtime = pre_read_stat.st_mtime
         except Exception as e:
             raise IOError(
                 f"download not verified: could not read the remote "
@@ -216,7 +238,14 @@ def _get_file(api, sftp, rp, lp, cb, cancel_check):
                     f"download not verified: could not read the remote "
                     f"file size ({e}); existing file left in place") from e
             src_size = src_stat.st_size
-            src_mtime = int(src_stat.st_mtime or 0)
+            src_mtime_raw = src_stat.st_mtime
+            src_mtime = int(src_mtime_raw or 0)
+            if (src_size != expected_size or
+                    (expected_mtime is not None and src_mtime_raw is not None and
+                     src_mtime_raw != expected_mtime)):
+                api._clear_mtime_fallback(lp, rp)
+                raise IOError("source file changed during download; "
+                              "existing file left in place")
             temp_size = os.path.getsize(temp)
             if temp_size != src_size:
                 raise IOError(
@@ -226,6 +255,8 @@ def _get_file(api, sftp, rp, lp, cb, cancel_check):
             if journal is not None:
                 journal.retire(temp)
             api._apply_download_mtime(lp, rp, src_mtime, src_size)
+            if expected_mtime is None and src_mtime_raw is not None:
+                api._record_mtime_fallback(lp, rp, src_size)
         return finished
     finally:
         if not published and temp is not None and identity is not None:
