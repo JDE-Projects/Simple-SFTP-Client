@@ -155,7 +155,7 @@ def test_download_failure_deletes_and_retires(sftp_env, monkeypatch):
         return result
 
     monkeypatch.setattr(api._sftp, "stat", wrong_final_size)
-    with pytest.raises(IOError, match="download incomplete"):
+    with pytest.raises(IOError, match="source file changed"):
         transfer_io._get_file(api, api._sftp, f"/{name}", str(destination),
                               lambda *_: None, lambda: False)
     assert destination.read_bytes() == b"original"
