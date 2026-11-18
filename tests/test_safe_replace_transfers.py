@@ -7,16 +7,20 @@ while a transfer is actually in flight.
 Runs against the in-process SFTP server from conftest.py (sftp_env and the
 posix-rename-unsupported variant, sftp_env_no_posix_rename).
 """
+import builtins
 import errno
 import os
 import stat
 import time
+from pathlib import Path
 
 import paramiko
+import pytest
 
-from app.transfer_queue import COMPLETED, CANCELLED, FAILED, WAITING
-
+from app import scratch_journal
 from app.paths import is_temp_part
+from app.services import transfer_io
+from app.transfer_queue import CANCELLED, COMPLETED, FAILED, WAITING
 
 
 def _local_temp_files(folder):
@@ -105,6 +109,161 @@ def test_download_success_writes_correct_bytes_and_no_temp_left(
 
     assert state_of(api, item_id)["state"] == COMPLETED
     assert (local_dir / name).read_bytes() == data
+    assert _local_temp_files(local_dir) == []
+
+
+def test_download_records_then_retires_scratch(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    name = "journal.bin"
+    data = b"journalled download"
+    (server_root / name).write_bytes(data)
+    journal = scratch_journal.current
+    captured = []
+    real_set_identity = journal.set_identity
+
+    def capture_identity(scratch, identity):
+        real_set_identity(scratch, identity)
+        captured.extend(journal.entries())
+
+    monkeypatch.setattr(journal, "set_identity", capture_identity)
+    assert transfer_io._get_file(
+        api, api._sftp, f"/{name}", str(local_dir / name),
+        lambda *_: None, lambda: False)
+    assert captured and captured[0]["identity"] is not None
+    assert journal.entries() == []
+
+
+def test_download_failure_deletes_and_retires(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    name = "bad-size.bin"
+    destination = local_dir / name
+    destination.write_bytes(b"original")
+    (server_root / name).write_bytes(b"new bytes")
+    real_stat = api._sftp.stat
+    calls = 0
+
+    def wrong_final_size(path):
+        nonlocal calls
+        calls += 1
+        result = real_stat(path)
+        if calls == 2:
+            result.st_size += 1
+        return result
+
+    monkeypatch.setattr(api._sftp, "stat", wrong_final_size)
+    with pytest.raises(IOError, match="download incomplete"):
+        transfer_io._get_file(api, api._sftp, f"/{name}", str(destination),
+                              lambda *_: None, lambda: False)
+    assert destination.read_bytes() == b"original"
+    assert _local_temp_files(local_dir) == []
+    assert scratch_journal.current.entries() == []
+
+
+def test_download_failure_keeps_entry_when_delete_fails(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    name = "delete-fails.bin"
+    (server_root / name).write_bytes(b"data")
+    logged = []
+    monkeypatch.setattr(transfer_io, "log_event", lambda *args, **kwargs: logged.append(args[0]))
+    monkeypatch.setattr(transfer_io.os, "remove", lambda path: (_ for _ in ()).throw(OSError("denied")))
+
+    with pytest.raises(RuntimeError, match="stop"):
+        transfer_io._get_file(api, api._sftp, f"/{name}", str(local_dir / name),
+                              lambda *_: (_ for _ in ()).throw(RuntimeError("stop")),
+                              lambda: False)
+    assert len(scratch_journal.current.entries()) == 1
+    assert "scratch delete failed" in logged
+
+
+def test_download_does_not_delete_replaced_scratch(sftp_env, monkeypatch, tmp_path):
+    api, server_root, local_dir = sftp_env
+    name = "replaced.bin"
+    (server_root / name).write_bytes(b"data")
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(b"replacement")
+    replaced = []
+
+    def replace_before_stream(scratch, mode, *args, **kwargs):
+        if mode == "ab":
+            os.replace(replacement, scratch)
+            replaced.append(scratch)
+        return builtins.open(scratch, mode, *args, **kwargs)
+
+    monkeypatch.setattr(transfer_io, "open", replace_before_stream, raising=False)
+    with pytest.raises(IOError, match="scratch file was replaced"):
+        transfer_io._get_file(api, api._sftp, f"/{name}", str(local_dir / name),
+                              lambda *_: (_ for _ in ()).throw(RuntimeError("stop")),
+                              lambda: False)
+    assert replaced and Path(replaced[0]).read_bytes() == b"replacement"
+    assert scratch_journal.current.owns(replaced[0])
+
+
+def test_download_name_collision_retries(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    name = "collision.bin"
+    data = b"download data"
+    (server_root / name).write_bytes(data)
+    collision = local_dir / f".{name}.deadbeef.sxtpart"
+    collision.write_bytes(b"do not touch")
+    replacement = local_dir / f".{name}.cafebabe.sxtpart"
+    names = iter((str(collision), str(replacement)))
+    monkeypatch.setattr(transfer_io, "local_temp_path", lambda final: next(names))
+
+    assert transfer_io._get_file(api, api._sftp, f"/{name}", str(local_dir / name),
+                                 lambda *_: None, lambda: False)
+    assert collision.read_bytes() == b"do not touch"
+    assert (local_dir / name).read_bytes() == data
+    assert scratch_journal.current.entries() == []
+
+
+def test_download_register_failure_fails_download(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    name = "register-fails.bin"
+    (server_root / name).write_bytes(b"data")
+
+    class RefusingJournal:
+        def register(self, scratch, final):
+            raise OSError("Could not record the download scratch file.")
+
+    monkeypatch.setattr(scratch_journal, "current", RefusingJournal())
+    with pytest.raises(OSError, match="Could not record the download scratch file"):
+        transfer_io._get_file(api, api._sftp, f"/{name}", str(local_dir / name),
+                              lambda *_: None, lambda: False)
+    assert _local_temp_files(local_dir) == []
+
+
+def test_download_create_failure_retires_entry(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    name = "create-fails.bin"
+    (server_root / name).write_bytes(b"data")
+    journal = scratch_journal.current
+    real_open = builtins.open
+
+    def refusing_open(file, mode="r", *args, **kwargs):
+        if mode == "xb":
+            raise PermissionError(errno.EACCES, "denied", file)
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", refusing_open)
+    with pytest.raises(PermissionError):
+        transfer_io._get_file(api, api._sftp, f"/{name}", str(local_dir / name),
+                              lambda *_: None, lambda: False)
+    monkeypatch.setattr(builtins, "open", real_open)
+    assert journal.entries() == []
+    assert _local_temp_files(local_dir) == []
+
+
+def test_download_without_journal_still_works(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    monkeypatch.setattr(scratch_journal, "current", None)
+    (server_root / "works.bin").write_bytes(b"works")
+    assert transfer_io._get_file(api, api._sftp, "/works.bin", str(local_dir / "works.bin"),
+                                 lambda *_: None, lambda: False)
+    (server_root / "fails.bin").write_bytes(b"fails")
+    with pytest.raises(RuntimeError, match="stop"):
+        transfer_io._get_file(api, api._sftp, "/fails.bin", str(local_dir / "fails.bin"),
+                              lambda *_: (_ for _ in ()).throw(RuntimeError("stop")),
+                              lambda: False)
     assert _local_temp_files(local_dir) == []
 
 

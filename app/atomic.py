@@ -6,7 +6,7 @@ import time
 from app.debug import log_event
 
 
-def _atomic_write_json(path, obj, **dump_kwargs) -> bool:
+def _atomic_write_json(path, obj, *, durable=True, **dump_kwargs) -> bool:
     """Write obj as JSON to path atomically: write to a temp file in the same
     folder, fsync it, then os.replace over the real path so a reader never
     sees a half-written file and a crash mid-write never corrupts it. False
@@ -18,7 +18,8 @@ def _atomic_write_json(path, obj, **dump_kwargs) -> bool:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(obj, f, **dump_kwargs)
             f.flush()
-            os.fsync(f.fileno())
+            if durable:
+                os.fsync(f.fileno())
         os.replace(tmp, path)
         return True
     except Exception as e:

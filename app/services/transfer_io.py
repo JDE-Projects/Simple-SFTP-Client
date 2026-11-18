@@ -1,9 +1,12 @@
 """Service functions for the transfer_io area."""
 
-import os
-import stat
 import errno
+import os
 import posixpath
+import stat
+
+from app import scratch_journal
+from app.debug import log_event
 from app.errors import friendly_error
 from app.paths import local_temp_path, remote_temp_path
 
@@ -118,7 +121,9 @@ def _get_file(api, sftp, rp, lp, cb, cancel_check):
     # batch needs fewer idle round trips, but drains more data on cancel.
     # As with _put_file, a cancel only interrupts if a real chunk remains
     # to be written when it is observed.
-    temp = local_temp_path(lp)
+    journal = scratch_journal.current
+    temp = None
+    identity = None
     finished = True
     published = False
     try:
@@ -130,35 +135,61 @@ def _get_file(api, sftp, rp, lp, cb, cancel_check):
             raise IOError(
                 f"download not verified: could not read the remote "
                 f"file size ({e}); existing file left in place") from e
-        with sftp.open(rp, "r") as src:
-            with open(temp, "wb") as dst:
-                got = 0
-                batch_start = 0
-                while batch_start < expected_size:
-                    if cancel_check():
+        for _ in range(5):
+            temp = local_temp_path(lp)
+            if journal is not None:
+                journal.register(temp, lp)
+            try:
+                dst = open(temp, "xb")  # noqa: SIM115
+            except FileExistsError:
+                if journal is not None:
+                    journal.retire(temp)
+                continue
+            except OSError:
+                # Never created (no permission, folder gone...): nothing of
+                # ours is on disk, so the record has nothing left to cover.
+                if journal is not None:
+                    journal.retire(temp)
+                raise
+            stat_result = os.fstat(dst.fileno())
+            identity = (stat_result.st_dev, stat_result.st_ino)
+            if journal is not None:
+                journal.set_identity(temp, identity)
+            dst.close()
+            break
+        else:
+            raise OSError("Could not create a unique scratch file for download.")
+        with sftp.open(rp, "r") as src, open(temp, "ab") as dst:
+            stream_stat = os.fstat(dst.fileno())
+            if (stream_stat.st_dev, stream_stat.st_ino) != identity:
+                raise OSError("download scratch file was replaced; existing file left in place")
+            got = 0
+            batch_start = 0
+            while batch_start < expected_size:
+                if cancel_check():
+                    finished = False
+                    break
+                batch_end = min(
+                    batch_start + DOWNLOAD_READV_BATCH_SIZE, expected_size)
+                chunks = [
+                    (chunk_start, min(32768, batch_end - chunk_start))
+                    for chunk_start in range(batch_start, batch_end, 32768)
+                ]
+                cancelled = False
+                for chunk in src.readv(chunks):
+                    if not cancelled and chunk and cancel_check():
                         finished = False
-                        break
-                    batch_end = min(
-                        batch_start + DOWNLOAD_READV_BATCH_SIZE, expected_size)
-                    chunks = [
-                        (chunk_start, min(32768, batch_end - chunk_start))
-                        for chunk_start in range(batch_start, batch_end, 32768)
-                    ]
-                    cancelled = False
-                    for chunk in src.readv(chunks):
-                        if not cancelled and chunk and cancel_check():
-                            finished = False
-                            cancelled = True
-                        if not cancelled and chunk:
-                            dst.write(chunk)
-                            got += len(chunk)
-                            cb(got, 0)
-                    # readv starts Paramiko's prefetch thread on its first
-                    # next(). Drain the generator after a cancel so that
-                    # thread has stopped issuing reads before src closes.
-                    if cancelled:
-                        break
-                    batch_start = batch_end
+                        cancelled = True
+                    if not cancelled and chunk:
+                        dst.write(chunk)
+                        got += len(chunk)
+                        cb(got, 0)
+                # readv starts Paramiko's prefetch thread on its first
+                # next(). Drain the generator after a cancel so that
+                # thread has stopped issuing reads before src closes.
+                if cancelled:
+                    break
+                batch_start = batch_end
         if finished:
             # Confirm the remote size directly rather than through _rstat,
             # which hides a failed lookup as -1. A -1 there would skip the
@@ -181,14 +212,31 @@ def _get_file(api, sftp, rp, lp, cb, cancel_check):
                     f"download incomplete: wrote {temp_size} of {src_size} bytes")
             os.replace(temp, lp)
             published = True
+            if journal is not None:
+                journal.retire(temp)
             api._apply_download_mtime(lp, rp, src_mtime, src_size)
         return finished
     finally:
-        if not published:
+        if not published and temp is not None and identity is not None:
             try:
-                os.remove(temp)
-            except Exception:
-                pass
+                current_stat = os.lstat(temp)
+            except FileNotFoundError:
+                if journal is not None:
+                    journal.retire(temp)
+            except OSError as error:
+                log_event("scratch delete failed", error=error)
+            else:
+                current_identity = (current_stat.st_dev, current_stat.st_ino)
+                if not stat.S_ISREG(current_stat.st_mode) or current_identity != identity:
+                    log_event("scratch identity mismatch")
+                else:
+                    try:
+                        os.remove(temp)
+                    except OSError as error:
+                        log_event("scratch delete failed", error=error)
+                    else:
+                        if journal is not None:
+                            journal.retire(temp)
 
 
 def _mtime_fallback_key(api, lp, rp):

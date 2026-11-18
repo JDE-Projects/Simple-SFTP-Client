@@ -126,5 +126,9 @@ def remote_temp_path(final_path: str) -> str:
 
 SESSIONS_FILE = os.path.join(exe_dir(), "servers.json")
 
+SCRATCH_JOURNAL_FILE = os.path.join(exe_dir(), "scratch-journal.json")
+
+SCRATCH_LOCK_FILE = os.path.join(exe_dir(), "scratch-journal.lock")
+
 KNOWN_HOSTS_FILE = os.path.join(exe_dir(), "known_hosts")
 

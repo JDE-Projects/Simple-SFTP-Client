@@ -14,7 +14,7 @@ from pathlib import Path
 import paramiko
 import pytest
 
-from app import paths, prefs
+from app import paths, prefs, scratch_journal
 from app.api import Api
 from app.debug import debug
 from simple_sftp_client import APP_VERSION
@@ -35,6 +35,8 @@ def _repo_data_snapshot():
     repo_root = Path(__file__).resolve().parents[1]
     named_files = (
         "servers.json",
+        "scratch-journal.json",
+        "scratch-journal.lock",
         "known_hosts",
         "simple_sftp_client.pref",
     )
@@ -70,11 +72,23 @@ def isolate_app_data_files(tmp_path_factory, monkeypatch):
     """Redirect application data writes to a per-test temporary folder."""
     data_dir = tmp_path_factory.mktemp("app-data")
     monkeypatch.setattr(paths, "SESSIONS_FILE", str(data_dir / "servers.json"))
+    monkeypatch.setattr(paths, "SCRATCH_JOURNAL_FILE",
+                        str(data_dir / "scratch-journal.json"))
+    monkeypatch.setattr(paths, "SCRATCH_LOCK_FILE",
+                        str(data_dir / "scratch-journal.lock"))
     monkeypatch.setattr(paths, "KNOWN_HOSTS_FILE", str(data_dir / "known_hosts"))
     monkeypatch.setattr(prefs, "_pref_path",
                         lambda: str(data_dir / "simple_sftp_client.pref"))
     monkeypatch.setattr(debug, "log_dir", str(data_dir))
-    return data_dir
+    journal = scratch_journal.ScratchJournal()
+    assert journal.open()
+    scratch_journal.current = journal
+    try:
+        yield data_dir
+    finally:
+        journal.close()
+        if scratch_journal.current is journal:
+            scratch_journal.current = None
 
 
 # ───────────── fixtures ─────────────

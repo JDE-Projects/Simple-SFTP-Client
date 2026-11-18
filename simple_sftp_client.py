@@ -25,6 +25,7 @@ import threading
 import webview
 
 from app.api import Api
+from app import scratch_journal
 from app.debug import debug, log_event
 from app.geometry import _restore_geometry, _save_geometry
 from app.paths import resource_path
@@ -203,6 +204,14 @@ def main():
         except Exception:
             pass
     api = Api(APP_VERSION)
+    journal = scratch_journal.ScratchJournal()
+    if journal.open():
+        scratch_journal.current = journal
+    else:
+        api._vlog(
+            "Another copy may be running or the scratch record file could not be read, "
+            "so leftover scratch files from this session will not be cleaned up automatically.",
+            "warn")
     debug.on_warning = api._on_debug_warning
     debug.prune()  # catches anything already over the cap from a previous run
     window = webview.create_window(
@@ -244,6 +253,9 @@ def main():
             threading.Thread(target=lambda: api._emit("quit-confirm", {}), daemon=True).start()
             return False
         api._shutdown()
+        journal.close()
+        if scratch_journal.current is journal:
+            scratch_journal.current = None
         _save_geometry(window)
         return True
     window.events.closing += _on_closing
