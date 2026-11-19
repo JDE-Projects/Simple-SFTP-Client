@@ -109,6 +109,47 @@ try{
   ok("a refused retry shows a toast",()=>refusalRendered&&refusalShown,()=>consoleText());
   qModalOpen=false; $("queueModal").classList.remove("show");
 
+  // The runner makes this one local subfolder unreadable in the real scanner,
+  // matching the backend regression fixture without depending on Windows ACLs.
+  await fs("unreadable_scan");
+  await loadLocal(T.incomplete); select("local",["top"]);
+  await startTransfer("upload");
+  const incompleteLineFound=await waitFor(()=>[...document.querySelectorAll("#console .cline.scan-report")]
+    .some(line=>line.textContent.includes("Scan incomplete")),20000);
+  const incompleteLine=[...document.querySelectorAll("#console .cline.scan-report")]
+    .find(line=>line.textContent.includes("Scan incomplete"));
+  ok("incomplete scan console line is clickable",()=>incompleteLineFound&&!!incompleteLine&&incompleteLine.tabIndex===0&&incompleteLine.getAttribute("role")==="button",()=>consoleText());
+
+  incompleteLine&&incompleteLine.click();
+  const consoleListOpened=await waitFor(()=>$("scanProblemsModal").classList.contains("show")&&$("scanProblemsList").textContent.includes("denied"),5000);
+  ok("clicking the incomplete scan console line opens its locations list",()=>consoleListOpened,()=>$("scanProblemsSummary").textContent+" | "+$("scanProblemsList").textContent);
+
+  let copiedList="";
+  try{ Object.defineProperty(navigator,"clipboard",{configurable:true,value:{writeText:async text=>{copiedList=text;}}}); }catch(e){}
+  $("scanProblemsCopy").click();
+  const copied=await waitFor(()=>consoleText().includes("List copied."),3000);
+  ok("Copy list copies the summary and unreadable folder",()=>copied&&copiedList.includes($("scanProblemsSummary").textContent)&&copiedList.includes("denied"),()=>copiedList);
+
+  $("scanProblemsClose").click();
+  const closeWorks=!$("scanProblemsModal").classList.contains("show");
+  $("qViewBtn").click();
+  const reportRowFound=await waitFor(()=>[...$("qList").querySelectorAll(".qrow")].some(row=>row.textContent.includes("Scan incomplete")),5000);
+  const reportRow=[...$("qList").querySelectorAll(".qrow")].find(row=>row.textContent.includes("Scan incomplete"));
+  const reportButton=reportRow&&[...reportRow.querySelectorAll("button")].find(button=>button.textContent==="Show list");
+  const noRetry=reportRow&&!reportRow.querySelector(".qretry");
+  reportButton&&reportButton.click();
+  const queueListOpened=await waitFor(()=>$("scanProblemsModal").classList.contains("show")&&$("scanProblemsList").textContent.includes("denied"),5000);
+  ok("queue scan summary has Show list without Retry and opens the locations list",()=>reportRowFound&&!!reportButton&&noRetry&&queueListOpened,()=>reportRow&&reportRow.textContent);
+
+  document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));
+  ok("locations list closes with Close and Escape",()=>closeWorks&&!$("scanProblemsModal").classList.contains("show"));
+
+  await openScanProblems(-1);
+  ok("an unknown scan report shows its unavailable message",()=>$("scanProblemsModal").classList.contains("show")&&$("scanProblemsSummary").textContent==="This list is no longer available.",()=>$("scanProblemsSummary").textContent);
+  $("scanProblemsClose").click(); qModalOpen=false; $("queueModal").classList.remove("show");
+  await fs("readable_scan");
+  await loadLocal(T.local);
+
   // Selection survives an automatic refresh that inserts rows above it.
   select("local",["b.txt","c.txt"]); select("remote",["0dl.txt","dl1.txt"]);
   $("qMeta").textContent="";

@@ -14,6 +14,11 @@
       "fixture": "tools/ui_check/name_clash_fixture.py",
       "timeout_s": 120
     },
+    "incomplete-scan": {
+      "script": "tools/ui_check/incomplete_scan.js",
+      "fixture": "tools/ui_check/incomplete_scan_fixture.py",
+      "timeout_s": 120
+    },
     "links": {
       "script": "tools/ui_check/links.js",
       "fixture": "tools/ui_check/links_fixture.py",

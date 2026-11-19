@@ -37,6 +37,7 @@ import paramiko  # noqa: E402
 
 from app.api import Api  # noqa: E402
 from app.debug import debug  # noqa: E402
+from app.services import scanning as scanning_service  # noqa: E402
 from simple_sftp_client import APP_VERSION  # noqa: E402
 from tools import sftp_server_core  # noqa: E402
 from tools.sftp_server_core import PASSWORD, USER  # noqa: E402
@@ -59,7 +60,7 @@ def make_fixture(work):
     local = os.path.join(work, "local")
     other_local = os.path.join(work, "other_local")
     for d in (server_root, os.path.join(server_root, "other"), local,
-              os.path.join(local, "sub"), other_local):
+              os.path.join(local, "sub"), os.path.join(work, "incomplete", "top", "denied"), other_local):
         os.makedirs(d)
     files = [(os.path.join(local, n), n) for n in ("a.txt", "b.txt", "c.txt")] + [
         (os.path.join(local, "sub", "insub.txt"), "x"),
@@ -74,7 +75,8 @@ def make_fixture(work):
             f.write(data)
     with open(os.path.join(local, "Report.txt"), "w") as f:
         f.write("local")
-    return server_root, {"local": local, "sub": os.path.join(local, "sub"), "other": other_local}
+    return server_root, {"local": local, "sub": os.path.join(local, "sub"), "other": other_local,
+                         "incomplete": os.path.join(work, "incomplete")}
 
 
 def build_page(page_path, targets):
@@ -103,6 +105,8 @@ def main(argv):
         prefix="sftp-ui-check-", dir=os.environ.get("SFTP_UI_CHECK_TEMP_DIR")
     )
     server_root, targets = make_fixture(work)
+    unreadable_folder = os.path.join(targets["incomplete"], "top", "denied")
+    real_os_scandir = scanning_service.os.scandir
     fs_cls = sftp_server_core.make_fs(server_root)
     srv_sock, port = sftp_server_core.start(fs_cls, paramiko.RSAKey.generate(2048))
 
@@ -201,6 +205,19 @@ def main(argv):
                         ((r"C:\UI-CHECK\REPORT.TXT", "file", "/two/report.txt"),),
                     )
                     return self._send({"ok": True, "item_id": first})
+                if op == "unreadable_scan":
+                    real_scandir = scanning_service.os.scandir
+
+                    def unreadable_scandir(path):
+                        if os.fspath(path) == unreadable_folder:
+                            raise PermissionError("access denied")
+                        return real_scandir(path)
+
+                    scanning_service.os.scandir = unreadable_scandir
+                    return self._send({"ok": True})
+                if op == "readable_scan":
+                    scanning_service.os.scandir = real_os_scandir
+                    return self._send({"ok": True})
             if self.path == "/report":
                 results.update(body)
                 done.set()
