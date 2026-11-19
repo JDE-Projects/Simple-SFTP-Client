@@ -328,3 +328,109 @@ def test_too_many_unsafe_names_refuses_during_walk(tmp_path, monkeypatch):
         api._compute_compare(_FakeSftp({
             "/": [_FakeAttr(f"bad{i}:x") for i in range(6)],
         }), str(local_dir), "/")
+
+
+def test_non_ascii_windows_equivalent_names_are_held_as_uncertain(tmp_path):
+    api = _api()
+    local_dir = tmp_path / "local"
+    local_dir.mkdir()
+    _local(local_dir, "σ.txt")
+
+    data = api._compute_compare(_FakeSftp({"/": [_FakeAttr("Σ.txt")]}), str(local_dir), "/")
+    up_plan, up_transfers, _conflicts, up_omissions = _sync(
+        api, local_dir, {"/": [_FakeAttr("Σ.txt")]}, "upload")
+    down_plan, down_transfers, _conflicts, down_omissions = _sync(
+        api, local_dir, {"/": [_FakeAttr("Σ.txt")]}, "download")
+
+    assert data["files"] == {}
+    assert {entry["name"] for entry in data["not_compared"]} == {"σ.txt", "Σ.txt"}
+    assert {entry["reason"] for entry in data["not_compared"]} == {"uncertain name match"}
+    assert up_plan == up_transfers == [] and down_plan == down_transfers == []
+    assert up_omissions["count"] == down_omissions["count"] == 2
+
+
+def test_non_ascii_uncertain_folder_holds_both_subtrees(tmp_path):
+    api = _api()
+    local_dir = tmp_path / "local"
+    local_dir.mkdir()
+    _local(local_dir, "σ/local.txt")
+    tree = {"/": [_FakeAttr("Σ", is_dir=True)], "/Σ": [_FakeAttr("remote.txt")]}
+
+    up_plan, up_transfers, _conflicts, omissions = _sync(api, local_dir, tree, "upload")
+    down_plan, down_transfers, _conflicts, _omissions = _sync(api, local_dir, tree, "download")
+
+    assert up_plan == up_transfers == [] and down_plan == down_transfers == []
+    assert {entry["reason"] for entry in omissions["entries"]} == {"uncertain name match"}
+
+
+def test_local_windows_name_clash_holds_every_entry(tmp_path, monkeypatch):
+    api = _api()
+    local_dir = tmp_path / "local"
+    local_dir.mkdir()
+
+    def fake_iter_local(_local, _remote, _is_dir, **_kwargs):
+        yield str(local_dir / "σ.txt"), "/σ.txt", 1, 1, False
+        yield str(local_dir / "Σ.txt"), "/Σ.txt", 1, 1, False
+
+    monkeypatch.setattr(api, "_iter_local", fake_iter_local)
+    plan, transfers, _conflicts, omissions = _sync(api, local_dir, {"/": []}, "upload")
+
+    assert plan == transfers == []
+    assert omissions["entries"] == [
+        {"name": "σ.txt", "reason": "name clash", "is_dir": False},
+        {"name": "Σ.txt", "reason": "name clash", "is_dir": False},
+    ]
+
+
+def test_case_paired_file_and_nonempty_folder_is_conflict(tmp_path):
+    api = _api()
+    local_dir = tmp_path / "local"
+    local_dir.mkdir()
+    _local(local_dir, "Docs")
+    tree = {"/": [_FakeAttr("docs", is_dir=True)], "/docs": [_FakeAttr("a.txt")]}
+
+    data = api._compute_compare(_FakeSftp(tree), str(local_dir), "/")
+    up_plan, up_transfers, up_conflicts, _omissions = _sync(api, local_dir, tree, "upload")
+    down_plan, down_transfers, down_conflicts, _omissions = _sync(api, local_dir, tree, "download")
+
+    assert data["files"]["docs"] == data["folders"]["docs"] == "conflict"
+    assert up_plan == up_transfers == [] and down_plan == down_transfers == []
+    assert up_conflicts == down_conflicts == [{"name": "docs"}]
+
+
+def test_exact_case_file_and_nonempty_folder_is_conflict(tmp_path):
+    api = _api()
+    local_dir = tmp_path / "local"
+    local_dir.mkdir()
+    _local(local_dir, "docs")
+    tree = {"/": [_FakeAttr("docs", is_dir=True)], "/docs": [_FakeAttr("a.txt")]}
+
+    data = api._compute_compare(_FakeSftp(tree), str(local_dir), "/")
+    _plan, transfers, conflicts, _omissions = _sync(api, local_dir, tree, "download")
+
+    assert data["files"]["docs"] == "conflict"
+    assert transfers == [] and conflicts == [{"name": "docs"}]
+
+
+def test_remote_clash_keeps_raw_folder_spelling_for_unrelated_local_child(tmp_path):
+    api = _api()
+    local_dir = tmp_path / "local"
+    local_dir.mkdir()
+    _local(local_dir, "Docs/new.txt")
+    tree = {"/": [_FakeAttr("docs", is_dir=True)],
+            "/docs": [_FakeAttr("A.txt"), _FakeAttr("a.txt")]}
+
+    _plan, transfers, _conflicts, _omissions = _sync(api, local_dir, tree, "upload")
+
+    assert transfers == [(str(local_dir / "Docs" / "new.txt"), "/docs/new.txt", 1, False)]
+
+
+def test_prefix_inventory_limit_refuses_deep_folder_chain(tmp_path, monkeypatch):
+    api = _api()
+    local_dir = tmp_path / "local"
+    (local_dir / "a" / "b" / "c").mkdir(parents=True)
+    _local(local_dir, "a/b/c/file.txt")
+    monkeypatch.setattr(constants, "COMPARE_SYNC_ENTRY_LIMIT", 2)
+
+    with pytest.raises(ScanIncomplete, match="Too many files to compare"):
+        api._compute_compare(_FakeSftp({"/": []}), str(local_dir), "/")

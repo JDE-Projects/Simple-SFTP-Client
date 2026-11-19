@@ -981,7 +981,11 @@ function compareRel(side,e){
   if(nCwd===nRoot) relDir="";
   else if(nCwd.startsWith(nRoot+"/")) relDir=nCwd.slice(nRoot.length+1);
   else return null;   // this pane is not inside the compared tree
-  return relDir?relDir+"/"+e.name:e.name;
+  const rel=relDir?relDir+"/"+e.name:e.name;
+  // A local name paired with a remote name that differs only in capitals is
+  // reported under the remote spelling; localAliases maps the local one to it.
+  if(side==="local"&&compareMap.localAliases&&Object.hasOwn(compareMap.localAliases,rel))return compareMap.localAliases[rel];
+  return rel;
 }
 function insideComparedRoot(side,cwd){
   if(!compareMap)return true;
@@ -1122,7 +1126,7 @@ async function onCompare(){ if(!connected)return;
   startQueuePoll(false); }
 function applyCompareResult(result){
   compareMap={rootLocal:result.root_local,rootRemote:result.root_remote,
-    files:result.files||{},folders:result.folders||{},notCompared:result.not_compared||[],notComparedCount:omissionCount(result)};
+    files:result.files||{},folders:result.folders||{},localAliases:result.local_aliases||{},notCompared:result.not_compared||[],notComparedCount:omissionCount(result)};
   const c={};["same","newer_local","newer_remote","local_only","remote_only","conflict"].forEach(k=>c[k]=0);
   for(const n in compareMap.files)c[compareMap.files[n]]++;
   // Folders carry their own local_only/remote_only status for an empty

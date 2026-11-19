@@ -116,6 +116,36 @@ def test_all_identical_pair_yields_empty_plan(sftp_env):
     assert transfers == []
 
 
+def test_ascii_case_pair_upload_targets_existing_remote_spelling(sftp_env):
+    api, server_root, local_dir = sftp_env
+    _put_local(local_dir, "report.txt", b"local", mtime=1_700_003_600)
+    _put_remote(api, server_root, "Report.txt", b"remote", mtime=1_700_000_000)
+
+    _plan, transfers = _sync(api, local_dir, "upload")
+
+    assert transfers == [(str(local_dir / "report.txt"), "/Report.txt", 5, False)]
+
+
+def test_ascii_case_pair_download_targets_existing_local_spelling(sftp_env):
+    api, server_root, local_dir = sftp_env
+    _put_local(local_dir, "report.txt", b"local", mtime=1_700_000_000)
+    _put_remote(api, server_root, "Report.txt", b"remote", mtime=1_700_003_600)
+
+    _plan, transfers = _sync(api, local_dir, "download")
+
+    assert transfers == [(str(local_dir / "report.txt"), "/Report.txt", 6, False)]
+
+
+def test_remote_only_child_downloads_into_existing_local_folder_spelling(sftp_env):
+    api, server_root, local_dir = sftp_env
+    _put_local(local_dir, "Docs/y.txt", b"local")
+    _put_remote(api, server_root, "docs/x.txt", b"remote")
+
+    _plan, transfers = _sync(api, local_dir, "download")
+
+    assert (str(local_dir / "Docs" / "x.txt"), "/docs/x.txt", 6, False) in transfers
+
+
 # ───────────── recursive (nested) cases ─────────────
 
 def test_nested_changed_file_appears_in_plan_with_its_rel_path(sftp_env):

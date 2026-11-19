@@ -172,6 +172,22 @@ def test_sync_down_never_targets_link(sftp_env):
     assert not any("j" in remote_path.split("/") for _local, remote_path, *_ in transfers)
 
 
+def test_compare_and_sync_exclude_case_paired_local_link(sftp_env):
+    api, server_root, local_dir = sftp_env
+    target = local_dir / "target"
+    target.mkdir()
+    _junction(local_dir / "Link", target)
+    (server_root / "link").mkdir()
+    (server_root / "link" / "f.txt").write_text("remote")
+
+    result = api._compute_compare(api._sftp, str(local_dir), "/")
+    _plan, transfers, _conflicts = api._compute_sync(
+        api._sftp, str(local_dir), "/", "download")
+
+    assert "link/f.txt" not in result["files"]
+    assert not any(remote_path.endswith("/link/f.txt") for _local, remote_path, *_ in transfers)
+
+
 def test_compare_root_link_allowed(sftp_env):
     api, _server_root, local_dir = sftp_env
     target = local_dir / "target"

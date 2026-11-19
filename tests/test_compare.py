@@ -101,6 +101,32 @@ def test_equal_size_and_mtimes_within_tolerance_is_same(sftp_env):
     assert data["files"]["close.txt"] == "same"
 
 
+def test_ascii_case_pair_compare_uses_remote_name_and_local_alias(sftp_env):
+    api, server_root, local_dir = sftp_env
+    mtime = 1_700_000_000
+    _put_local(local_dir, "report.txt", b"same", mtime=mtime)
+    _put_remote(api, server_root, "Report.txt", b"same", mtime=mtime)
+
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
+
+    assert data["files"] == {"Report.txt": "same"}
+    assert data["local_aliases"] == {"report.txt": "Report.txt"}
+
+
+def test_paired_folder_uses_remote_spelling_for_local_only_child(sftp_env):
+    api, server_root, local_dir = sftp_env
+    _put_local(local_dir, "Docs/new.txt", b"new")
+    _put_remote(api, server_root, "docs/other.txt", b"other")
+
+    data = api._compute_compare(api._sftp, str(local_dir), "/")
+    _plan, transfers, _conflicts = api._compute_sync(
+        api._sftp, str(local_dir), "/", "upload")
+
+    assert data["local_aliases"] == {"Docs": "docs", "Docs/new.txt": "docs/new.txt"}
+    assert data["folders"]["docs"] == "has_changes"
+    assert (str(local_dir / "Docs" / "new.txt"), "/docs/new.txt", 3, False) in transfers
+
+
 # ───────────── async contract: compare()/sync_plan()/start_sync() over poll_queue() ─────────────
 
 def test_compare_delivers_result_via_poll_queue(sftp_env, wait_for_compare):
@@ -148,6 +174,20 @@ def test_sync_start_transfers_only_changed_and_new_files(sftp_env, wait_for_comp
     # the identical nested file was never re-sent: its remote content is
     # untouched (still the original bytes, not overwritten)
     assert (server_root / "top" / "same.txt").read_bytes() == data
+
+
+def test_start_sync_queues_ascii_case_pair_at_existing_remote_name(
+        sftp_env, wait_for_compare, wait_for_queue_count):
+    api, server_root, local_dir = sftp_env
+    _put_local(local_dir, "report.txt", b"local", mtime=1_700_003_600)
+    _put_remote(api, server_root, "Report.txt", b"remote", mtime=1_700_000_000)
+
+    assert api.sync_plan(str(local_dir), "/", "upload")["ok"] is True
+    done = wait_for_compare(api, kind="sync")
+    assert api.start_sync(done["result"]["token"])["ok"] is True
+    wait_for_queue_count(api, 1)
+
+    assert api._queue._items[0].remote_path.endswith("/Report.txt")
 
 
 def test_compare_or_sync_refuses_while_one_is_already_running(sftp_env, wait_for_compare):

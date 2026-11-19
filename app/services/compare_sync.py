@@ -24,35 +24,34 @@ class _BoundedCollector(list):
         super().append(item)
 
 
+class _PairMap(dict):
+    """Comparison entries plus local spelling aliases for their result keys."""
+
+    def __init__(self):
+        super().__init__()
+        self.local_aliases = {}
+
+
 def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_event=None,
                        excluded=None, omissions=None):
-    """Builds rel -> (size, mtime, local_path, remote_path, is_dir) maps
-    for both sides of a folder pair, by streaming the same
-    _iter_local/_iter_remote enumerators the background scanner uses
-    (including their empty-folder markers), so compare/sync descend the
-    whole tree instead of one directory level. rel is a posix path
-    relative to remote_dir, shared between both maps so a file or folder
-    at any depth lines up on both sides. The compared root itself (rel
-    ".") is never added: it is the folder being compared, not a child of
-    it. on_progress, if given, is called with a count of files seen since
-    the last call (not a running total), so the caller can accumulate it
-    the same way the scan progress counter does. Returns (None, None) if
-    stop_event fires before either walk finishes, the signal a caller
-    uses to tell a cancelled compare/sync apart from a genuinely empty
-    one. Raises ScanIncomplete if a folder could not be listed or a
-    file's metadata could not be read during either walk, since a
-    compare/sync result built on a tree that was not fully seen can
-    misclassify files as one-sided or in-sync (unlike the ordinary
-    transfer scan, which reports partial progress instead). Also raises
-    ScanIncomplete if either side's map would grow past
-    COMPARE_SYNC_ENTRY_LIMIT entries, refusing before the remote (network)
-    walk ever starts if the local walk already hit the limit, and the same
-    way if the remote walk skips more names than that limit. Unsafe remote
-    names and Windows destination name clashes are omitted from the maps and
-    reported through omissions; every entry in a clash group is held back so
-    compare/sync never classifies or transfers it."""
-    local_map = {}
-    remote_map = {}
+    """Build canonical comparison maps while preserving each side's paths.
+
+    Entries pair only when every relative-path segment is equal apart from
+    ASCII letter case. Result keys use remote spelling where that folder or
+    entry exists remotely, otherwise local spelling. Windows-equivalent names
+    that are not ASCII-case pairs, local destination clashes, unsafe remote
+    names, and scanner-reported remote clashes are held back with omissions.
+    Folder inventories include non-empty folders, allowing a file on one side
+    and a folder on the other to be reported as a conflict. The compared root
+    (rel ".") is never added. on_progress receives a count since its prior
+    call, not a running total. Returns (None, None) on cancellation so callers
+    can distinguish it from an empty result. Raises ScanIncomplete for any
+    listing or metadata failure, because a partially seen tree can misclassify
+    entries, and for an over-limit walk. A local walk problem or limit refusal
+    happens before the remote network walk starts; a remote walk is likewise
+    refused when its skipped names exceed the limit."""
+    local_map = _PairMap()
+    remote_map = _PairMap()
     seen_since_report = 0
     problems = []
 
@@ -81,7 +80,70 @@ def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_
             omissions["entries"].append(
                 {"name": name, "reason": reason, "is_dir": bool(is_dir)})
 
+    rel_keys = {}
+
+    def rel_key(rel):
+        key = rel_keys.get(rel)
+        if key is None:
+            key = windows_destination_key(os.path.join(local_dir, *rel.split("/")))
+            rel_keys[rel] = key
+        return key
+
+    def ascii_pair(left, right):
+        left_parts = left.split("/")
+        right_parts = right.split("/")
+        if len(left_parts) != len(right_parts):
+            return False
+        for left_part, right_part in zip(left_parts, right_parts, strict=True):
+            if len(left_part) != len(right_part):
+                return False
+            for left_char, right_char in zip(left_part, right_part, strict=True):
+                if left_char == right_char:
+                    continue
+                if not (left_char.isascii() and right_char.isascii()
+                        and left_char.isalpha() and right_char.isalpha()
+                        and left_char.lower() == right_char.lower()):
+                    return False
+        return True
+
+    def inventory(entries):
+        folders = {}
+        for rel, entry in entries:
+            parts = rel.split("/")
+            for depth in range(1, len(parts)):
+                folders.setdefault("/".join(parts[:depth]), True)
+            if entry[4]:
+                folders[rel] = True
+        return folders
+
+    def held_by_key(key, keys):
+        while key:
+            if key in keys:
+                return key
+            parent, sep, _ = key.rpartition("\\")
+            if not sep:
+                return None
+            key = parent
+        return None
+
+    def record_entries(entries, reason):
+        for rel, entry in entries:
+            record_omission(rel, reason, entry[4])
+
+    def keep_outside(entries, held_keys):
+        return [(rel, entry) for rel, entry in entries
+                if held_by_key(rel_key(rel), held_keys) is None]
+
+    def indexed_inventory(entries, folders):
+        inventory_by_key = {}
+        for rel, _entry in entries:
+            inventory_by_key.setdefault(rel_key(rel), rel)
+        for rel in folders:
+            inventory_by_key.setdefault(rel_key(rel), rel)
+        return inventory_by_key
+
     local_excluded = []
+    local_entries = []
     for lp, rp, size, mtime, is_dir in api._iter_local(
             local_dir, remote_dir, True, problems=problems, include_dirs=True,
             excluded=local_excluded, allow_root_link=True):
@@ -90,9 +152,9 @@ def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_
         rel = posixpath.relpath(rp, remote_dir)
         if rel == ".":
             continue
-        if len(local_map) >= constants.COMPARE_SYNC_ENTRY_LIMIT:
+        if len(local_entries) >= constants.COMPARE_SYNC_ENTRY_LIMIT:
             _raise_too_many()
-        local_map[rel] = (size, mtime, lp, rp, is_dir)
+        local_entries.append((rel, (size, mtime, lp, rp, is_dir)))
         bump()
     # Fail fast: if the local walk already found a problem, refuse now
     # rather than running the whole remote (network) walk just to discard it.
@@ -104,6 +166,7 @@ def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_
         excluded.extend(excluded_rels)
     remote_clashes = _BoundedCollector(_raise_too_many)
     unsafe_names = _BoundedCollector(_raise_too_many)
+    remote_entries = []
     for lp, rp, size, mtime, is_dir in api._iter_remote(
             sftp, remote_dir, local_dir, True, local_dir, problems=problems, include_dirs=True,
             clashes=remote_clashes, unsafe_names=unsafe_names):
@@ -112,13 +175,21 @@ def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_
         rel = posixpath.relpath(rp, remote_dir)
         if rel == ".":
             continue
-        if len(remote_map) >= constants.COMPARE_SYNC_ENTRY_LIMIT:
+        if len(remote_entries) >= constants.COMPARE_SYNC_ENTRY_LIMIT:
             _raise_too_many()
-        remote_map[rel] = (size, mtime, lp, rp, is_dir)
+        remote_entries.append((rel, (size, mtime, lp, rp, is_dir)))
         bump()
     for unsafe in unsafe_names:
         record_omission(posixpath.relpath(unsafe["remote_path"], remote_dir),
                         "unsafe name", unsafe["is_dir"])
+    # Build these before any holding filter. In particular, a remote folder
+    # with a held clash below it still supplies the spelling for local-only
+    # files elsewhere in that folder.
+    local_folders = inventory(local_entries)
+    remote_folders = inventory(remote_entries)
+    if (len(local_folders) > constants.COMPARE_SYNC_ENTRY_LIMIT
+            or len(remote_folders) > constants.COMPARE_SYNC_ENTRY_LIMIT):
+        _raise_too_many()
     clash_groups = {}
     for clash in remote_clashes:
         key = windows_destination_key(clash["local_path"])
@@ -127,10 +198,15 @@ def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_
             _raise_too_many()
         record_omission(posixpath.relpath(clash["remote_path"], remote_dir),
                         "name clash", clash["is_dir"])
-    for rel in list(remote_map):
-        if any(rel == excluded_rel or rel.startswith(excluded_rel + "/")
-               for excluded_rel in excluded_rels):
-            del remote_map[rel]
+    excluded_keys = {rel_key(rel) for rel in excluded_rels}
+    remote_entries = [
+        (rel, entry) for rel, entry in remote_entries
+        if held_by_key(rel_key(rel), excluded_keys) is None
+    ]
+    remote_folders = {
+        rel: is_dir for rel, is_dir in remote_folders.items()
+        if held_by_key(rel_key(rel), excluded_keys) is None
+    }
     if clash_groups:
         # Each entry's key is computed once and checked, with each of its
         # ancestors, against the group keys, so the cost grows with the
@@ -148,12 +224,14 @@ def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_
 
         kept_is_dir = {}
         local_top = {}
-        for entries, is_local in ((remote_map, False), (local_map, True)):
-            for rel, entry in list(entries.items()):
-                key = held_key(windows_destination_key(entry[2]))
+        kept_remote_entries = []
+        kept_local_entries = []
+        for entries, is_local in ((remote_entries, False), (local_entries, True)):
+            for rel, entry in entries:
+                key = held_key(rel_key(rel))
                 if key is None:
+                    (kept_local_entries if is_local else kept_remote_entries).append((rel, entry))
                     continue
-                del entries[rel]
                 if is_local:
                     depth = posixpath.relpath(clash_groups[key], remote_dir).count("/") + 1
                     parts = rel.split("/")
@@ -163,11 +241,164 @@ def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_
                 else:
                     is_dir = entry[3] != clash_groups[key] or bool(entry[4])
                     kept_is_dir[key] = kept_is_dir.get(key, False) or is_dir
+        remote_entries = kept_remote_entries
+        local_entries = kept_local_entries
+        local_folders = {
+            rel: is_dir for rel, is_dir in local_folders.items()
+            if held_key(rel_key(rel)) is None
+        }
+        remote_folders = {
+            rel: is_dir for rel, is_dir in remote_folders.items()
+            if held_key(rel_key(rel)) is None
+        }
         for key, kept_remote in clash_groups.items():
             record_omission(posixpath.relpath(kept_remote, remote_dir), "name clash",
                             kept_is_dir.get(key, False))
             if key in local_top:
                 record_omission(local_top[key][0], "name clash", local_top[key][1])
+
+    # A local synthetic walk can contain two names Windows would merge. Do
+    # not let a dictionary overwrite either one, and hold the corresponding
+    # remote destination subtree as well.
+    local_groups = {}
+    for rel, entry in local_entries:
+        local_groups.setdefault(rel_key(rel), []).append((rel, entry))
+    local_clash_keys = {key for key, entries in local_groups.items() if len(entries) > 1}
+    if local_clash_keys:
+        held_local = [(rel, entry) for rel, entry in local_entries
+                      if held_by_key(rel_key(rel), local_clash_keys) is not None]
+        held_remote = [(rel, entry) for rel, entry in remote_entries
+                       if held_by_key(rel_key(rel), local_clash_keys) is not None]
+        record_entries(held_local, "name clash")
+        record_entries(held_remote, "name clash")
+        local_entries = keep_outside(local_entries, local_clash_keys)
+        remote_entries = keep_outside(remote_entries, local_clash_keys)
+        local_folders = {
+            rel: is_dir for rel, is_dir in local_folders.items()
+            if held_by_key(rel_key(rel), local_clash_keys) is None
+        }
+        remote_folders = {
+            rel: is_dir for rel, is_dir in remote_folders.items()
+            if held_by_key(rel_key(rel), local_clash_keys) is None
+        }
+
+    # A Windows key can over-merge non-ASCII names. Those are not safe pairs:
+    # hold both paths and every descendant instead of picking a spelling.
+    local_inventory = indexed_inventory(local_entries, local_folders)
+    remote_inventory = indexed_inventory(remote_entries, remote_folders)
+    uncertain_keys = set()
+    for key, local_rel in local_inventory.items():
+        remote_rel = remote_inventory.get(key)
+        if remote_rel is not None and not ascii_pair(local_rel, remote_rel):
+            uncertain_keys.add(key)
+    if uncertain_keys:
+        held_local = [(rel, entry) for rel, entry in local_entries
+                      if held_by_key(rel_key(rel), uncertain_keys) is not None]
+        held_remote = [(rel, entry) for rel, entry in remote_entries
+                       if held_by_key(rel_key(rel), uncertain_keys) is not None]
+        record_entries(held_local, "uncertain name match")
+        record_entries(held_remote, "uncertain name match")
+        local_entries = keep_outside(local_entries, uncertain_keys)
+        remote_entries = keep_outside(remote_entries, uncertain_keys)
+        local_folders = {
+            rel: is_dir for rel, is_dir in local_folders.items()
+            if held_by_key(rel_key(rel), uncertain_keys) is None
+        }
+        remote_folders = {
+            rel: is_dir for rel, is_dir in remote_folders.items()
+            if held_by_key(rel_key(rel), uncertain_keys) is None
+        }
+
+    local_inventory = indexed_inventory(local_entries, local_folders)
+    remote_inventory = indexed_inventory(remote_entries, remote_folders)
+    canonical_rels = {}
+
+    def canonical_rel(rel):
+        canonical = canonical_rels.get(rel)
+        if canonical is not None:
+            return canonical
+        parts = rel.split("/")
+        result = []
+        for depth in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:depth])
+            candidate = remote_inventory.get(rel_key(prefix))
+            result.append(candidate.split("/")[-1] if candidate else parts[depth - 1])
+        canonical = "/".join(result)
+        canonical_rels[rel] = canonical
+        return canonical
+
+    def local_destination(rel):
+        parts = rel.split("/")
+        result = []
+        for depth in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:depth])
+            candidate = local_inventory.get(rel_key(prefix))
+            result.append(candidate.split("/")[-1] if candidate else parts[depth - 1])
+        return os.path.join(local_dir, *result)
+
+    def make_entry(entry, destination_local, destination_remote, actual=True):
+        return (*entry, destination_local, destination_remote, actual)
+
+    remote_by_key = {}
+    for rel, entry in remote_entries:
+        remote_by_key.setdefault(rel_key(rel), []).append((rel, entry))
+    used_remote = set()
+    for local_rel, local_entry in local_entries:
+        candidates = remote_by_key.get(rel_key(local_rel), [])
+        pair = next(((remote_rel, remote_entry) for remote_rel, remote_entry in candidates
+                     if ascii_pair(local_rel, remote_rel)), None)
+        if pair is None:
+            canonical = canonical_rel(local_rel)
+            local_map[canonical] = make_entry(
+                local_entry, local_entry[2], posixpath.join(remote_dir, canonical))
+            continue
+        remote_rel, remote_entry = pair
+        used_remote.add(remote_rel)
+        canonical = canonical_rel(remote_rel)
+        local_map[canonical] = make_entry(local_entry, local_entry[2], remote_entry[3])
+        remote_map[canonical] = make_entry(remote_entry, local_entry[2], remote_entry[3])
+    for remote_rel, remote_entry in remote_entries:
+        if remote_rel in used_remote:
+            continue
+        canonical = canonical_rel(remote_rel)
+        remote_map[canonical] = make_entry(
+            remote_entry, local_destination(canonical), remote_entry[3])
+
+    # Non-empty folders have no scanner entry. Add a virtual folder only
+    # where it faces a real file, then remove its descendants from both maps.
+    remote_files = {rel_key(rel): (rel, entry) for rel, entry in remote_entries if not entry[4]}
+    local_files = {rel_key(rel): (rel, entry) for rel, entry in local_entries if not entry[4]}
+    conflict_keys = set()
+    for key, local_rel in local_inventory.items():
+        remote_file = remote_files.get(key)
+        if local_rel in local_folders and remote_file is not None:
+            remote_rel, remote_entry = remote_file
+            canonical = canonical_rel(remote_rel)
+            local_map.setdefault(canonical, make_entry(
+                (0, 0, local_destination(local_rel), posixpath.join(remote_dir, canonical), True),
+                local_destination(canonical), remote_entry[3], False))
+            conflict_keys.add(key)
+    for key, remote_rel in remote_inventory.items():
+        local_file = local_files.get(key)
+        if remote_rel in remote_folders and local_file is not None:
+            _local_rel, local_entry = local_file
+            canonical = canonical_rel(remote_rel)
+            remote_map.setdefault(canonical, make_entry(
+                (0, 0, local_entry[2], posixpath.join(remote_dir, remote_rel), True),
+                local_entry[2], posixpath.join(remote_dir, canonical), False))
+            conflict_keys.add(key)
+    if conflict_keys:
+        for mapping in (local_map, remote_map):
+            for rel in list(mapping):
+                if rel_key(rel) not in conflict_keys and held_by_key(rel_key(rel), conflict_keys) is not None:
+                    del mapping[rel]
+
+    local_aliases = {}
+    for local_rel in local_inventory.values():
+        canonical = canonical_rel(local_rel)
+        if local_rel != canonical:
+            local_aliases[local_rel] = canonical
+    local_map.local_aliases = local_aliases
     if on_progress and seen_since_report:
         on_progress(seen_since_report)
     if stop_event is not None and stop_event.is_set():
@@ -218,8 +449,9 @@ def _classify(api, rel, local_map, remote_map):
 def _compute_compare(api, sftp, local_dir, remote_dir, on_progress=None, stop_event=None):
     """Pure recursive compare core: no threading, no bridge concerns, so
     it can be called directly from tests or from the background thread
-    _run_compare drives. Returns {"files": {rel: status}, "folders":
-    {rel: status}}, or None if stop_event fired before the walk finished.
+    _run_compare drives. Returns canonical remote-preferred result names,
+    including ``local_aliases`` for local spellings that differ from those
+    names, or None if stop_event fired before the walk finished.
 
     "folders" holds both kinds of entry: every ancestor of a changed file
     gets "has_changes" (so a deep change is visible without opening every
@@ -264,7 +496,8 @@ def _compute_compare(api, sftp, local_dir, remote_dir, on_progress=None, stop_ev
         while parent not in ("", "."):
             folders.setdefault(parent, "has_changes")
             parent = posixpath.dirname(parent)
-    return {"files": files, "folders": folders, "excluded_links": excluded,
+    return {"files": files, "folders": folders, "local_aliases": local_map.local_aliases,
+            "excluded_links": excluded,
             "not_compared": omissions["entries"],
             "not_compared_count": omissions["count"]}
 
@@ -272,18 +505,11 @@ def _compute_compare(api, sftp, local_dir, remote_dir, on_progress=None, stop_ev
 def _compute_sync(api, sftp, local_dir, remote_dir, direction, changed_only=True,
                    on_progress=None, stop_event=None, excluded=None, omissions=None):
     """Pure recursive sync-plan core (see _compute_compare). Returns
-    (plan, transfers, conflicts): plan is the list the UI shows (name is
-    the rel path, so a nested file's plan entry still reads as its full
-    relative name, and is_dir marks a folder-creation entry rather than a
-    file); transfers is the resolved (local_path, remote_path, size,
-    is_dir) list actually handed to the queue, built from the same maps
-    so it never has to re-derive a path from a name that came back from
-    the page. conflicts is a list of {"name": rel} for every rel that is
-    a file on one side and an empty folder on the other: a conflict is
-    never transferred in either direction (it is excluded from `wanted`
-    for both directions), only reported, so nothing is ever overwritten
-    to resolve it. Returns (None, None, None) if stop_event fired before
-    the walk finished."""
+    (plan, transfers, conflicts): names use the canonical remote-preferred
+    spelling, while transfer tuples retain actual source paths and target an
+    existing destination spelling. conflicts lists every file-versus-folder
+    rel, including non-empty folders without scanner markers; none of their
+    descendants transfer. Returns (None, None, None) if cancelled."""
     local_map, remote_map = api._compute_pair_maps(
         sftp, local_dir, remote_dir, on_progress=on_progress, stop_event=stop_event,
         excluded=excluded, omissions=omissions)
@@ -312,8 +538,11 @@ def _compute_sync(api, sftp, local_dir, remote_dir, direction, changed_only=True
         # sense for this direction (e.g. a remote_only file on an
         # upload), which nothing can transfer.
         source = lentry if direction == "upload" else rentry
-        if source is not None:
-            transfers.append((source[2], source[3], source[0], is_dir))
+        if source is not None and source[7]:
+            if direction == "upload":
+                transfers.append((source[2], source[6], source[0], is_dir))
+            else:
+                transfers.append((source[5], source[3], source[0], is_dir))
     return plan, transfers, conflicts
 
 
