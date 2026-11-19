@@ -326,8 +326,8 @@ def test_empty_readable_tree_succeeds_with_no_files_or_plan(tmp_path):
     sftp = _FakeSftp({})
 
     data = api._compute_compare(sftp, str(local_dir), "/")
-    assert data == {"files": {}, "folders": {}, "excluded_links": [],
-                    "not_compared": [], "not_compared_count": 0}
+    assert data == {"files": {}, "folders": {}, "local_aliases": {},
+                    "excluded_links": [], "not_compared": [], "not_compared_count": 0}
 
     plan, transfers, conflicts = api._compute_sync(sftp, str(local_dir), "/", "upload")
     assert plan == []
