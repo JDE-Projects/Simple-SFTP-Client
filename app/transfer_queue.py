@@ -45,6 +45,23 @@ class TransferItem:
     is_dir: bool = False
     retryable: bool = True
     claims: tuple = ()
+    report_id: int | None = None
+
+
+def _item_dict(item):
+    """Plain dict for one item. scan_report appears only on a scan summary row."""
+    d = {
+        "id": item.id,
+        "direction": item.direction,
+        "name": item.name,
+        "state": item.state,
+        "error": item.error,
+        "is_dir": item.is_dir,
+        "retryable": item.retryable,
+    }
+    if item.report_id is not None:
+        d["scan_report"] = item.report_id
+    return d
 
 
 class TransferQueue:
@@ -161,6 +178,18 @@ class TransferQueue:
                 id=self._next_id, direction=direction, local_path=local_path,
                 remote_path=remote_path, name=name, state=FAILED,
                 error=self._clash_error(other_remote), is_dir=is_dir, retryable=False,
+            )
+            self._next_id += 1
+            self._items.append(item)
+            self._by_id[item.id] = item
+            return item.id
+
+    def add_scan_incomplete(self, direction, name, error, report_id):
+        """Record an unretryable summary row for an incomplete folder scan."""
+        with self._lock:
+            item = TransferItem(
+                id=self._next_id, direction=direction, local_path="", remote_path="",
+                name=name, state=FAILED, error=error, retryable=False, report_id=report_id,
             )
             self._next_id += 1
             self._items.append(item)
@@ -306,18 +335,11 @@ class TransferQueue:
             return failed
 
     def snapshot(self):
-        """Plain dicts (id, direction, name, state, error, is_dir, retryable) in FIFO order."""
+        """Plain dicts (id, direction, name, state, error, is_dir, retryable, and
+        scan_report on a scan summary row) in FIFO order."""
         with self._lock:
             return [
-                {
-                    "id": item.id,
-                    "direction": item.direction,
-                    "name": item.name,
-                    "state": item.state,
-                    "error": item.error,
-                    "is_dir": item.is_dir,
-                    "retryable": item.retryable,
-                }
+                _item_dict(item)
                 for item in self._items
             ]
 
@@ -359,15 +381,7 @@ class TransferQueue:
         two separate lock grabs could."""
         with self._lock:
             items = [
-                {
-                    "id": item.id,
-                    "direction": item.direction,
-                    "name": item.name,
-                    "state": item.state,
-                    "error": item.error,
-                    "is_dir": item.is_dir,
-                    "retryable": item.retryable,
-                }
+                _item_dict(item)
                 for item in self._items
             ]
             pending = sum(1 for item in self._items if item.state in (WAITING, ACTIVE))

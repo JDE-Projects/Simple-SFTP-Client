@@ -1,6 +1,7 @@
 """The bridge object the page calls."""
 
 import threading
+from collections import OrderedDict
 import functools
 import posixpath
 
@@ -98,6 +99,7 @@ class Api:
         self._scan_lock = threading.Lock()
         self._scans = {}   # scan_id -> {"stop": threading.Event, "found": int}
         self._scan_next_id = 1
+        self._scan_reports = OrderedDict()
         # Background compare/sync jobs (compare/sync_plan): a separate
         # registry from _scans, on its own lock, so the "Comparing… N"
         # progress channel never leaks into the download-scan "Scanning…
@@ -160,8 +162,8 @@ class Api:
     def _vlog(self, msg, level="info", event=None, **fields):
         return services.window._vlog(self, msg, level, event, **fields)
 
-    def _worker_log(self, msg, level="info", event=None, **fields):
-        return services.window._worker_log(self, msg, level, event, **fields)
+    def _worker_log(self, msg, level="info", event=None, report_id=None, **fields):
+        return services.window._worker_log(self, msg, level, event, report_id, **fields)
 
     # ───────────── sessions (servers.json, never passwords) ─────────────
     def _load_sessions(self):
@@ -263,8 +265,8 @@ class Api:
     def _deregister_scan(self, scan_id):
         return services.scanning._deregister_scan(self, scan_id)
 
-    def _stop_all_scans(self):
-        return services.scanning._stop_all_scans(self)
+    def _stop_all_scans(self, reason=None):
+        return services.scanning._stop_all_scans(self, reason)
 
     def _scan_active(self):
         return services.scanning._scan_active(self)
@@ -274,6 +276,12 @@ class Api:
 
     def _scan_found_total(self):
         return services.scanning._scan_found_total(self)
+
+    def _scan_not_read_total(self):
+        return services.scanning._scan_not_read_total(self)
+
+    def get_scan_problems(self, report_id):
+        return services.scanning.get_scan_problems(self, report_id)
 
     def _scan_wait_for_room(self, stop_event):
         return services.scanning._scan_wait_for_room(self, stop_event)
@@ -286,8 +294,10 @@ class Api:
     def _iter_remote(self, sftp, rp, lp, is_dir, root, problems=None, include_dirs=False, clashes=None):
         return services.scanning._iter_remote(self, sftp, rp, lp, is_dir, root, problems, include_dirs, clashes)
 
-    def _scan_and_queue(self, roots, direction, on_conflict, scan_id, stop_event, local_root=None):
-        return services.scanning._scan_and_queue(self, roots, direction, on_conflict, scan_id, stop_event, local_root)
+    def _scan_and_queue(self, roots, direction, on_conflict, scan_id, stop_event, local_root=None,
+                        initial_problems=()):
+        return services.scanning._scan_and_queue(
+            self, roots, direction, on_conflict, scan_id, stop_event, local_root, initial_problems)
 
     # ───────────── transfers (queue + progress + resume + retry) ─────────────
     def _connection_dead(self, sftp):

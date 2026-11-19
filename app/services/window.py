@@ -99,11 +99,14 @@ def _vlog(api, msg, level="info", event=None, **fields):
         log_event(event, **fields)
 
 
-def _worker_log(api, msg, level="info", event=None, **fields):
+def _worker_log(api, msg, level="info", event=None, report_id=None, **fields):
     """Console line from the worker thread: never calls evaluate_js, just
     buffers for the next poll_queue(), optionally recording a safe event."""
     with api._console_lock:
-        api._console_buffer.append({"msg": msg, "level": level})
+        line = {"msg": msg, "level": level}
+        if report_id is not None:
+            line["scan_report"] = report_id
+        api._console_buffer.append(line)
     if event is not None:
         log_event(event, **fields)
 
@@ -123,7 +126,7 @@ def shutdown(api):
     # Halt any background scan promptly: it also checks self._connected on
     # its own, but the explicit stop makes it exit immediately rather than
     # waiting for its next loop check.
-    api._stop_all_scans()
+    api._stop_all_scans("shutdown")
 
     # Same for any background compare/sync job, and drop every stashed
     # sync token: a plan computed against a connection that's gone is no

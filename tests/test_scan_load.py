@@ -23,6 +23,7 @@ Bound numbers referenced throughout:
   staying as objects in api._queue._items, which is what keeps a huge job's
   memory flat.
 """
+import threading
 import time
 
 import pytest
@@ -203,18 +204,26 @@ def test_cancel_all_stops_a_large_scan_before_it_finishes(sftp_env, monkeypatch)
     n = 50_000
     monkeypatch.setattr(api, "_one", lambda *a, **k: None)
 
+    started = threading.Event()
+
     def slow_flat_gen(lp, rp, is_dir, **kwargs):
+        started.set()
         for i in range(n):
             if i and i % 2000 == 0:
                 time.sleep(0.01)
             yield (f"/fake_local/f{i}.bin", f"/top/f{i}.bin", 16, FIXED_MTIME, False)
 
     monkeypatch.setattr(api, "_iter_local", slow_flat_gen)
+    # The synthetic upload root does not exist on disk; it is not a link.
+    monkeypatch.setattr("app.services.transfers.local_link_kind", lambda path: None)
 
     try:
         result = api.enqueue([{"name": "top", "is_dir": True}], "upload",
                               "/fake_local", "/", "overwrite")
         assert result["ok"] is True
+        # Cancel only once the scan is really walking, so the test proves
+        # a running scan stops early rather than one that never started.
+        assert started.wait(5)
 
         cancel_result = api.cancel()
         assert cancel_result["ok"] is True

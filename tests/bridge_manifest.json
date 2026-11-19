@@ -51,6 +51,9 @@
     "port"
   ],
   "get_meta": [],
+  "get_scan_problems": [
+    "report_id"
+  ],
   "get_remembered": [
     "host",
     "username",

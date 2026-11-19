@@ -180,6 +180,8 @@
   .cline{white-space:pre-wrap;word-break:break-word;color:var(--text-dim);}
   .cline .ctime{color:var(--text-faint);margin-right:9px;}
   .cline.ok{color:var(--green);} .cline.error{color:var(--red);} .cline.warn{color:var(--amber);}
+  .cline.scan-report{cursor:pointer;}
+  .cline.scan-report:hover{text-decoration:underline;}
   .console-empty{color:var(--text-faint);font-style:italic;}
   .console-tools{position:absolute;top:6px;right:20px;z-index:2;display:flex;flex-direction:column;gap:5px;}
   .console-tools .icon-btn{width:100%;}
@@ -193,6 +195,10 @@
   .card .row{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:flex-end;}
   .card .row .f{display:flex;flex-direction:column;flex:1 1 auto;} .card .row .f input,.card .row .f select{width:100%;}
   .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:8px;}
+  .scan-problems{max-height:40vh;overflow:auto;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:14px;
+    font-family:"JetBrains Mono",monospace;font-size:11px;line-height:1.5;-webkit-user-select:text;user-select:text;}
+  .scan-problem{padding:6px 10px;border-bottom:1px solid var(--border);white-space:pre-wrap;word-break:break-word;}
+  .scan-problem:last-child{border-bottom:none;}
   pre.pub{background:var(--panel-2);border:1px solid var(--border);border-radius:7px;padding:10px;font-family:"JetBrains Mono",monospace;
     font-size:11px;white-space:pre-wrap;word-break:break-all;color:var(--text-dim);max-height:120px;overflow:auto;-webkit-user-select:text;user-select:text;}
   .sess-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;}
@@ -380,6 +386,12 @@
   <div class="modal-actions"><button id="qRetryFailedBtn" class="btn-ghost" disabled>Retry all failed</button><button id="qClearBtn" class="btn-ghost">Clear finished</button><button id="qCloseBtn" class="btn-primary">Close</button></div>
 </div></div>
 
+<div id="scanProblemsModal" class="modal"><div class="card"><h3>Locations not read</h3>
+  <p id="scanProblemsSummary" style="font-size:12.5px;line-height:1.5;color:var(--text)"></p>
+  <div id="scanProblemsList" class="scan-problems"></div>
+  <div class="modal-actions"><button id="scanProblemsCopy" class="btn-ghost" disabled>Copy list</button><button id="scanProblemsClose" class="btn-primary">Close</button></div>
+</div></div>
+
 <div id="ctx"></div>
 
 <script>
@@ -402,10 +414,17 @@ let pendingSyncResolve=null;   // resolves when queueTick sees a compare_done of
 const jumpBuf={local:"",remote:""}, jumpTimer={local:null,remote:null};
 
 /* console activity log (replaces the old transient toasts) */
-function clog(m,level){ const box=$("console"); if(!box)return; const empty=box.querySelector(".console-empty"); if(empty)empty.remove();
+function clog(m,level,reportId){ const box=$("console"); if(!box)return; const empty=box.querySelector(".console-empty"); if(empty)empty.remove();
   const line=document.createElement("div"); line.className="cline"+(level?" "+level:"");
   const t=new Date().toTimeString().slice(0,8);
-  line.innerHTML=`<span class="ctime">${t}</span>${esc(m)}`; box.appendChild(line);
+  const time=document.createElement("span"); time.className="ctime"; time.textContent=t; line.appendChild(time);
+  const text=document.createElement("span"); text.textContent=m+(reportId!==undefined&&reportId!==null?" (click to see them)":""); line.appendChild(text);
+  if(reportId!==undefined&&reportId!==null){
+    line.classList.add("scan-report"); line.tabIndex=0; line.setAttribute("role","button");
+    line.onclick=()=>openScanProblems(reportId);
+    line.onkeydown=e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); openScanProblems(reportId); } };
+  }
+  box.appendChild(line);
   while(box.children.length>500)box.removeChild(box.firstChild); box.scrollTop=box.scrollHeight; }
 // back-compat shim: existing toast(msg,isErr) calls now write to the console
 function toast(m,e){ clog(m, e?"error":"info"); }
@@ -456,6 +475,35 @@ function addRetryButton(row, id){
   row.appendChild(rt);
 }
 
+let scanProblemsCopyText="", scanProblemsRequest=0;
+function closeScanProblems(){ $("scanProblemsModal").classList.remove("show"); }
+async function openScanProblems(reportId){
+  const request=++scanProblemsRequest;
+  const summary=$("scanProblemsSummary"), list=$("scanProblemsList"), copy=$("scanProblemsCopy");
+  summary.textContent="Loading locations…"; list.textContent=""; copy.disabled=true; scanProblemsCopyText="";
+  $("scanProblemsModal").classList.add("show");
+  let result;
+  try{ result=await API.get_scan_problems(reportId); }catch(e){ result={ok:false,error:"Could not get this list."}; }
+  if(request!==scanProblemsRequest)return;
+  if(!result||!result.ok){ summary.textContent=(result&&result.error)||"Could not get this list."; return; }
+  const problems=result.problems||[], more=result.more||0;
+  const direction=result.direction==="download"?"download":"upload";
+  const text=`${problems.length+more} location(s) could not be read during this ${direction}.`;
+  summary.textContent=text;
+  const fragment=document.createDocumentFragment();
+  problems.forEach(problem=>{ const item=document.createElement("div"); item.className="scan-problem"; item.textContent=problem; fragment.appendChild(item); });
+  if(more>0){ const item=document.createElement("div"); item.className="scan-problem"; item.textContent=`and ${more} more not listed`; fragment.appendChild(item); }
+  list.appendChild(fragment);
+  scanProblemsCopyText=[text,...problems].join("\n"); copy.disabled=false;
+}
+async function copyScanProblems(){
+  try{
+    if(!navigator.clipboard||!navigator.clipboard.writeText)throw new Error("Clipboard is unavailable.");
+    await navigator.clipboard.writeText(scanProblemsCopyText);
+    clog("List copied.","ok");
+  }catch(e){ clog("Could not copy list: "+(e&&e.message||"Clipboard is unavailable."),"error"); }
+}
+
 function renderQueueRows(items){
   const box=$("qList"); if(!box)return; box.innerHTML="";
   // only offer "Clear finished" when there is something finished to remove
@@ -483,7 +531,10 @@ function renderQueueRows(items){
         const err=document.createElement("span"); err.className="qrow-err"; err.textContent=it.error; err.title=it.error;
         row.appendChild(err);
       }
-      if(it.retryable!==false)addRetryButton(row, it.id);
+      if(it.scan_report!==undefined&&it.scan_report!==null){
+        const show=document.createElement("button"); show.className="btn-ghost btn-sm"; show.textContent="Show list";
+        show.onclick=ev=>{ ev.stopPropagation(); openScanProblems(it.scan_report); }; row.appendChild(show);
+      } else if(it.retryable!==false)addRetryButton(row, it.id);
     } else if(it.state==="cancelled"){
       if(it.retryable!==false)addRetryButton(row, it.id);
     } else if(it.state==="waiting"){
@@ -537,7 +588,7 @@ async function queueTick(){
   if(qPolling)return; qPolling=true;
   try{
     const p=await API.poll_queue();
-    (p.console||[]).forEach(line=>clog(line.msg,line.level));
+    (p.console||[]).forEach(line=>clog(line.msg,line.level,line.scan_report));
     showDebugWarnings(p.debug_warnings,p.debug_enabled);
     const busy=!!p.scanning||!!p.comparing||p.pending>0;
     // A watcher-only tick: nothing in the queue moved, so leave the footer
@@ -581,7 +632,9 @@ async function queueTick(){
       // A background scan is still finding/queuing files. Say so in qName so
       // it's never mistaken for the queue being idle or finished, but still
       // surface live transfer progress in qMeta when work is already moving.
-      if(!sizeCalculating)$("qName").textContent=`Scanning… ${p.scan_found||0} found`;
+      if(!sizeCalculating)$("qName").textContent=(p.scan_not_read||0)>0
+        ?`Scanning… ${p.scan_found||0} found, ${p.scan_not_read} not read`
+        :`Scanning… ${p.scan_found||0} found`;
       if(activeProgress.length===1){
         const pr=activeProgress[0];
         $("qFill").style.width=pr.pct+"%";
@@ -685,6 +738,8 @@ async function init(){
       showDebugWarnings(p.debug_warnings,p.debug_enabled);
       const rfBtn=$("qRetryFailedBtn"); if(rfBtn)rfBtn.disabled=!((p.retryable_failed||0)>0); }); };
   $("qCloseBtn").onclick=()=>{ qModalOpen=false; $("queueModal").classList.remove("show"); };
+  $("scanProblemsClose").onclick=closeScanProblems;
+  $("scanProblemsCopy").onclick=copyScanProblems;
   $("qClearBtn").onclick=async()=>{ const r=await API.clear_finished(); renderQueueRows(r.items);
     // clear_finished doesn't return a counts object, so tally the trimmed
     // items list ourselves for the summary and the retry-all button state.
@@ -729,6 +784,7 @@ async function init(){
   });
   $("browseLocalBtn").onclick=async()=>{ const p=await API.browse_folder(); if(p)loadLocal(p); };
   $("pass").addEventListener("keydown",e=>{if(e.key==="Enter")onConn();});
+  document.addEventListener("keydown",e=>{ if(e.key==="Escape"&&$("scanProblemsModal").classList.contains("show"))closeScanProblems(); });
   document.addEventListener("click",()=>$("ctx").style.display="none");
   $("consoleClear").onclick=clearConsole;
   $("consoleExport").onclick=exportConsole;
