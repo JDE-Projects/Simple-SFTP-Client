@@ -369,9 +369,10 @@
   <div class="modal-actions"><button id="dfCancel" class="btn-ghost">Cancel</button><button id="dfSkip" class="btn-ghost">Skip existing</button><button id="dfOk" class="btn-primary">Overwrite</button></div>
 </div></div>
 
-<div id="syncModal" class="modal"><div class="card"><h3>Sync preview</h3>
+<div id="syncModal" class="modal"><div class="card"><h3 id="syTitle">Sync preview</h3>
   <p id="syText" style="font-size:12.5px;line-height:1.5;color:var(--text)"></p>
-  <div style="max-height:40vh;overflow:auto;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:14px">
+  <div id="syOmissions" style="display:none;color:var(--amber);font-size:12.5px;line-height:1.5;margin-bottom:14px"><p id="syOmissionsText" style="margin:0 0 8px"></p><button id="syShowOmissions" class="btn-ghost btn-sm">Show list</button><label id="syAcknowledgeWrap" style="display:block;margin-top:10px"><input id="syAcknowledge" type="checkbox"> <span id="syAcknowledgeText"></span></label></div>
+  <div id="syTableWrap" style="max-height:40vh;overflow:auto;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:14px">
     <table><thead><tr><th>Name</th><th>Local</th><th>Remote</th><th>Newer</th></tr></thead><tbody id="syBody"></tbody></table>
   </div>
   <div class="modal-actions"><button id="syCancel" class="btn-ghost">Cancel</button><button id="syOk" class="btn-primary">Transfer</button></div>
@@ -386,7 +387,7 @@
   <div class="modal-actions"><button id="qRetryFailedBtn" class="btn-ghost" disabled>Retry all failed</button><button id="qClearBtn" class="btn-ghost">Clear finished</button><button id="qCloseBtn" class="btn-primary">Close</button></div>
 </div></div>
 
-<div id="scanProblemsModal" class="modal"><div class="card"><h3>Locations not read</h3>
+<div id="scanProblemsModal" class="modal"><div class="card"><h3 id="scanProblemsTitle">Locations not read</h3>
   <p id="scanProblemsSummary" style="font-size:12.5px;line-height:1.5;color:var(--text)"></p>
   <div id="scanProblemsList" class="scan-problems"></div>
   <div class="modal-actions"><button id="scanProblemsCopy" class="btn-ghost" disabled>Copy list</button><button id="scanProblemsClose" class="btn-primary">Close</button></div>
@@ -477,10 +478,21 @@ function addRetryButton(row, id){
 
 let scanProblemsCopyText="", scanProblemsRequest=0;
 function closeScanProblems(){ $("scanProblemsModal").classList.remove("show"); }
+function showScanProblems(title,summaryText,items,more){
+  const summary=$("scanProblemsSummary"), list=$("scanProblemsList"), copy=$("scanProblemsCopy");
+  $("scanProblemsTitle").textContent=title;
+  summary.textContent=summaryText; list.textContent="";
+  const fragment=document.createDocumentFragment();
+  items.forEach(text=>{ const item=document.createElement("div"); item.className="scan-problem"; item.textContent=text; fragment.appendChild(item); });
+  if(more>0){ const item=document.createElement("div"); item.className="scan-problem"; item.textContent=`and ${more} more not listed`; fragment.appendChild(item); }
+  list.appendChild(fragment);
+  scanProblemsCopyText=[summaryText,...items].join("\n"); copy.disabled=false;
+  $("scanProblemsModal").classList.add("show");
+}
 async function openScanProblems(reportId){
   const request=++scanProblemsRequest;
   const summary=$("scanProblemsSummary"), list=$("scanProblemsList"), copy=$("scanProblemsCopy");
-  summary.textContent="Loading locations…"; list.textContent=""; copy.disabled=true; scanProblemsCopyText="";
+  $("scanProblemsTitle").textContent="Locations not read"; summary.textContent="Loading locations…"; list.textContent=""; copy.disabled=true; scanProblemsCopyText="";
   $("scanProblemsModal").classList.add("show");
   let result;
   try{ result=await API.get_scan_problems(reportId); }catch(e){ result={ok:false,error:"Could not get this list."}; }
@@ -489,13 +501,12 @@ async function openScanProblems(reportId){
   const problems=result.problems||[], more=result.more||0;
   const direction=result.direction==="download"?"download":"upload";
   const text=`${problems.length+more} location(s) could not be read during this ${direction}.`;
-  summary.textContent=text;
-  const fragment=document.createDocumentFragment();
-  problems.forEach(problem=>{ const item=document.createElement("div"); item.className="scan-problem"; item.textContent=problem; fragment.appendChild(item); });
-  if(more>0){ const item=document.createElement("div"); item.className="scan-problem"; item.textContent=`and ${more} more not listed`; fragment.appendChild(item); }
-  list.appendChild(fragment);
-  scanProblemsCopyText=[text,...problems].join("\n"); copy.disabled=false;
+  showScanProblems("Locations not read",text,problems,more);
 }
+function omissionCount(result){ return Number(result.not_compared_count)||0; }
+function omissionItems(result){ return (result.not_compared||[]).map(item=>`${item.name||""}${item.is_dir?"/":""}${item.reason==="unsafe name"?" (name Windows cannot use)":" (same name on Windows as another entry)"}`); }
+function omissionSummary(count){ return `${count} remote entries were not compared. Skipped folders include everything inside them.`; }
+function openOmissions(result){ scanProblemsRequest++; const count=omissionCount(result), items=omissionItems(result); showScanProblems("Remote entries not compared",omissionSummary(count),items,Math.max(0,count-items.length)); }
 async function copyScanProblems(){
   try{
     if(!navigator.clipboard||!navigator.clipboard.writeText)throw new Error("Clipboard is unavailable.");
@@ -1111,7 +1122,7 @@ async function onCompare(){ if(!connected)return;
   startQueuePoll(false); }
 function applyCompareResult(result){
   compareMap={rootLocal:result.root_local,rootRemote:result.root_remote,
-    files:result.files||{},folders:result.folders||{}};
+    files:result.files||{},folders:result.folders||{},notCompared:result.not_compared||[],notComparedCount:omissionCount(result)};
   const c={};["same","newer_local","newer_remote","local_only","remote_only","conflict"].forEach(k=>c[k]=0);
   for(const n in compareMap.files)c[compareMap.files[n]]++;
   // Folders carry their own local_only/remote_only status for an empty
@@ -1125,11 +1136,14 @@ function applyCompareResult(result){
   const remote=[`<span style="color:var(--amber)">${c.newer_remote} newer remote</span>`, `<span style="color:var(--blue)">${c.remote_only} remote-only</span>`];
   if(c.conflict>0){const clash=`<span style="color:var(--red)">${c.conflict} name clash${c.conflict===1?"":"es"}</span>`;local.push(clash);remote.push(clash);}
   const links=result.excluded_links||[];
+  if(compareMap.notComparedCount>0)remote.push(`<span id="remoteOmissions" style="color:var(--amber);cursor:pointer">${compareMap.notComparedCount} not compared</span>`);
   if(links.length)local.push(`<span style="color:var(--amber)">${links.length} link(s) left out</span>`);
   const localText=`${c.newer_local} newer here, ${c.local_only} local-only${c.conflict?`, ${c.conflict} name clash${c.conflict===1?"":"es"}`:""}${links.length?`, ${links.length} link(s) left out: ${links.join(", ")}`:""}`;
-  const remoteText=`${c.newer_remote} newer remote, ${c.remote_only} remote-only${c.conflict?`, ${c.conflict} name clash${c.conflict===1?"":"es"}`:""}`;
+  const remoteText=`${c.newer_remote} newer remote, ${c.remote_only} remote-only${c.conflict?`, ${c.conflict} name clash${c.conflict===1?"":"es"}`:""}${compareMap.notComparedCount?`, ${compareMap.notComparedCount} remote entries not compared (skipped folders include everything inside them)`:""}`;
   $("localCompare").innerHTML=local.join(", "); $("localCompare").title=localText;
   $("remoteCompare").innerHTML=remote.join(", "); $("remoteCompare").title=remoteText;
+  const omissions=$("remoteOmissions");
+  if(omissions){ omissions.tabIndex=0; omissions.setAttribute("role","button"); omissions.onclick=()=>openOmissions({not_compared:compareMap.notCompared,not_compared_count:compareMap.notComparedCount}); omissions.onkeydown=e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); omissions.click(); } }; }
   renderPane("local"); renderPane("remote"); }
 async function onSync(direction){ if(!connected)return;
   if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
@@ -1140,6 +1154,7 @@ async function onSync(direction){ if(!connected)return;
   if(!done.ok){toast(done.error||"Sync failed",true);return;}
   const result=done.result;
   if(!result.count&&!(result.conflicts&&result.conflicts.length)){
+    if(omissionCount(result)>0){ await confirmSyncPlan(result,true); API.discard_sync(result.token); return; }
     const links=result.excluded_links||[];
     const total=links.length+(result.excluded_more||0);
     if(total){clog(`Nothing to transfer, but ${total} local link(s) were left out: ${links.join(", ")}${result.excluded_more>0?` and ${result.excluded_more} more`:""}`,"warn");return;}
@@ -1288,7 +1303,7 @@ function confirmDiff(collide,srcSide,destSide,matches){
     $("dfOk").onclick=()=>done("overwrite");
   });
 }
-function confirmSyncPlan(result){
+function confirmSyncPlan(result,noTransfer=false){
   const sample=result.sample||[];
   let rows=sample.map(p=>{
     if(p.is_dir) return `<tr><td class="name">${esc(p.name)}<span class="meta" style="color:var(--text-dim);font-size:10px;border:1px solid var(--border);border-radius:4px;padding:1px 5px;margin-left:6px">folder</span></td><td class="size"><span class="dash">-</span></td><td class="size"><span class="dash">-</span></td><td><span class="dash">-</span></td></tr>`;
@@ -1316,8 +1331,26 @@ function confirmSyncPlan(result){
     const more=result.excluded_more>0?` and ${result.excluded_more} more`:"";
     text+=`<br><br><span style="color:var(--amber)">${links.length+(result.excluded_more||0)} local link(s) left out, not synced in either direction: ${names}${more}</span>`;
   }
+  const omissions=omissionCount(result);
+  if(noTransfer){
+    text=`Nothing to transfer, but ${omissions} remote entries were not compared. Skipped folders include everything inside them.`;
+    if(links.length){ const names=links.map(n=>esc(n)).join(", "); const more=result.excluded_more>0?` and ${result.excluded_more} more`:""; text+=`<br><br><span style="color:var(--amber)">${links.length+(result.excluded_more||0)} local link(s) left out, not synced in either direction: ${names}${more}</span>`; }
+  }
+  $("syTitle").textContent="Sync preview";
   $("syText").innerHTML=text;
+  $("syTableWrap").style.display=noTransfer?"none":"";
+  $("syOmissions").style.display=omissions?"":"none";
+  $("syOmissionsText").textContent=omissions&&!noTransfer?`${omissions} remote entries were not compared and will not be synced in either direction. Skipped folders include everything inside them.`:"";
+  $("syOmissionsText").style.display=noTransfer?"none":"";
+  $("syShowOmissions").onclick=()=>openOmissions(result);
+  $("syAcknowledgeWrap").style.display=omissions&&!noTransfer?"":"none";
+  $("syAcknowledgeText").textContent=`I understand ${omissions} remote entries were not compared`;
+  $("syAcknowledge").checked=false;
+  $("syOk").style.display=noTransfer?"none":"";
   $("syOk").textContent=`Transfer (${result.count} item${result.count===1?"":"s"})`;
+  $("syOk").disabled=omissions>0;
+  $("syAcknowledge").onchange=()=>{$("syOk").disabled=!$("syAcknowledge").checked;};
+  $("syCancel").textContent=noTransfer?"Close":"Cancel";
   return new Promise(res=>{
     $("syncModal").classList.add("show");
     const done=v=>{$("syncModal").classList.remove("show");res(v);};

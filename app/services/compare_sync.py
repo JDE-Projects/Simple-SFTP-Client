@@ -6,10 +6,26 @@ import posixpath
 from app import constants
 from app.constants import MTIME_TOL
 from app.errors import ScanIncomplete, friendly_error
+from app.paths import windows_destination_key
+
+
+class _BoundedCollector(list):
+    """A list the remote walk appends skipped names to. It refuses (via
+    on_full, which raises ScanIncomplete) once it would hold more than
+    COMPARE_SYNC_ENTRY_LIMIT entries, so a server sending endless unusable
+    names is refused during the walk instead of filling memory."""
+    def __init__(self, on_full):
+        super().__init__()
+        self._on_full = on_full
+
+    def append(self, item):
+        if len(self) >= constants.COMPARE_SYNC_ENTRY_LIMIT:
+            self._on_full()
+        super().append(item)
 
 
 def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_event=None,
-                       excluded=None):
+                       excluded=None, omissions=None):
     """Builds rel -> (size, mtime, local_path, remote_path, is_dir) maps
     for both sides of a folder pair, by streaming the same
     _iter_local/_iter_remote enumerators the background scanner uses
@@ -30,8 +46,11 @@ def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_
     transfer scan, which reports partial progress instead). Also raises
     ScanIncomplete if either side's map would grow past
     COMPARE_SYNC_ENTRY_LIMIT entries, refusing before the remote (network)
-    walk ever starts if the local walk already hit the limit. An unsafe
-    remote name is skipped and logged, not treated as incomplete."""
+    walk ever starts if the local walk already hit the limit, and the same
+    way if the remote walk skips more names than that limit. Unsafe remote
+    names and Windows destination name clashes are omitted from the maps and
+    reported through omissions; every entry in a clash group is held back so
+    compare/sync never classifies or transfers it."""
     local_map = {}
     remote_map = {}
     seen_since_report = 0
@@ -54,6 +73,14 @@ def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_
             f"Too many files to compare (more than "
             f"{constants.COMPARE_SYNC_ENTRY_LIMIT:,}). Pick a smaller folder.")
 
+    def record_omission(name, reason, is_dir):
+        if omissions is None:
+            return
+        omissions["count"] += 1
+        if len(omissions["entries"]) < 200:
+            omissions["entries"].append(
+                {"name": name, "reason": reason, "is_dir": bool(is_dir)})
+
     local_excluded = []
     for lp, rp, size, mtime, is_dir in api._iter_local(
             local_dir, remote_dir, True, problems=problems, include_dirs=True,
@@ -75,8 +102,11 @@ def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_
                      for path in local_excluded]
     if excluded is not None:
         excluded.extend(excluded_rels)
+    remote_clashes = _BoundedCollector(_raise_too_many)
+    unsafe_names = _BoundedCollector(_raise_too_many)
     for lp, rp, size, mtime, is_dir in api._iter_remote(
-            sftp, remote_dir, local_dir, True, local_dir, problems=problems, include_dirs=True):
+            sftp, remote_dir, local_dir, True, local_dir, problems=problems, include_dirs=True,
+            clashes=remote_clashes, unsafe_names=unsafe_names):
         if stop_event is not None and stop_event.is_set():
             return None, None
         rel = posixpath.relpath(rp, remote_dir)
@@ -86,10 +116,58 @@ def _compute_pair_maps(api, sftp, local_dir, remote_dir, on_progress=None, stop_
             _raise_too_many()
         remote_map[rel] = (size, mtime, lp, rp, is_dir)
         bump()
+    for unsafe in unsafe_names:
+        record_omission(posixpath.relpath(unsafe["remote_path"], remote_dir),
+                        "unsafe name", unsafe["is_dir"])
+    clash_groups = {}
+    for clash in remote_clashes:
+        key = windows_destination_key(clash["local_path"])
+        clash_groups.setdefault(key, clash["other_remote"])
+        if len(clash_groups) > constants.COMPARE_SYNC_ENTRY_LIMIT:
+            _raise_too_many()
+        record_omission(posixpath.relpath(clash["remote_path"], remote_dir),
+                        "name clash", clash["is_dir"])
     for rel in list(remote_map):
         if any(rel == excluded_rel or rel.startswith(excluded_rel + "/")
                for excluded_rel in excluded_rels):
             del remote_map[rel]
+    if clash_groups:
+        # Each entry's key is computed once and checked, with each of its
+        # ancestors, against the group keys, so the cost grows with the
+        # tree size, not tree size times the number of clash groups.
+        def held_key(entry_key):
+            k = entry_key
+            while k:
+                if k in clash_groups:
+                    return k
+                head, sep, _ = k.rpartition("\\")
+                if not sep:
+                    return None
+                k = head
+            return None
+
+        kept_is_dir = {}
+        local_top = {}
+        for entries, is_local in ((remote_map, False), (local_map, True)):
+            for rel, entry in list(entries.items()):
+                key = held_key(windows_destination_key(entry[2]))
+                if key is None:
+                    continue
+                del entries[rel]
+                if is_local:
+                    depth = posixpath.relpath(clash_groups[key], remote_dir).count("/") + 1
+                    parts = rel.split("/")
+                    is_dir = len(parts) > depth or bool(entry[4])
+                    _, was_dir = local_top.get(key, (None, False))
+                    local_top[key] = ("/".join(parts[:depth]), is_dir or was_dir)
+                else:
+                    is_dir = entry[3] != clash_groups[key] or bool(entry[4])
+                    kept_is_dir[key] = kept_is_dir.get(key, False) or is_dir
+        for key, kept_remote in clash_groups.items():
+            record_omission(posixpath.relpath(kept_remote, remote_dir), "name clash",
+                            kept_is_dir.get(key, False))
+            if key in local_top:
+                record_omission(local_top[key][0], "name clash", local_top[key][1])
     if on_progress and seen_since_report:
         on_progress(seen_since_report)
     if stop_event is not None and stop_event.is_set():
@@ -154,9 +232,10 @@ def _compute_compare(api, sftp, local_dir, remote_dir, on_progress=None, stop_ev
     BOTH "files" and "folders", so whichever pane is showing it (the file
     row in one, the folder row in the other) is colored to flag it."""
     excluded = []
+    omissions = {"entries": [], "count": 0}
     local_map, remote_map = api._compute_pair_maps(
         sftp, local_dir, remote_dir, on_progress=on_progress, stop_event=stop_event,
-        excluded=excluded)
+        excluded=excluded, omissions=omissions)
     if local_map is None:
         return None
     statuses = {rel: api._classify(rel, local_map, remote_map)
@@ -185,11 +264,13 @@ def _compute_compare(api, sftp, local_dir, remote_dir, on_progress=None, stop_ev
         while parent not in ("", "."):
             folders.setdefault(parent, "has_changes")
             parent = posixpath.dirname(parent)
-    return {"files": files, "folders": folders, "excluded_links": excluded}
+    return {"files": files, "folders": folders, "excluded_links": excluded,
+            "not_compared": omissions["entries"],
+            "not_compared_count": omissions["count"]}
 
 
 def _compute_sync(api, sftp, local_dir, remote_dir, direction, changed_only=True,
-                   on_progress=None, stop_event=None, excluded=None):
+                   on_progress=None, stop_event=None, excluded=None, omissions=None):
     """Pure recursive sync-plan core (see _compute_compare). Returns
     (plan, transfers, conflicts): plan is the list the UI shows (name is
     the rel path, so a nested file's plan entry still reads as its full
@@ -205,7 +286,7 @@ def _compute_sync(api, sftp, local_dir, remote_dir, direction, changed_only=True
     the walk finished."""
     local_map, remote_map = api._compute_pair_maps(
         sftp, local_dir, remote_dir, on_progress=on_progress, stop_event=stop_event,
-        excluded=excluded)
+        excluded=excluded, omissions=omissions)
     if local_map is None:
         return None, None, None
     wanted = ("local_only", "newer_local") if direction == "upload" else ("remote_only", "newer_remote")
@@ -249,7 +330,7 @@ def _start_compare(api, kind):
         api._compares[cid] = {
             "stop": threading.Event(), "found": 0, "kind": kind, "direction": None,
             "done": False, "ok": False, "error": None, "result": None,
-            "transfers": None, "delivered": False,
+            "transfers": None, "not_compared_count": 0, "delivered": False,
         }
         return cid, api._compares[cid]["stop"]
 
@@ -300,7 +381,7 @@ def _run_compare(api, cid, local_dir, remote_dir, stop_event, direction=None, ch
         entry = api._compares.get(cid)
     kind = entry["kind"] if entry else "compare"
 
-    def _finish(ok, error=None, result=None, transfers=None):
+    def _finish(ok, error=None, result=None, transfers=None, not_compared_count=0):
         with api._compare_lock:
             e = api._compares.get(cid)
             if e is not None:
@@ -308,6 +389,7 @@ def _run_compare(api, cid, local_dir, remote_dir, stop_event, direction=None, ch
                 e["error"] = error
                 e["result"] = result
                 e["transfers"] = transfers
+                e["not_compared_count"] = not_compared_count
                 e["done"] = True
 
     sftp = None
@@ -322,9 +404,11 @@ def _run_compare(api, cid, local_dir, remote_dir, stop_event, direction=None, ch
         on_progress = lambda n: api._bump_compare_found(cid, n)  # noqa: E731
         if kind == "sync":
             excluded = []
+            omissions = {"entries": [], "count": 0}
             plan, transfers, conflicts = api._compute_sync(
                 sftp, local_dir, remote_dir, direction, changed_only,
-                on_progress=on_progress, stop_event=stop_event, excluded=excluded)
+                on_progress=on_progress, stop_event=stop_event, excluded=excluded,
+                omissions=omissions)
             if plan is None:
                 _finish(False, error="Cancelled.")
                 return
@@ -337,12 +421,21 @@ def _run_compare(api, cid, local_dir, remote_dir, stop_event, direction=None, ch
             result = {"count": len(transfers), "total_bytes": total_bytes,
                       "sample": plan[:200], "more": max(0, len(plan) - 200), "token": cid,
                       "conflicts": conflicts, "excluded_links": excluded[:200],
-                      "excluded_more": max(0, len(excluded) - 200)}
+                      "excluded_more": max(0, len(excluded) - 200),
+                      "not_compared": omissions["entries"],
+                      "not_compared_count": omissions["count"]}
             if excluded:
                 api._worker_log(
                     f"{len(excluded)} local link(s) left out of compare/sync: "
                     f"{', '.join(excluded[:200])}", "warn", "link skipped")
-            _finish(True, result=result, transfers=transfers)
+            if omissions["count"]:
+                api._worker_log(
+                    f"{omissions['count']} remote entries not compared "
+                    f"(skipped folders include everything inside them): "
+                    f"{', '.join(item['name'] for item in omissions['entries'])}",
+                    "warn")
+            _finish(True, result=result, transfers=transfers,
+                    not_compared_count=omissions["count"])
         else:
             data = api._compute_compare(
                 sftp, local_dir, remote_dir, on_progress=on_progress, stop_event=stop_event)
@@ -356,6 +449,12 @@ def _run_compare(api, cid, local_dir, remote_dir, stop_event, direction=None, ch
                 api._worker_log(
                     f"{len(excluded)} local link(s) left out of compare/sync: "
                     f"{', '.join(excluded[:200])}", "warn", "link skipped")
+            if data["not_compared_count"]:
+                api._worker_log(
+                    f"{data['not_compared_count']} remote entries not compared "
+                    f"(skipped folders include everything inside them): "
+                    f"{', '.join(item['name'] for item in data['not_compared'])}",
+                    "warn")
             _finish(True, result=data)
     except ScanIncomplete as e:
         api._worker_log(f"compare: {e}", "error", "compare failed", error=e)
@@ -419,7 +518,8 @@ def sync_plan(api, local_dir, remote_dir, direction, changed_only=True):
     return {"ok": True, "comparing": True}
 
 
-def _stream_sync_transfers(api, transfers, direction, on_conflict, scan_id, stop_event, token, local_root=None):
+def _stream_sync_transfers(api, transfers, direction, on_conflict, scan_id, stop_event, token,
+                           local_root=None, not_compared_count=0):
     """Streams an already-resolved sync-plan transfer list onto the
     normal transfer queue in backpressured batches, reusing the same
     scan registry (and so the same "Scanning… N" / drain UI and
@@ -456,16 +556,24 @@ def _stream_sync_transfers(api, transfers, direction, on_conflict, scan_id, stop
                     break
         flush()
         suffix = f", {clash_count} name clash(es) not downloaded" if clash_count else ""
+        omission_suffix = (f", {not_compared_count} remote entries not compared"
+                           if not_compared_count else "")
         if stop_event.is_set():
-            api._worker_log(f"Sync stopped ({found} item(s) queued before stopping{suffix})", "warn", "sync", outcome="stopped", items=found)
+            api._worker_log(f"Sync stopped ({found} item(s) queued before stopping{suffix}{omission_suffix})", "warn", "sync", outcome="stopped", items=found)
         elif not api._connected:
-            api._worker_log(f"Sync halted: disconnected ({found} item(s) queued{suffix})", "warn", "sync", outcome="disconnected", items=found)
+            api._worker_log(f"Sync halted: disconnected ({found} item(s) queued{suffix}{omission_suffix})", "warn", "sync", outcome="disconnected", items=found)
         elif clash_count:
-            api._worker_log(f"Sync: {found} item(s) queued{suffix}", "warn", "sync", outcome="complete", items=found)
+            api._worker_log(f"Sync: {found} item(s) queued{suffix}{omission_suffix}", "warn", "sync", outcome="incomplete" if not_compared_count else "complete", items=found)
         elif found:
-            api._worker_log(f"Sync: {found} item(s) queued", event="sync", outcome="complete", items=found)
+            if not_compared_count:
+                api._worker_log(f"Sync: {found} item(s) queued{omission_suffix}", "warn", "sync", outcome="incomplete", items=found)
+            else:
+                api._worker_log(f"Sync: {found} item(s) queued", event="sync", outcome="complete", items=found)
         else:
-            api._worker_log("Sync: nothing to transfer", event="sync", outcome="complete", items=0)
+            if not_compared_count:
+                api._worker_log(f"Sync: nothing to transfer{omission_suffix}", "warn", "sync", outcome="incomplete", items=0)
+            else:
+                api._worker_log("Sync: nothing to transfer", event="sync", outcome="complete", items=0)
     except Exception as e:
         api._worker_log(f"sync failed: {friendly_error(e)}", "error", "sync", outcome="failed", items=found, error=e)
     finally:
@@ -500,9 +608,11 @@ def start_sync(api, token, on_conflict="overwrite"):
     transfers = entry["transfers"]
     direction = entry["direction"]
     local_root = entry.get("local_root")
+    not_compared_count = entry.get("not_compared_count", 0)
     scan_id, stop_event = api._register_scan()
     t = threading.Thread(target=api._stream_sync_transfers,
-                          args=(transfers, direction, on_conflict, scan_id, stop_event, token, local_root),
+                          args=(transfers, direction, on_conflict, scan_id, stop_event, token, local_root,
+                                not_compared_count),
                           daemon=True)
     t.start()
     return {"ok": True, "scanning": True}

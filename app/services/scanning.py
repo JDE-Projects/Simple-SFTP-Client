@@ -7,7 +7,7 @@ import threading
 import posixpath
 from app import constants
 from app.debug import log_event
-from app.errors import friendly_error
+from app.errors import ScanIncomplete, friendly_error
 from app.paths import _local_link_kind, is_local_link, safe_local_child, windows_destination_key
 from app.scratch_journal import is_active_local
 
@@ -285,7 +285,8 @@ def _iter_local(api, lp, rp, is_dir, problems=None, include_dirs=False, excluded
     return had_file
 
 
-def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=False, clashes=None):
+def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=False, clashes=None,
+                 unsafe_names=None):
     """Same as _iter_local but over an sftp session for a remote file or
     folder, again without creating any directories. sftp must be a
     session owned by the caller (the scanner opens its own, never
@@ -304,8 +305,9 @@ def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=Fa
     listing has succeeded.
 
     problems, if given, collects a short descriptor for each listing
-    failure; see _iter_local for how each caller uses it. An unsafe remote name is skipped and logged only,
-    never recorded as a problem (see the ValueError branch below). clashes,
+    failure; see _iter_local for how each caller uses it. An unsafe remote
+    name is skipped and logged; compare/sync can collect it separately from
+    unreadable-location problems. clashes,
     if given, collects sibling names that collide as Windows destinations;
     without it those clashes are logged but otherwise skipped.
 
@@ -344,6 +346,9 @@ def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=Fa
                 # that is illegal on Windows). This matches the transfer
                 # scan's skip-and-report behavior.
                 api._worker_log(f"skipped unsafe remote name {a.filename!r}: {e}", "error", "unsafe remote name", error=e)
+                if unsafe_names is not None:
+                    unsafe_names.append({"remote_path": rchild,
+                                         "is_dir": stat.S_ISDIR(a.st_mode)})
                 continue
             key = windows_destination_key(lchild)
             other_remote = siblings.get(key)
@@ -363,6 +368,10 @@ def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=Fa
             else:
                 yield (lchild, rchild, a.st_size, int(a.st_mtime or 0), False)
                 had_file = True
+    except ScanIncomplete:
+        # A bounded collector refusing more entries is a refusal of the
+        # whole compare, not a listing failure of this folder.
+        raise
     except Exception as e:
         _record_problem(api, problems, f"could not list {rp}: {_read_error(e, remote=True)}",
                         "list failed", e)
@@ -370,7 +379,7 @@ def _iter_remote(api, sftp, rp, lp, is_dir, root, problems=None, include_dirs=Fa
     for rchild, lchild in subdirs:
         had = yield from api._iter_remote(
             sftp, rchild, lchild, True, root, problems=problems,
-            include_dirs=include_dirs, clashes=clashes)
+            include_dirs=include_dirs, clashes=clashes, unsafe_names=unsafe_names)
         had_file = had_file or had
     if include_dirs and not had_file:
         yield (lp, rp, 0, 0, True)

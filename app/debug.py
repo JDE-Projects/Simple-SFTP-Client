@@ -32,7 +32,7 @@ EVENTS = {
     "external drop": {"items": int}, "external drop wired": {}, "external drop failed": {"error": "error"},
     "scan": {"outcome": ("complete", "stopped", "disconnected", "failed"), "items": int, "error": "error"},
     "list failed": {"error": "error"},
-    "compare failed": {"error": "error"}, "sync": {"outcome": ("complete", "stopped", "disconnected", "failed"), "items": int, "error": "error"},
+    "compare failed": {"error": "error"}, "sync": {"outcome": ("complete", "incomplete", "stopped", "disconnected", "failed"), "items": int, "error": "error"},
     "keygen": {"outcome": ("ok", "failed", "restore failed"), "error": "error"},
     "key protection failed": {"returncode": int, "error": "error"},
     "prefs unreadable": {"error": "error"}, "atomic write failed": {"error": "error"},
