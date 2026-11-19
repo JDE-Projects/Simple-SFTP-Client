@@ -1,12 +1,10 @@
 """
 Tests that Compare and Sync refuse (report failure) whenever the tree walk
 behind them was incomplete: a folder that could not be listed, a file whose
-metadata could not be read, or a lost connection mid-listing. Before this
-change, _compute_pair_maps had no way to tell a caller that part of the tree
-was silently skipped, so _compute_compare/_compute_sync could build a result
-or a transfer plan from a tree that was not fully seen. An unsafe remote name
-is the exception: it can never be represented locally, so it is skipped and
-logged (as the transfer scan does), not treated as an incomplete scan.
+metadata could not be read, or a lost connection mid-listing. Unsafe remote
+names and Windows destination name clashes are reported as not compared while
+their affected compare/sync entries are omitted from classification and
+transfer planning.
 
 The ordinary transfer scan (_scan_and_queue / _iter_local / _iter_remote with
 no problems collector) is untouched: see test_streaming_scan.py, which still
@@ -229,46 +227,6 @@ def test_server_loss_mid_listing_refuses_sync(tmp_path):
         api._compute_sync(_MidListingLossSftp(), str(local_dir), "/", "download")
 
 
-def test_unsafe_remote_name_is_skipped_not_refused_compare(tmp_path):
-    # An unsafe remote name can never be represented locally, so compare
-    # skips and logs it (like the transfer scan) rather than refusing the
-    # whole folder. Every other file still compares normally.
-    api = Api(APP_VERSION)
-    local_dir = tmp_path / "local"
-    local_dir.mkdir()
-    sftp = _FakeSftp({
-        "/": [_FakeAttr("good.bin", size=5), _FakeAttr("../escape.bin", size=5)],
-    })
-
-    data = api._compute_compare(sftp, str(local_dir), "/")
-
-    assert data is not None
-    assert "good.bin" in data["files"]
-    assert "../escape.bin" not in data["files"]
-    with api._console_lock:
-        messages = [line["msg"] for line in api._console_buffer]
-    assert any("unsafe remote name" in m for m in messages)
-
-
-def test_unsafe_remote_name_is_skipped_not_refused_sync(tmp_path):
-    api = Api(APP_VERSION)
-    local_dir = tmp_path / "local"
-    local_dir.mkdir()
-    sftp = _FakeSftp({
-        "/": [_FakeAttr("good.bin", size=5), _FakeAttr("../escape.bin", size=5)],
-    })
-
-    plan, _transfers, _conflicts = api._compute_sync(sftp, str(local_dir), "/", "download")
-
-    assert plan is not None
-    names = {p["name"] for p in plan}
-    assert "good.bin" in names
-    assert "../escape.bin" not in names
-    with api._console_lock:
-        messages = [line["msg"] for line in api._console_buffer]
-    assert any("unsafe remote name" in m for m in messages)
-
-
 class _FakeEntry:
     """Minimal os.DirEntry stand-in: a file whose stat() raises, to simulate
     a file that vanished or lost read permission between scandir and stat."""
@@ -368,7 +326,8 @@ def test_empty_readable_tree_succeeds_with_no_files_or_plan(tmp_path):
     sftp = _FakeSftp({})
 
     data = api._compute_compare(sftp, str(local_dir), "/")
-    assert data == {"files": {}, "folders": {}, "excluded_links": []}
+    assert data == {"files": {}, "folders": {}, "excluded_links": [],
+                    "not_compared": [], "not_compared_count": 0}
 
     plan, transfers, conflicts = api._compute_sync(sftp, str(local_dir), "/", "upload")
     assert plan == []

@@ -291,8 +291,10 @@ class Api:
         return services.scanning._iter_local(
             self, lp, rp, is_dir, problems, include_dirs, excluded, allow_root_link)
 
-    def _iter_remote(self, sftp, rp, lp, is_dir, root, problems=None, include_dirs=False, clashes=None):
-        return services.scanning._iter_remote(self, sftp, rp, lp, is_dir, root, problems, include_dirs, clashes)
+    def _iter_remote(self, sftp, rp, lp, is_dir, root, problems=None, include_dirs=False, clashes=None,
+                     unsafe_names=None):
+        return services.scanning._iter_remote(
+            self, sftp, rp, lp, is_dir, root, problems, include_dirs, clashes, unsafe_names)
 
     def _scan_and_queue(self, roots, direction, on_conflict, scan_id, stop_event, local_root=None,
                         initial_problems=()):
@@ -403,9 +405,9 @@ class Api:
 
     # ───────────── compare / sync plan / download-changed ─────────────
     def _compute_pair_maps(self, sftp, local_dir, remote_dir, on_progress=None, stop_event=None,
-                           excluded=None):
+                           excluded=None, omissions=None):
         return services.compare_sync._compute_pair_maps(
-            self, sftp, local_dir, remote_dir, on_progress, stop_event, excluded)
+            self, sftp, local_dir, remote_dir, on_progress, stop_event, excluded, omissions)
 
     def _classify(self, rel, local_map, remote_map):
         return services.compare_sync._classify(self, rel, local_map, remote_map)
@@ -414,10 +416,10 @@ class Api:
         return services.compare_sync._compute_compare(self, sftp, local_dir, remote_dir, on_progress, stop_event)
 
     def _compute_sync(self, sftp, local_dir, remote_dir, direction, changed_only=True,
-                       on_progress=None, stop_event=None, excluded=None):
+                       on_progress=None, stop_event=None, excluded=None, omissions=None):
         return services.compare_sync._compute_sync(
             self, sftp, local_dir, remote_dir, direction, changed_only, on_progress, stop_event,
-            excluded)
+            excluded, omissions)
 
     # ───────────── compare / sync background jobs (own thread, own session) ─────────────
     def _start_compare(self, kind):
@@ -447,8 +449,11 @@ class Api:
     def sync_plan(self, local_dir, remote_dir, direction, changed_only=True):
         return services.compare_sync.sync_plan(self, local_dir, remote_dir, direction, changed_only)
 
-    def _stream_sync_transfers(self, transfers, direction, on_conflict, scan_id, stop_event, token, local_root=None):
-        return services.compare_sync._stream_sync_transfers(self, transfers, direction, on_conflict, scan_id, stop_event, token, local_root)
+    def _stream_sync_transfers(self, transfers, direction, on_conflict, scan_id, stop_event, token,
+                               local_root=None, not_compared_count=0):
+        return services.compare_sync._stream_sync_transfers(
+            self, transfers, direction, on_conflict, scan_id, stop_event, token, local_root,
+            not_compared_count)
 
     def start_sync(self, token, on_conflict="overwrite"):
         return services.compare_sync.start_sync(self, token, on_conflict)
