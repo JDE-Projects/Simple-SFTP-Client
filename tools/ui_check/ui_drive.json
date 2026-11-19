@@ -19,6 +19,11 @@
       "fixture": "tools/ui_check/incomplete_scan_fixture.py",
       "timeout_s": 120
     },
+    "compare-omissions": {
+      "script": "tools/ui_check/compare_omissions.js",
+      "fixture": "tools/ui_check/compare_omissions_fixture.py",
+      "timeout_s": 120
+    },
     "links": {
       "script": "tools/ui_check/links.js",
       "fixture": "tools/ui_check/links_fixture.py",
