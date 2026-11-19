@@ -24,6 +24,11 @@
       "fixture": "tools/ui_check/compare_omissions_fixture.py",
       "timeout_s": 120
     },
+    "case-pairing": {
+      "script": "tools/ui_check/case_pairing.js",
+      "fixture": "tools/ui_check/case_pairing_fixture.py",
+      "timeout_s": 120
+    },
     "links": {
       "script": "tools/ui_check/links.js",
       "fixture": "tools/ui_check/links_fixture.py",
