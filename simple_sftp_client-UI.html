@@ -1319,7 +1319,8 @@ function confirmSyncPlan(result,noTransfer=false){
       else if(p.remote.mtime>p.local.mtime) newer=`<b style="color:var(--amber)">Remote</b>`;
       else newer="Same";
     }
-    return `<tr><td class="name">${esc(p.name)}</td><td class="size">${locCell}</td><td class="size">${remCell}</td><td>${newer}</td></tr>`;
+    const localName=p.local_name?`<br><span class="meta" style="color:var(--amber);font-size:10px">on this PC: ${esc(p.local_name)}</span>`:"";
+    return `<tr><td class="name">${esc(p.name)}${localName}</td><td class="size">${locCell}</td><td class="size">${remCell}</td><td>${newer}</td></tr>`;
   }).join("");
   if(result.more>0) rows+=`<tr><td class="name" colspan="4">and ${result.more} more item(s)…</td></tr>`;
   $("syBody").innerHTML=rows;

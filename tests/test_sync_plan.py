@@ -146,6 +146,37 @@ def test_remote_only_child_downloads_into_existing_local_folder_spelling(sftp_en
     assert (str(local_dir / "Docs" / "x.txt"), "/docs/x.txt", 6, False) in transfers
 
 
+def test_plan_entry_shows_local_spelling_when_it_differs(sftp_env):
+    api, server_root, local_dir = sftp_env
+    _put_local(local_dir, "report.txt", b"local", mtime=1_700_003_600)
+    _put_remote(api, server_root, "Report.txt", b"remote", mtime=1_700_000_000)
+
+    plan, _transfers = _sync(api, local_dir, "upload")
+
+    assert [(p["name"], p.get("local_name")) for p in plan] == [("Report.txt", "report.txt")]
+
+
+def test_plan_entry_has_no_local_spelling_when_names_match(sftp_env):
+    api, server_root, local_dir = sftp_env
+    _put_local(local_dir, "report.txt", b"local", mtime=1_700_003_600)
+    _put_remote(api, server_root, "report.txt", b"remote", mtime=1_700_000_000)
+
+    plan, _transfers = _sync(api, local_dir, "upload")
+
+    assert len(plan) == 1 and "local_name" not in plan[0]
+
+
+def test_plan_entry_shows_local_folder_spelling_for_new_file(sftp_env):
+    api, server_root, local_dir = sftp_env
+    _put_local(local_dir, "Docs/new.txt", b"local")
+    _put_remote(api, server_root, "docs/other.txt", b"remote")
+
+    plan, _transfers = _sync(api, local_dir, "upload")
+
+    entry = next(p for p in plan if p["name"] == "docs/new.txt")
+    assert entry["local_name"] == "Docs/new.txt"
+
+
 # ───────────── recursive (nested) cases ─────────────
 
 def test_nested_changed_file_appears_in_plan_with_its_rel_path(sftp_env):

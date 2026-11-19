@@ -509,12 +509,16 @@ def _compute_sync(api, sftp, local_dir, remote_dir, direction, changed_only=True
     spelling, while transfer tuples retain actual source paths and target an
     existing destination spelling. conflicts lists every file-versus-folder
     rel, including non-empty folders without scanner markers; none of their
-    descendants transfer. Returns (None, None, None) if cancelled."""
+    descendants transfer. A plan entry whose local spelling differs from its
+    name also carries that spelling as local_name, so the preview can show
+    both before the user confirms. Returns (None, None, None) if cancelled."""
     local_map, remote_map = api._compute_pair_maps(
         sftp, local_dir, remote_dir, on_progress=on_progress, stop_event=stop_event,
         excluded=excluded, omissions=omissions)
     if local_map is None:
         return None, None, None
+    local_spellings = {canonical: local_rel for local_rel, canonical
+                       in getattr(local_map, "local_aliases", {}).items()}
     wanted = ("local_only", "newer_local") if direction == "upload" else ("remote_only", "newer_remote")
     plan = []
     transfers = []
@@ -531,8 +535,11 @@ def _compute_sync(api, sftp, local_dir, remote_dir, direction, changed_only=True
         local = {"size": lentry[0], "mtime": lentry[1]} if lentry else None
         remote = {"size": rentry[0], "mtime": rentry[1]} if rentry else None
         is_dir = bool((lentry or rentry)[4])
-        plan.append({"name": rel, "status": status, "local": local, "remote": remote,
-                     "is_dir": is_dir})
+        entry = {"name": rel, "status": status, "local": local, "remote": remote,
+                 "is_dir": is_dir}
+        if lentry and rel in local_spellings:
+            entry["local_name"] = local_spellings[rel]
+        plan.append(entry)
         # The transfer's source side must actually exist to send anything;
         # changed_only=False can otherwise list a status that makes no
         # sense for this direction (e.g. a remote_only file on an
