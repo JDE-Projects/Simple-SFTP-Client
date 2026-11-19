@@ -42,7 +42,7 @@ def cancel(api):
     streaming files in, so a cancel during a huge scan halts it promptly.
     self._cancel is also set to stop a running folder-size calculation,
     which is not on the per-item flag."""
-    api._stop_all_scans()
+    api._stop_all_scans("stopped")
     api._stop_all_compares()
     api._queue.cancel_all()
     api._cancel.set()
@@ -109,6 +109,7 @@ def poll_queue(api):
         # aged out of items/pending above.
         "scanning": api._scan_active(),
         "scan_found": api._scan_found_total(),
+        "scan_not_read": api._scan_not_read_total(),
         # A background compare/sync job walks the tree the same way, on
         # its own separate registry so its progress and the scan
         # progress above never collide.
@@ -194,6 +195,7 @@ def enqueue(api, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"
     if api._legacy_active.is_set():
         return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}
     roots = []   # (local_path, remote_path, is_dir)
+    root_problems = []
     for j in jobs:
         name = j["name"]
         is_dir = bool(j.get("is_dir"))
@@ -210,7 +212,8 @@ def enqueue(api, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"
             try:
                 kind = local_link_kind(lp)
             except OSError as e:
-                api._worker_log(f"could not read {lp}: {e}", "error", "link skipped", error=e)
+                log_event("link skipped", error=e)
+                root_problems.append(f"could not read {lp}: {e}")
                 continue
             if kind:
                 api._worker_log(f"skipped {lp}: it is a {kind}; links are not uploaded",
@@ -227,9 +230,13 @@ def enqueue(api, jobs, direction, local_dir, remote_dir, on_conflict="overwrite"
             if target:
                 api._worker_log(f"{name} is symlinked to {target}; files will be written there.", "warn", "symlink target")
         roots.append((lp, rp, is_dir))
+    if not roots and root_problems:
+        return {"ok": False, "error": f"Could not read {root_problems[0]} "
+                f"({len(root_problems)} location(s) not read)."}
     scan_id, stop_event = api._register_scan()
     t = threading.Thread(target=api._scan_and_queue,
-                          args=(roots, direction, on_conflict, scan_id, stop_event, local_dir),
+                          args=(roots, direction, on_conflict, scan_id, stop_event, local_dir,
+                                root_problems),
                           daemon=True)
     t.start()
     return {"ok": True, "scanning": True}
@@ -510,6 +517,7 @@ def upload_paths(api, paths, remote_dir, on_conflict="overwrite"):
     if api._legacy_active.is_set():
         return {"ok": False, "error": "A sync or watch operation is running. Wait for it to finish."}
     roots = []   # (local_path, remote_path, is_dir)
+    root_problems = []
     skipped_links = 0
     try:
         for raw in paths or []:
@@ -521,7 +529,8 @@ def upload_paths(api, paths, remote_dir, on_conflict="overwrite"):
             try:
                 kind = local_link_kind(lp)
             except OSError as e:
-                api._worker_log(f"could not read {lp}: {e}", "error", "link skipped", error=e)
+                log_event("link skipped", error=e)
+                root_problems.append(f"could not read {lp}: {e}")
                 continue
             if kind:
                 skipped_links += 1
@@ -535,13 +544,17 @@ def upload_paths(api, paths, remote_dir, on_conflict="overwrite"):
     except Exception as e:
         return {"ok": False, "error": f"Could not read the dropped items: {e}"}
     if not roots:
+        if root_problems:
+            return {"ok": False, "error": f"Could not read {root_problems[0]} "
+                    f"({len(root_problems)} location(s) not read)."}
         if skipped_links:
             return {"ok": False, "error": "Links are not uploaded."}
         return {"ok": False, "error": "No files were found in the dropped items."}
     log_event("external upload", items=len(roots))
     scan_id, stop_event = api._register_scan()
     t = threading.Thread(target=api._scan_and_queue,
-                          args=(roots, "upload", on_conflict, scan_id, stop_event),
+                          args=(roots, "upload", on_conflict, scan_id, stop_event, None,
+                                root_problems),
                           daemon=True)
     t.start()
     return {"ok": True, "scanning": True}

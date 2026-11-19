@@ -328,7 +328,7 @@ def _report_dead_connection(api):
         if api._conn_dead_reported:
             return
         api._conn_dead_reported = True
-    api._stop_all_scans()
+    api._stop_all_scans("connection lost")
     api._stop_all_compares()
     stranded = api._queue.fail_waiting("Connection lost")
     suffix = f" ({stranded} queued item(s) failed)" if stranded else ""
