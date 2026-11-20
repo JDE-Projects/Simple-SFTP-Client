@@ -89,33 +89,50 @@ def strip_remote_debugging(environ, argv, frozen):
 
 
 # ───────────── main ─────────────
+# Only one copy may run: two copies would save over each other's settings,
+# sessions, and data files.
+APP_TITLE = "Simple SFTP Client"
+MUTEX_NAME = "JDE_SimpleSFTPClient_SingleInstance"
+ERROR_ALREADY_EXISTS = 183
+MB_ICONERROR = 0x10
+MB_ICONINFORMATION = 0x40
+
 _mutex_handle = None   # module-level: must live for the process lifetime
 
 
 def _acquire_single_instance(mutex_name: str) -> bool:
-    # Name convention: "JDE_Simple{Thing}Tool_SingleInstance"
-    # Session-local (no "Global\" prefix): each Windows session (e.g. RDP,
-    # fast user switching) gets its own instance instead of colliding across users.
+    """True if this is the only copy, False if another copy holds the lock.
+    Raises OSError if Windows cannot create the lock at all.
+
+    Session-local (no "Global\\" prefix): each Windows session (e.g. RDP,
+    fast user switching) gets its own copy instead of colliding across users.
+    """
     global _mutex_handle
-    try:
-        # use_last_error=True: ctypes.windll's GetLastError() can be clobbered
-        # by ctypes-internal calls, so read the error via ctypes.get_last_error() instead.
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        _mutex_handle = kernel32.CreateMutexW(None, False, mutex_name)
-        return ctypes.get_last_error() != 183   # ERROR_ALREADY_EXISTS
-    except Exception:
-        return True   # fail open: never block launch over a mutex error
+    # use_last_error=True: ctypes.windll's GetLastError() can be clobbered
+    # by ctypes-internal calls, so read the error via ctypes.get_last_error().
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    handle = kernel32.CreateMutexW(None, False, mutex_name)
+    error = ctypes.get_last_error()
+    if not handle:
+        raise ctypes.WinError(error)
+    _mutex_handle = handle
+    return error != ERROR_ALREADY_EXISTS
 
 
-def _focus_existing_window(title: str) -> None:
-    """Best-effort: bring an already-running instance's window to the
-    foreground when a second launch is refused. Enumerates top-level windows
-    (the mirror image of _own_window_handle: this one keeps only a window
-    NOT owned by this process), restores it if minimized, then asks Windows
-    to foreground it. SetForegroundWindow can silently no-op under Windows'
-    foreground-lock rules if this process never had focus; that is accepted
-    as-is rather than fought with input-attach hacks. Wrapped end to end so
-    any failure just means the second process exits quietly with no window."""
+def _is_app_window_class(class_name: str) -> bool:
+    # The Qt window's class is "Qt<version>QWindowIcon", e.g. Qt6112QWindowIcon.
+    # Checking it stops a File Explorer window for a folder with the same name
+    # from being taken for the app.
+    return class_name.startswith("Qt") and class_name.endswith("QWindowIcon")
+
+
+def _focus_existing_window(title: str) -> bool:
+    """Bring the running copy's window to the front and return whether found.
+
+    SetForegroundWindow may be refused by Windows' foreground rules; that is
+    accepted after the matching window is found.
+    """
     try:
         u = ctypes.windll.user32
         WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -129,6 +146,8 @@ def _focus_existing_window(title: str) -> None:
         u.GetWindowTextW.restype = ctypes.c_int
         u.IsWindowVisible.argtypes = [wintypes.HWND]
         u.IsWindowVisible.restype = wintypes.BOOL
+        u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        u.GetClassNameW.restype = ctypes.c_int
         # Type the handle-taking calls too: a window handle can exceed a
         # signed 32-bit int, and ctypes' untyped default would raise on it,
         # silently defeating the focus. Same convention as _save_geometry.
@@ -156,6 +175,10 @@ def _focus_existing_window(title: str) -> None:
             u.GetWindowTextW(hwnd, buf, length + 1)
             if buf.value != title:
                 return True
+            cls = ctypes.create_unicode_buffer(256)
+            u.GetClassNameW(hwnd, cls, 256)
+            if not _is_app_window_class(cls.value):
+                return True
             found["hwnd"] = hwnd
             return False   # stop enumerating, we found it
 
@@ -163,13 +186,43 @@ def _focus_existing_window(title: str) -> None:
         u.EnumWindows(proc, 0)
         hwnd = found["hwnd"]
         if not hwnd:
-            return
+            return False
         SW_RESTORE = 9
         if u.IsIconic(hwnd):
             u.ShowWindow(hwnd, SW_RESTORE)
         u.SetForegroundWindow(hwnd)
+        return True
+    except Exception:
+        return False
+
+
+def _show_message(app_title: str, text: str, icon: int) -> None:
+    # Native message box only: runs before pywebview/Qt exists. If even this
+    # fails there is nowhere left to report it; the caller still exits.
+    try:
+        ctypes.windll.user32.MessageBoxW(None, text, app_title, icon)
     except Exception:
         pass
+
+
+def ensure_single_instance(app_title: str = APP_TITLE, mutex_name: str = MUTEX_NAME) -> None:
+    """Return only if this is the only running copy; otherwise exit."""
+    try:
+        first = _acquire_single_instance(mutex_name)
+    except Exception as e:
+        _show_message(
+            app_title,
+            f"{app_title} could not check whether it is already running, so it "
+            f"will not start.\n\nTry opening it again. If this keeps happening, "
+            f"restart Windows.\n\nDetails: {e}",
+            MB_ICONERROR)
+        sys.exit(1)
+    if first:
+        return
+    if not _focus_existing_window(app_title):
+        # The window can be missing for a moment while the other copy starts.
+        _show_message(app_title, f"{app_title} is already running.", MB_ICONINFORMATION)
+    sys.exit(0)
 
 
 def _report_recovery(api, summary):
@@ -203,11 +256,7 @@ def main():
     except Exception:
         pass
 
-    if not _acquire_single_instance("JDE_SimpleSFTPClient_SingleInstance"):
-        # Already running: never open a second window. Best-effort bring the
-        # existing one to the front, then exit quietly either way.
-        _focus_existing_window("Simple SFTP Client")
-        sys.exit(0)
+    ensure_single_instance()
 
     if sys.platform == "win32":
         try:
