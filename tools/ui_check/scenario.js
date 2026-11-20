@@ -315,7 +315,7 @@ try{
   // with a Hyper-V connected mouse the wheel then stops after reversing
   // until the mouse moves. Scripted wheel input does not reproduce that,
   // so this only guards the style that prevents it.
-  ok("panes keep wheel scrolling at their edges",()=>["bodyLocal","bodyRemote"].every(id=>getComputedStyle($(id)).overscrollBehaviorY==="contain"),()=>["bodyLocal","bodyRemote"].map(id=>getComputedStyle($(id)).overscrollBehaviorY).join(","));
+  ok("scroll areas keep wheel scrolling at their edges",()=>["bodyLocal","bodyRemote","console"].every(id=>getComputedStyle($(id)).overscrollBehaviorY==="contain"),()=>["bodyLocal","bodyRemote","console"].map(id=>getComputedStyle($(id)).overscrollBehaviorY).join(","));
   ok("large local folder renders a bounded row window",()=>state.local.entries.length===20000&&$("tbodyLocal").querySelectorAll("tr").length<=300,()=>$("tbodyLocal").querySelectorAll("tr").length);
   $("bodyLocal").scrollTop=$("bodyLocal").scrollHeight; await sleep(100);
   ok("large local folder bottom draws the last view entry",()=>$("tbodyLocal").textContent.includes("entry-19999.txt"),()=>$("tbodyLocal").textContent.slice(-200));
