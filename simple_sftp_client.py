@@ -278,7 +278,7 @@ def main():
     debug.prune()  # catches anything already over the cap from a previous run
     window = webview.create_window(
         "Simple SFTP Client", url=resource_path("simple_sftp_client-UI.html"),
-        js_api=api, width=1480, height=980, min_size=(1000, 700),
+        js_api=api, width=1480, height=980, min_size=(1000, 630),
         background_color="#0a0e14")
     api._set_window(window)
 

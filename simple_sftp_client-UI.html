@@ -85,7 +85,7 @@
   .dot.live{background:var(--green);} .dot.warn{background:var(--amber);} .dot.err{background:var(--red);} .dot.busy{background:var(--amber);}
 
   /* panes */
-  .panes{flex:1 1 auto;display:flex;gap:10px;min-height:0;}
+  .panes{flex:1 1 auto;display:flex;gap:10px;min-height:220px;}
   .pane{flex:1 1 0;display:flex;flex-direction:column;min-width:0;overflow:hidden;}
   .center{flex:0 0 108px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;}
   .center button{width:96px;}
@@ -175,8 +175,8 @@
   #updateBtn:active{transform:translateY(0);}
   #updateBtn:disabled{opacity:.38;cursor:not-allowed;transform:none;}
 
-  /* console (activity log): height is kept in sync with the connection bar */
-  .console{position:relative;padding:0;overflow:hidden;flex:0 0 auto;}
+  /* console (activity log): height follows the connection bar, but on a short window it gives way, down to three lines, so the file panes keep room for the transfer buttons */
+  .console{position:relative;padding:0;overflow:hidden;flex:0 1 auto;min-height:72px;}
   .console-body{height:100%;overflow-y:auto;padding:8px 12px 8px 12px;font-family:"JetBrains Mono",monospace;
     font-size:11px;line-height:1.65;-webkit-user-select:text;user-select:text;}
   .cline{white-space:pre-wrap;word-break:break-word;color:var(--text-dim);}
