@@ -307,6 +307,11 @@ try{
   $("bodyLocal").style.flex="0 0 400px";
   const large=await fs("make_empty_files",{side:"local",folder:"large-local",count:20000,prefix:"entry"});
   await loadLocal(large.local);
+  // A pane must not hand the wheel to the page at its top or bottom edge:
+  // with a Hyper-V connected mouse the wheel then stops after reversing
+  // until the mouse moves. Scripted wheel input does not reproduce that,
+  // so this only guards the style that prevents it.
+  ok("panes keep wheel scrolling at their edges",()=>["bodyLocal","bodyRemote"].every(id=>getComputedStyle($(id)).overscrollBehaviorY==="contain"),()=>["bodyLocal","bodyRemote"].map(id=>getComputedStyle($(id)).overscrollBehaviorY).join(","));
   ok("large local folder renders a bounded row window",()=>state.local.entries.length===20000&&$("tbodyLocal").querySelectorAll("tr").length<=300,()=>$("tbodyLocal").querySelectorAll("tr").length);
   $("bodyLocal").scrollTop=$("bodyLocal").scrollHeight; await sleep(100);
   ok("large local folder bottom draws the last view entry",()=>$("tbodyLocal").textContent.includes("entry-19999.txt"),()=>$("tbodyLocal").textContent.slice(-200));
