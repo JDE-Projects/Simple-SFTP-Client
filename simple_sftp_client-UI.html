@@ -422,8 +422,9 @@ function clog(m,level,reportId){ const box=$("console"); if(!box)return; const e
   const text=document.createElement("span"); text.textContent=m+(reportId!==undefined&&reportId!==null?" (click to see them)":""); line.appendChild(text);
   if(reportId!==undefined&&reportId!==null){
     line.classList.add("scan-report"); line.tabIndex=0; line.setAttribute("role","button");
-    line.onclick=()=>openScanProblems(reportId);
-    line.onkeydown=e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); openScanProblems(reportId); } };
+    const open=typeof reportId==="function"?reportId:()=>openScanProblems(reportId);
+    line.onclick=open;
+    line.onkeydown=e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); open(); } };
   }
   box.appendChild(line);
   while(box.children.length>500)box.removeChild(box.firstChild); box.scrollTop=box.scrollHeight; }
@@ -1202,10 +1203,18 @@ async function deleteSel(side){ const items=selItems(side); if(!items.length)ret
   else clog(`Deleted ${items.length} item(s) from ${side}`,"ok");
   refresh(side); }
 async function calcSize(name){
+  if(sizeCalculating){ clog("A folder size is already being calculated.","warn"); return; }
   sizeCalculating=true; $("qName").textContent="Calculating size..."; $("cancelBtn").disabled=false;
   try{
     const r=await API.calc_remote_size(state.remote.cwd,name);
-    if(r.ok)clog(`${name}: ${r.human} across ${r.files} file(s)`,`ok`);
+    if(r.ok&&r.complete!==false)clog(`${name}: ${r.human} across ${r.files} file(s)`,`ok`);
+    else if(r.ok)clog(`${name}: at least ${r.human} across ${r.files} file(s). ${r.problem_count} location(s) could not be read`,"warn",()=>{
+      scanProblemsRequest++;
+      const text=`${r.problem_count} location(s) could not be read while calculating the size of ${name}. The total leaves them out.`;
+      const items=(r.problems||[]).map(p=>`${p.path}: ${p.reason}`);
+      showScanProblems("Locations not read",text,items,r.more||0);
+    });
+    else if(r.cancelled)clog("Size calculation cancelled.","warn");
     else clog(r.error||"Could not calculate folder size","error");
   }catch(e){clog("Could not calculate folder size","error");}
   finally{sizeCalculating=false; $("cancelBtn").disabled=!(queuePending>0); if(queuePending>0)queueTick(); else $("qName").textContent="Idle";}

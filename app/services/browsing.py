@@ -5,11 +5,14 @@ import posixpath
 import shutil
 import stat
 import time
+import paramiko
 import webview
 from app.errors import friendly_error
 from app.formatting import human_size
 from app.paths import remote_leaf_problem, safe_local_child
 from app.scratch_journal import is_active_local
+from app.services import connections
+from app.services.scanning import _read_error
 
 
 class UnsafeRemoteListing(ValueError):
@@ -194,38 +197,87 @@ def calc_remote_size(api, remote_dir, name):
     if not api._connected:
         return {"ok": False, "error": "Not connected."}
     total = {"bytes": 0, "files": 0}
+    problems = []
+    problem_count = 0
     api._cancel.clear()
 
-    def walk(p):
+    def add_problem(path, reason):
+        nonlocal problem_count
+        problem_count += 1
+        if len(problems) < 10_000:
+            problems.append({"path": path, "reason": reason})
+
+    def cancelled():
         if api._cancel.is_set():
-            return
+            return {"ok": False, "cancelled": True, "error": "Size calculation cancelled."}
+
+    def connection_lost():
+        return {"ok": False, "error": "Connection lost while calculating size.",
+                "connection_lost": True}
+
+    def walk(p, top=False):
+        stopped = cancelled()
+        if stopped:
+            return stopped
         try:
             attrs = api._sftp.listdir_attr(p)
-        except Exception:
-            return
+        except Exception as e:
+            dead = isinstance(e, (paramiko.SSHException, EOFError))
+            if connections._connection_dead(api, api._sftp):
+                dead = True
+            if dead:
+                return connection_lost()
+            if top:
+                return {"ok": False, "error": f"Could not list {p}: {_read_error(e, remote=True)}"}
+            add_problem(p, _read_error(e, remote=True))
+            return None
+        stopped = cancelled()
+        if stopped:
+            return stopped
         for a in attrs:
-            if api._cancel.is_set():
-                return
+            stopped = cancelled()
+            if stopped:
+                return stopped
             if remote_leaf_problem(a.filename):
                 api._vlog(f"skipped unsafe remote name while calculating size: {a.filename!r}", "warn",
                           event="unsafe remote size")
+                add_problem(f"{p.rstrip('/')}/{a.filename!r}", "Unsafe server name.")
                 continue
             if api._is_active_remote_scratch(posixpath.join(p, a.filename)):
                 continue
-            if stat.S_ISDIR(a.st_mode):
-                walk(posixpath.join(p, a.filename))
+            if a.st_mode is None:
+                add_problem(posixpath.join(p, a.filename),
+                            "Cannot tell whether this entry is a file or folder.")
+            elif stat.S_ISDIR(a.st_mode):
+                stopped = walk(posixpath.join(p, a.filename))
+                if stopped:
+                    return stopped
+            elif a.st_size is None:
+                add_problem(posixpath.join(p, a.filename), "File size is unavailable.")
             else:
-                total["bytes"] += a.st_size or 0
+                total["bytes"] += a.st_size
                 total["files"] += 1
                 if total["files"] % 50 == 0:
                     api._emit("size_progress", {"files": total["files"],
                                                  "bytes": human_size(total["bytes"])})
+        return None
     try:
         _validate_remote_leaf(name)
         target = posixpath.join(remote_dir, name)
-        walk(target)
+        stopped = walk(target, top=True)
+        if stopped:
+            return stopped
+        stopped = cancelled()
+        if stopped:
+            return stopped
+        if problem_count:
+            api._vlog(f"remote size incomplete for {target}: {human_size(total['bytes'])} in "
+                      f"{total['files']} file(s), {problem_count} problem(s)", "warn",
+                      event="remote size incomplete", items=problem_count)
         return {"ok": True, "bytes": total["bytes"], "human": human_size(total["bytes"]),
-                "files": total["files"]}
+                "files": total["files"], "complete": problem_count == 0,
+                "problem_count": problem_count, "problems": problems,
+                "more": problem_count - len(problems)}
     except ValueError:
         return {"ok": False, "error": _remote_name_error(name)}
     except Exception as e:

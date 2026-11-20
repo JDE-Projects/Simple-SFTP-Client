@@ -170,8 +170,10 @@ def test_remote_size_skips_unsafe_nested_name(sftp_env, monkeypatch):
     result = api.calc_remote_size("/", "folder")
 
     assert result["ok"] is True
+    assert result["complete"] is False
+    assert result["problem_count"] == 1
     assert result["bytes"] == 4
-    assert sum(level == "warn" for _msg, level in lines) == 1
+    assert sum("unsafe remote name" in msg and level == "warn" for msg, level in lines) == 1
 
 
 @pytest.mark.parametrize("name", ["../x", ".", "..", "", "a/b", "a\x00b"])

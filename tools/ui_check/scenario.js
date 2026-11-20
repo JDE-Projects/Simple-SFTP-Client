@@ -235,6 +235,37 @@ try{
   const failedCleared=await waitFor(()=>!compareMap&&$("localCompare").textContent===""&&$("remoteCompare").textContent==="",20000);
   ok("a failed compare clears the previous compare's colors and counts",()=>failedCleared,()=>$("localCompare").textContent+" | "+$("remoteCompare").textContent);
 
+  // Folder size. The fixture's refused subfolder is made only now, after the
+  // compare checks, which read the whole server folder.
+  await fs("make_size_fixture"); await loadRemote("/");
+  const newestConsoleLine=()=>[...document.querySelectorAll("#console .cline")].at(-1);
+  await calcSize(T.size_folder);
+  const incompleteSizeLine=newestConsoleLine();
+  ok("C1 (folder size): incomplete result is a clickable warning",()=>!!incompleteSizeLine&&incompleteSizeLine.classList.contains("warn")&&incompleteSizeLine.classList.contains("scan-report")&&incompleteSizeLine.textContent.includes("at least")&&incompleteSizeLine.textContent.includes("1 location(s) could not be read"),()=>incompleteSizeLine&&incompleteSizeLine.textContent);
+
+  incompleteSizeLine&&incompleteSizeLine.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));
+  const sizeProblemsOpen=await waitFor(()=>$("scanProblemsModal").classList.contains("show")&&$("scanProblemsTitle").textContent==="Locations not read"&&$("scanProblemsList").textContent.includes(T.refused_size_folder),5000);
+  ok("C2 (folder size): activating the result opens the refused location",()=>sizeProblemsOpen,()=>$("scanProblemsTitle").textContent+" | "+$("scanProblemsList").textContent);
+  $("scanProblemsClose").click();
+
+  await calcSize("other");
+  const completeSizeLine=newestConsoleLine();
+  ok("C3 (folder size): complete result stays a normal success line",()=>!!completeSizeLine&&completeSizeLine.classList.contains("ok")&&!completeSizeLine.textContent.includes("at least")&&!completeSizeLine.classList.contains("scan-report"),()=>completeSizeLine&&completeSizeLine.textContent);
+
+  const sizeCallCountBefore=(await fs("calls")).calc_remote_size||0;
+  sizeCalculating=true;
+  await calcSize("other");
+  sizeCalculating=false;
+  const overlapSizeLine=newestConsoleLine();
+  const sizeCallCountAfter=(await fs("calls")).calc_remote_size||0;
+  ok("C4 (folder size): overlap is warned without calling the bridge",()=>!!overlapSizeLine&&overlapSizeLine.classList.contains("warn")&&overlapSizeLine.textContent.includes("A folder size is already being calculated.")&&sizeCallCountAfter===sizeCallCountBefore,()=>JSON.stringify({line:overlapSizeLine&&overlapSizeLine.textContent,before:sizeCallCountBefore,after:sizeCallCountAfter}));
+
+  const realAPI=API;
+  API=new Proxy(realAPI,{get:(t,name)=>name==="calc_remote_size"?async()=>({ok:false,cancelled:true,error:"Size calculation cancelled."}):t[name]});
+  try{ await calcSize("other"); } finally{ API=realAPI; }
+  const cancelledSizeLine=newestConsoleLine();
+  ok("C5 (folder size): cancelled result is a warning",()=>!!cancelledSizeLine&&cancelledSizeLine.classList.contains("warn")&&cancelledSizeLine.textContent.includes("Size calculation cancelled."),()=>cancelledSizeLine&&cancelledSizeLine.textContent);
+
   // Starting Watch must not rerun the end-of-batch refresh.
   const before=await fs("calls");
   const w=onWatch(); await clickOk(); await w; await sleep(2000);
