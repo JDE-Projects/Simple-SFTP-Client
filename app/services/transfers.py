@@ -745,8 +745,7 @@ def _make_dir(api, direction, local_path, remote_path, sftp, dir_cache=None):
 
 def _ensure_remote_dir(api, path, sftp=None):
     """Create path and any missing parents over sftp (defaults to
-    self._sftp, which the folder watcher uses under _sftp_lock; a worker
-    passes its own session, never the shared browsing one)."""
+    self._sftp; workers and the folder watcher pass their own sessions)."""
     sftp = api._sftp if sftp is None else sftp
     parts = path.strip("/").split("/")
     cur = "/"

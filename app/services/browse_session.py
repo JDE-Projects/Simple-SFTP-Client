@@ -144,7 +144,9 @@ def open_browsing_sftp(client):
     if not done.wait(constants.BROWSE_REOPEN_TIMEOUT):
         with state["lock"]:
             state["abandoned"] = True
-        raise TimeoutError("Could not open a fresh file-pane session in time.")
+        error = TimeoutError("Could not open a fresh file-pane session in time.")
+        error.opener_done = done
+        raise error
     with state["lock"]:
         if state["error"] is not None:
             raise RuntimeError("Could not open a fresh file-pane session.") from state["error"]

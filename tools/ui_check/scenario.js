@@ -372,6 +372,15 @@ try{
     ok("late remote reply leaves the newer folder and notice state",()=>state.remote.cwd==="/late-b"&&!state.remote.truncated&&!$("noticeRemote").classList.contains("show"),()=>JSON.stringify({cwd:state.remote.cwd,truncated:state.remote.truncated}));
   } finally { await fs("set_browse_limit",{limit:null}); }
 
+  // A watch whose connection is replaced ends on its own and the page shows it.
+  ok("watching before the connection is replaced",()=>watching===true);
+  await fs("replace_connection");
+  const ended=await waitFor(()=>!watching,8000);
+  ok("Watch button resets when the watch ends on its own",()=>ended&&$("watchBtn").textContent==="Watch"&&$("watchTag").textContent==="",()=>$("watchBtn").textContent);
+  ok("console says the watch stopped",()=>consoleText().includes("Watch stopped: the connection it started on has ended."));
+  const rewatch=onWatch(); await clickOk(); await rewatch;
+  ok("watch restarts after it ended",()=>watching===true);
+
   // Disconnect while watching.
   await onConn(); await sleep(1500);
   ok("Watch button reset after disconnect",()=>!watching&&$("watchBtn").textContent==="Watch",()=>$("watchBtn").textContent);

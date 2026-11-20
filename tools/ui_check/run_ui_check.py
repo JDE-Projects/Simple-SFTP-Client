@@ -224,6 +224,11 @@ def main(argv):
                     return self._send({"ok": True})
                 if op == "calls":
                     return self._send(dict(calls))
+                if op == "replace_connection":
+                    # What a reconnect does to a running watch: the connection
+                    # it started on is no longer the current one.
+                    api._conn_generation += 1
+                    return self._send({"ok": True})
                 if op == "make_empty_files":
                     root = os.path.abspath(targets["local"] if body["side"] == "local" else server_root)
                     folder = os.path.abspath(os.path.join(root, body["folder"]))

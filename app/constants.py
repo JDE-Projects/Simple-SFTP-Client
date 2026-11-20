@@ -1,10 +1,10 @@
 GITHUB_REPO = "JDE-Projects/Simple-SFTP-Client"   # owner/repo for update checks
 WORKER_COUNT = 2   # transfer queue workers by default, each its own SFTP session
 # Ceiling for a batch of many small files. Every worker opens its own SFTP
-# channel on the one SSH connection, alongside the browsing channel (which the
-# folder watcher shares) and any Compare, Sync, or folder-scan channel.
-# OpenSSH servers allow 10 sessions per connection by default (MaxSessions),
-# so 5 leaves headroom under that common limit.
+# channel on the one SSH connection, alongside the browsing channel, the folder
+# watcher channel, and one Compare, Sync, or folder-scan channel. Five workers
+# plus those three channels uses eight sessions, below OpenSSH's common
+# 10-session-per-connection MaxSessions limit.
 WORKER_COUNT_MAX = 5
 # A background scan pauses queuing new files once this many are still WAITING,
 # and resumes once the worker pool has drained enough of them. This is what

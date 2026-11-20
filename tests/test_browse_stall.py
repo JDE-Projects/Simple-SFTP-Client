@@ -190,6 +190,23 @@ def test_late_open_after_abandon_is_closed(monkeypatch):
     assert channel.closed is True
 
 
+def test_open_timeout_carries_opener_done(monkeypatch):
+    monkeypatch.setattr(constants, "BROWSE_REOPEN_TIMEOUT", 0.03)
+    entered, release = threading.Event(), threading.Event()
+    channel = OpenChannel(entered, release)
+    monkeypatch.setattr(browse_session, "BrowsingSFTPClient", SimpleSession)
+
+    with pytest.raises(TimeoutError) as raised:
+        open_browsing_sftp(OpenClient(channel))
+
+    opener_done = raised.value.opener_done
+    assert isinstance(opener_done, threading.Event)
+    assert entered.wait(0.2)
+    assert not opener_done.is_set()
+    release.set()
+    assert opener_done.wait(0.2)
+
+
 def test_disconnect_during_reset_publishes_nothing(monkeypatch):
     monkeypatch.setattr(constants, "BROWSE_REOPEN_TIMEOUT", 0.2)
     entered, release = threading.Event(), threading.Event()
@@ -328,7 +345,8 @@ def test_slow_reply_under_deadline_untouched(browsing_env, monkeypatch):
     assert api._sftp is old
 
 
-def test_watch_upload_stall_resets(browsing_env, monkeypatch, wait_until):
+def test_watch_upload_stall_leaves_the_file_pane_session(
+        browsing_env, monkeypatch, wait_until):
     api, _, local = browsing_env
     api._watch_interval = 0.01
     watched = local / "watch.txt"
@@ -337,15 +355,17 @@ def test_watch_upload_stall_resets(browsing_env, monkeypatch, wait_until):
     old = api._sftp
     attempts = []
 
-    def stalled(*_args):
-        attempts.append(True)
-        old.timed_out = True
+    def stalled(session, *_args):
+        attempts.append(session)
+        session.timed_out = True
         raise TimeoutError()
 
     monkeypatch.setattr(api, "_put_file", stalled)
     watched.write_text("changed")
     try:
-        wait_until(lambda: api._sftp is not old, timeout=2)
         wait_until(lambda: len(attempts) >= 2, timeout=2)
     finally:
         api.stop_watch()
+    assert api._sftp is old
+    assert not api._sftp.timed_out
+    assert len({id(session) for session in attempts}) >= 2

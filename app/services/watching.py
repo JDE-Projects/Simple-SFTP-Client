@@ -8,7 +8,7 @@ from app.debug import log_event
 from app.errors import friendly_error
 from app.paths import local_link_kind
 from app.scratch_journal import is_active_local
-from app.services.browse_session import reset_browsing_session
+from app.services.browse_session import close_browsing_sftp, open_browsing_sftp
 
 
 def snapshot(api, local_dir, excluded):
@@ -64,10 +64,11 @@ def snapshot(api, local_dir, excluded):
 
 def start_watch(api, local_dir, remote_dir):
     """Polls local_dir every 2 seconds and uploads files that changed since
-    it started. Uploads run on the shared browsing session, serialized with
-    listing and health checks by self._sftp_lock. _legacy_active is set only
-    while an upload is actually running (not for the whole watch session), so
-    a pane transfer can still be queued while watch idles between polls.
+    it started. The watcher opens its own bounded session for each pass, never
+    uses the file pane's session, and stays bound to the connection it started
+    on. _legacy_active is set only while an upload is actually running (not for
+    the whole watch session), so a pane transfer can still be queued while
+    watch idles between polls.
 
     A file is uploaded only once its size and modification time have held
     steady across one poll, so a file still being written is not sent as a
@@ -115,83 +116,115 @@ def start_watch(api, local_dir, remote_dir):
     # Taken inside the thread instead, a file written in the moment before
     # the thread ran would be recorded as already present and never uploaded.
     last = snapshot(api, local_dir, excluded_links)
+    client = api._client
+    generation = api._conn_generation
 
     def loop():
         # seen_changed: a changed file's state at its previous sighting, used
         # to require one stable poll before uploading.
         seen_changed = {}
+        pending_open = None
+
+        def connection_gone():
+            return (not api._connected or api._client is not client or
+                    api._conn_generation != generation)
+
         while not stop.is_set():
             time.sleep(api._watch_interval)
-            if stop.is_set():
+            if stop.is_set() or connection_gone():
                 break
-            cur = snapshot(api, local_dir, excluded_links)
-            changed = [fp for fp in cur if last.get(fp) != cur[fp]]
-            # A queue worker uses its own session, but this shared-session
-            # upload path is deliberately kept clear of an active batch.
-            # Leave last and seen_changed untouched so the change is retried
-            # on a later idle poll.
-            if changed and api._queue.pending() > 0:
-                continue
-            refreshed_folders = set()
-            for fp in changed:
-                if stop.is_set():
-                    break
-                # Stability gate: upload only after the file looks the same
-                # as the previous poll, so a file mid-write waits.
-                if seen_changed.get(fp) != cur[fp]:
-                    seen_changed[fp] = cur[fp]
+            session = None
+            try:
+                cur = snapshot(api, local_dir, excluded_links)
+                changed = [fp for fp in cur if last.get(fp) != cur[fp]]
+                # A queue worker uses its own session, and watch uploads leave
+                # an active batch alone. Leave last and seen_changed untouched
+                # so the change is retried on a later idle poll.
+                if changed and api._queue.pending() > 0:
                     continue
-                rel = os.path.relpath(fp, local_dir).replace("\\", "/")
-                rp = posixpath.join(remote_dir, rel)
-                api._legacy_active.set()
-                try:
-                    rdir = posixpath.dirname(rp)
-
-                    def _cb(done_b, _t):  # watch has no progress bar; swallow progress callbacks
-                        pass
-
-                    # Serialize against the browsing session: this upload runs
-                    # on the watcher thread and shares self._sftp with listing
-                    # and health-ping bridge calls (see _browsing).
-                    finished = False
-                    with api._sftp_lock:
-                        try:
-                            if stop.is_set():
-                                seen_changed.pop(fp, None)
-                                break
-                            api._ensure_remote_dir(rdir)
-                            finished = api._put_file(api._sftp, fp, rp, _cb, stop.is_set)
-                        finally:
-                            reset_browsing_session(api, "watch upload")
-                    if finished:
-                        api._worker_log(f"Watch: uploaded {rel}", "ok", "watch upload", outcome="ok")
-                        refreshed_folders.add(posixpath.dirname(rp))
-                        # Accept this state so it is not re-sent.
-                        last[fp] = cur[fp]
-                        seen_changed.pop(fp, None)
-                    else:
-                        # Stop fired mid-upload: leave last unadvanced so a
-                        # later poll retries, and stop this batch.
-                        seen_changed.pop(fp, None)
+                refreshed_folders = set()
+                for fp in changed:
+                    if stop.is_set() or connection_gone():
                         break
-                except Exception as e:
-                    api._worker_log(f"Watch error: {rel} - {friendly_error(e)}", "error", "watch upload", outcome="failed", error=e)
-                    # Keep the change pending: leave last unadvanced so a
-                    # later poll retries. Reset the stability gate so a
-                    # transient failure does not skip the next steadiness
-                    # check.
-                    seen_changed.pop(fp, None)
-                finally:
-                    api._legacy_active.clear()
-            if refreshed_folders:
-                with api._watch_refresh_lock:
-                    if not stop.is_set():
-                        api._watch_refresh.update(refreshed_folders)
-            # Forget entries for files that no longer exist so the two maps
-            # do not grow without bound over a long session.
-            for tracked in (last, seen_changed):
-                for gone in [k for k in tracked if k not in cur]:
-                    del tracked[gone]
+                    # Stability gate: upload only after the file looks the same
+                    # as the previous poll, so a file mid-write waits.
+                    if seen_changed.get(fp) != cur[fp]:
+                        seen_changed[fp] = cur[fp]
+                        continue
+                    rel = os.path.relpath(fp, local_dir).replace("\\", "/")
+                    rp = posixpath.join(remote_dir, rel)
+                    if session is None:
+                        if pending_open is not None:
+                            if not pending_open.is_set():
+                                break
+                            pending_open = None
+                        try:
+                            session = open_browsing_sftp(client)
+                        except Exception as e:
+                            if isinstance(e, TimeoutError) and hasattr(e, "opener_done"):
+                                pending_open = e.opener_done
+                            api._worker_log(
+                                f"Watch error: could not open an upload session - {friendly_error(e)}",
+                                "error", "watch upload", outcome="failed", error=e)
+                            # Keep the change pending and require another stable
+                            # sighting before a later open attempt.
+                            seen_changed.pop(fp, None)
+                            break
+                        if stop.is_set() or connection_gone():
+                            close_browsing_sftp(session)
+                            session = None
+                            break
+                    api._legacy_active.set()
+                    try:
+                        rdir = posixpath.dirname(rp)
+
+                        def _cb(done_b, _t):  # watch has no progress bar; swallow progress callbacks
+                            pass
+
+                        api._ensure_remote_dir(rdir, session)
+                        finished = api._put_file(session, fp, rp, _cb, stop.is_set)
+                        if finished:
+                            api._worker_log(f"Watch: uploaded {rel}", "ok", "watch upload", outcome="ok")
+                            refreshed_folders.add(posixpath.dirname(rp))
+                            # Accept this state so it is not re-sent.
+                            last[fp] = cur[fp]
+                            seen_changed.pop(fp, None)
+                        else:
+                            # Stop fired mid-upload: leave last unadvanced so a
+                            # later poll retries, and stop this batch.
+                            seen_changed.pop(fp, None)
+                            break
+                    except Exception as e:
+                        api._worker_log(f"Watch error: {rel} - {friendly_error(e)}", "error", "watch upload", outcome="failed", error=e)
+                        # Keep the change pending: leave last unadvanced so a
+                        # later poll retries. Reset the stability gate so a
+                        # transient failure does not skip the next steadiness
+                        # check.
+                        seen_changed.pop(fp, None)
+                        close_browsing_sftp(session)
+                        session = None
+                    finally:
+                        api._legacy_active.clear()
+                if connection_gone():
+                    break
+                if refreshed_folders:
+                    with api._watch_refresh_lock:
+                        if not stop.is_set():
+                            api._watch_refresh.update(refreshed_folders)
+                # Forget entries for files that no longer exist so the two maps
+                # do not grow without bound over a long session.
+                for tracked in (last, seen_changed):
+                    for gone in [k for k in tracked if k not in cur]:
+                        del tracked[gone]
+            finally:
+                close_browsing_sftp(session)
+            if connection_gone():
+                break
+        # A watch never follows a reconnect onto a new connection, which may
+        # be a different server; it ends and says so instead.
+        if not stop.is_set() and connection_gone():
+            api._worker_log("Watch stopped: the connection it started on has ended. "
+                            "Start the watch again once connected.", "warn", "watch ended")
 
     t = threading.Thread(target=loop, daemon=True)
     with api._watch_lock:

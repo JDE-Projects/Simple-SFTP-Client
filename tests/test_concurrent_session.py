@@ -19,6 +19,7 @@ import types
 import paramiko
 
 from app import scratch_journal
+from app.services import watching
 
 
 # ───────────── shared browsing session serialization ─────────────
@@ -81,6 +82,59 @@ def test_transfers_run_while_the_browsing_lock_is_held(sftp_env, wait_for_drain)
         wait_for_drain(api)
 
     assert (server_root / "w.bin").read_bytes() == (local_dir / "w.bin").read_bytes()
+
+
+def test_watch_upload_runs_while_the_browsing_lock_is_held(sftp_env, wait_until):
+    """A watched upload uses its own session while the file pane is locked."""
+    api, server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    source = local_dir / "watch.bin"
+    payload = os.urandom(256 * 1024)
+
+    with api._sftp_lock:
+        assert api.start_watch(str(local_dir), "/")["ok"] is True
+        source.write_bytes(payload)
+        wait_until(lambda: (server_root / "watch.bin").exists())
+
+    api.stop_watch()
+    assert (server_root / "watch.bin").read_bytes() == payload
+
+
+def test_file_pane_answers_while_a_watched_upload_is_running(sftp_env, wait_until):
+    """Listing and the health check return promptly while a watched upload is
+    still in progress, instead of waiting for it to finish."""
+    api, server_root, local_dir = sftp_env
+    (server_root / "listed.txt").write_bytes(b"x")
+    api._watch_interval = 0.05
+    uploading, release = threading.Event(), threading.Event()
+    real_put = api._put_file
+
+    def long_upload(*args):
+        uploading.set()
+        release.wait(10)
+        return real_put(*args)
+
+    api._put_file = long_upload
+    try:
+        assert api.start_watch(str(local_dir), "/")["ok"] is True
+        (local_dir / "big.bin").write_bytes(b"payload")
+        assert uploading.wait(5)
+        results = {}
+
+        def browse():
+            results["list"] = api.list_remote("/")
+            results["ping"] = api.ping()
+
+        browser = threading.Thread(target=browse, daemon=True)
+        browser.start()
+        browser.join(3)
+        assert not browser.is_alive(), "file pane waited on the watched upload"
+        assert results["list"]["ok"] is True
+        assert "listed.txt" in [e["name"] for e in results["list"]["entries"]]
+        assert results["ping"]["ok"] is True
+    finally:
+        release.set()
+        api.stop_watch()
 
 
 # ───────────── watcher lifecycle ─────────────
@@ -317,7 +371,8 @@ def test_watch_retries_a_failed_upload_instead_of_forgetting_it(sftp_env, wait_u
     assert (server_root / "retry.txt").read_bytes() == b"payload"
 
 
-def test_watch_waits_for_a_file_to_stop_changing_before_uploading(sftp_env, wait_until):
+def test_watch_waits_for_a_file_to_stop_changing_before_uploading(
+        sftp_env, wait_until, monkeypatch):
     """A file still being written must not be uploaded as a partial snapshot.
     The file changes again before the stability gate clears, so only its final
     content is ever sent, and only once. Records the scratch file's bytes right
@@ -325,14 +380,21 @@ def test_watch_waits_for_a_file_to_stop_changing_before_uploading(sftp_env, wait
     publish path commits to a given version of the file."""
     api, server_root, local_dir = sftp_env
     uploaded = []
-    real_rename = api._sftp.posix_rename
+    real_open = watching.open_browsing_sftp
 
-    def recording_rename(oldpath, newpath):
-        with api._sftp.open(oldpath, "rb") as f:
-            uploaded.append(f.read())
-        return real_rename(oldpath, newpath)
+    def instrumented_open(client):
+        session = real_open(client)
+        real_rename = session.posix_rename
 
-    api._sftp.posix_rename = recording_rename
+        def recording_rename(oldpath, newpath):
+            with session.open(oldpath, "rb") as f:
+                uploaded.append(f.read())
+            return real_rename(oldpath, newpath)
+
+        session.posix_rename = recording_rename
+        return session
+
+    monkeypatch.setattr(watching, "open_browsing_sftp", instrumented_open)
     api._watch_interval = 0.1  # slower than local_watch so we can change it mid-gate
 
     f = local_dir / "grow.txt"
@@ -347,6 +409,91 @@ def test_watch_waits_for_a_file_to_stop_changing_before_uploading(sftp_env, wait
 
     assert uploaded == [b"v2-final-bytes"]  # v1 was never sent; sent once, final only
     assert (server_root / "grow.txt").read_bytes() == b"v2-final-bytes"
+
+
+def test_watch_session_open_failure_logs_and_retries(sftp_env, wait_until, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    real_open = watching.open_browsing_sftp
+    calls = {"n": 0}
+
+    def flaky_open(client):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("temporary open failure")
+        return real_open(client)
+
+    monkeypatch.setattr(watching, "open_browsing_sftp", flaky_open)
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    (local_dir / "retry-open.txt").write_bytes(b"payload")
+    console = []
+
+    def uploaded_after_failure():
+        console.extend(api.poll_queue()["console"])
+        return (server_root / "retry-open.txt").exists() and any(
+            line["level"] == "error" and line["msg"].startswith(
+                "Watch error: could not open an upload session - ")
+            for line in console)
+
+    wait_until(uploaded_after_failure)
+    api.stop_watch()
+    assert calls["n"] >= 2
+
+
+def test_watch_does_not_reopen_while_a_stuck_open_is_pending(
+        sftp_env, wait_until, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    real_open = watching.open_browsing_sftp
+    opener_done = threading.Event()
+    calls = {"n": 0}
+
+    def stuck_open(client):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            error = TimeoutError("open stuck")
+            error.opener_done = opener_done
+            raise error
+        return real_open(client)
+
+    monkeypatch.setattr(watching, "open_browsing_sftp", stuck_open)
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    (local_dir / "pending-open.txt").write_bytes(b"payload")
+    wait_until(lambda: calls["n"] == 1)
+    time.sleep(0.3)
+    assert calls["n"] == 1
+    opener_done.set()
+    wait_until(lambda: calls["n"] >= 2 and (server_root / "pending-open.txt").exists())
+    api.stop_watch()
+
+
+def test_watch_stops_when_the_connection_is_replaced(sftp_env):
+    api, server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    thread = api._watch_thread
+    api._conn_generation += 1
+    (local_dir / "after-reconnect.txt").write_bytes(b"not uploaded")
+
+    thread.join(5)
+    assert not thread.is_alive()
+    time.sleep(0.2)
+    assert not (server_root / "after-reconnect.txt").exists()
+    status = api.poll_queue()
+    assert status["watching"] is False
+    assert any(line["msg"].startswith("Watch stopped: the connection it started on has ended.")
+               and line["level"] == "warn" for line in status["console"])
+
+
+def test_a_stopped_watch_does_not_report_its_connection_ended(sftp_env):
+    """A watch the user stops ends quietly, even if the connection then changes."""
+    api, _server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    api.stop_watch()
+    api._conn_generation += 1
+    assert not any(line["msg"].startswith("Watch stopped:")
+                   for line in api.poll_queue()["console"])
 
 
 def test_watch_uploads_a_large_batch_of_changed_files(sftp_env, wait_until):
