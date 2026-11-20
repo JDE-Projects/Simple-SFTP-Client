@@ -8,7 +8,7 @@ license. This file is a notice, not legal advice.
 Table of contents
 -----------------
 Qt 6.12.0, Qt WebEngine 6.140.0, PySide6 6.12.0, and shiboken6 6.12.0: LGPL-3.0
-CPython 3.14.7 and bundled native libraries: PSF-2.0 and stated licenses
+CPython 3.14.10 and bundled native libraries: PSF-2.0 and stated licenses
 PyInstaller 6.22.3 bootloader: GPL-2.0-or-later with bootloader exception;
   run-time hooks and modules: Apache-2.0
 Microsoft runtime DLLs and WebView2 SDK 1.0.3856.49: Microsoft terms
@@ -40,7 +40,7 @@ https://download.qt.io/official_releases/qtwebengine/6.140/6.140.0/src/qtwebengi
 A copy is also available on written request through this repository's GitHub
 Issues page: https://github.com/JDE-Projects/Simple-SFTP-Client/issues
 ============================================================
-CPython 3.14.7 - LICENSE.txt
+CPython 3.14.10 - LICENSE.txt
 ============================================================
 A. HISTORY OF THE SOFTWARE
 ==========================
@@ -719,7 +719,7 @@ permission to use and distribute the software in accordance with the
 terms specified in this license.
 
 ============================================================
-OpenSSL 3.5.7
+OpenSSL 3.5.9
 ============================================================
 
                                  Apache License
@@ -900,7 +900,7 @@ OpenSSL 3.5.7
    END OF TERMS AND CONDITIONS
 
 ============================================================
-expat 2.8.2
+expat 2.9.0
 ============================================================
 Copyright (c) 1998-2000 Thai Open Source Software Center Ltd and Clark Cooper
 Copyright (c) 2001-2025 Expat maintainers
@@ -1659,7 +1659,7 @@ Apache License 2.0
 ============================================================
 Microsoft runtime DLLs and WebView2 SDK 1.0.3856.49
 ============================================================
-The Additional Conditions for this Windows binary build in the CPython 3.14.7 LICENSE.txt above apply to every Microsoft runtime DLL shipped with this app, including runtime DLLs shipped with Qt.
+The Additional Conditions for this Windows binary build in the CPython 3.14.10 LICENSE.txt above apply to every Microsoft runtime DLL shipped with this app, including runtime DLLs shipped with Qt.
 
 Shipped VC++ runtime DLLs:
 _internal/PySide6/msvcp140.dll
@@ -4480,7 +4480,7 @@ The package's SBOMs identify the Rust components linked into cryptography. Their
 - unicode-ident 1.0.24: (MIT OR Apache-2.0) AND Unicode-3.0
 - vcpkg 0.2.15: MIT OR Apache-2.0
 
-OpenSSL 4.0.3 is statically linked into cryptography\hazmat\bindings\_rust.pyd. It is a separate copy from the OpenSSL 3.5.7 DLLs that ship with CPython (see the CPython section). OpenSSL 3.0 and later is licensed under the Apache License 2.0; the full text is in the cryptography section above.
+OpenSSL 4.0.3 is statically linked into cryptography\hazmat\bindings\_rust.pyd. It is a separate copy from the OpenSSL 3.5.9 DLLs that ship with CPython (see the CPython section). OpenSSL 3.0 and later is licensed under the Apache License 2.0; the full text is in the cryptography section above.
 
 ============================================================
 Fonts - Sora and JetBrains Mono, OFL-1.1
