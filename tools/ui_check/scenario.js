@@ -155,6 +155,10 @@ try{
   $("qMeta").textContent="";
   await startTransfer("download");
   const dlDone=await batchDone(); ok("download batch finished",()=>dlDone,()=>$("qMeta").textContent);
+  $("qViewBtn").click();
+  await waitFor(()=>$("qList").textContent.includes("dl1.txt"),3000); await sleep(300);
+  ok("opening the queue after a batch keeps only the Done line in the footer",()=>$("qSummary").textContent==="",()=>$("qMeta").textContent+" | "+$("qSummary").textContent);
+  qModalOpen=false; $("queueModal").classList.remove("show");
   await waitFor(()=>names("local").includes("0dl.txt"),5000);
   ok("local pane shows downloaded files without Refresh",()=>names("local").includes("0dl.txt")&&names("local").includes("dl1.txt"),()=>names("local"));
   ok("local selection still b.txt and c.txt after refresh",()=>JSON.stringify(selNames("local"))==='["b.txt","c.txt"]',()=>selNames("local"));

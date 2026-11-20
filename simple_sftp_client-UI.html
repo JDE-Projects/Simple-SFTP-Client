@@ -751,7 +751,11 @@ async function init(){
   $("sessions").onchange=onPickSession;
   $("upBtn").onclick=()=>startTransfer("upload"); $("downBtn").onclick=()=>startTransfer("download");
   $("qViewBtn").onclick=()=>{ qModalOpen=true; $("queueModal").classList.add("show");
-    API.poll_queue().then(p=>{ lastProgressById=p.progress||{}; renderQueueRows(p.items); renderQueueSummary(p.counts);
+    API.poll_queue().then(p=>{ lastProgressById=p.progress||{}; renderQueueRows(p.items);
+      // Once a batch has finished, queueTick's Done line replaces the live
+      // summary; redrawing it here would put both in the footer.
+      const busy=!!p.scanning||!!p.comparing||p.pending>0;
+      if(busy||qWasBusy)renderQueueSummary(p.counts);
       showDebugWarnings(p.debug_warnings,p.debug_enabled);
       const rfBtn=$("qRetryFailedBtn"); if(rfBtn)rfBtn.disabled=!((p.retryable_failed||0)>0); }); };
   $("qCloseBtn").onclick=()=>{ qModalOpen=false; $("queueModal").classList.remove("show"); };

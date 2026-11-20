@@ -48,6 +48,7 @@ export default async function nameClash(helpers) {
   check("console tells the user how to get the skipped file",
     await evaluate("$('console').textContent.includes('download it on its own into a different local folder')"));
   await waitFor("queuePending === 0", 20000).catch(() => {});
+  await waitFor("$('qMeta').textContent.startsWith('Done:')", 10000).catch(() => {});
   await screenshot("console-after-clash");
 
   await click("#qViewBtn");
@@ -57,6 +58,9 @@ export default async function nameClash(helpers) {
     await evaluate("$('qList').textContent"));
   check("clash row has no retry control", await evaluate("!$('qList').querySelector('.qretry')"));
   check("Retry all failed is disabled", await evaluate("$('qRetryFailedBtn').disabled === true"));
+  check("footer shows the Done line without repeating the queue summary",
+    await evaluate("$('qMeta').textContent.startsWith('Done:') && $('qSummary').textContent === ''"),
+    await evaluate("$('qMeta').textContent + ' | ' + $('qSummary').textContent"));
   await screenshot("queue-clash-row");
   await click("#qCloseBtn");
 
