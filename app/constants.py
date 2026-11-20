@@ -28,6 +28,9 @@ COMPARE_SYNC_ENTRY_LIMIT = 500_000
 # so skipped scratch or unsafe names cannot make a directory read unbounded.
 BROWSE_ENTRY_LIMIT = 50_000
 BROWSE_EXAMINE_LIMIT = 100_000
+# Whole-packet reply and fresh-session deadlines for the shared file pane.
+BROWSE_REPLY_TIMEOUT = 30
+BROWSE_REOPEN_TIMEOUT = 15
 
 
 # Weak / deprecated / CVE-prone algorithms we refuse (secure-or-fail).

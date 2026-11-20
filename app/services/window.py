@@ -186,6 +186,7 @@ def shutdown(api):
     api._connected = False
     api._client = None
     api._sftp = None
+    api._conn_generation += 1
     api._cred_pass = ""
     api._cred_identity = None
     api._pending_host_key = None

@@ -1,13 +1,14 @@
 """Service functions for the watching area."""
 
 import os
-import time
-import threading
 import posixpath
+import threading
+import time
 from app.debug import log_event
 from app.errors import friendly_error
 from app.paths import local_link_kind
 from app.scratch_journal import is_active_local
+from app.services.browse_session import reset_browsing_session
 
 
 def snapshot(api, local_dir, excluded):
@@ -154,11 +155,14 @@ def start_watch(api, local_dir, remote_dir):
                     # and health-ping bridge calls (see _browsing).
                     finished = False
                     with api._sftp_lock:
-                        if stop.is_set():
-                            seen_changed.pop(fp, None)
-                            break
-                        api._ensure_remote_dir(rdir)
-                        finished = api._put_file(api._sftp, fp, rp, _cb, stop.is_set)
+                        try:
+                            if stop.is_set():
+                                seen_changed.pop(fp, None)
+                                break
+                            api._ensure_remote_dir(rdir)
+                            finished = api._put_file(api._sftp, fp, rp, _cb, stop.is_set)
+                        finally:
+                            reset_browsing_session(api, "watch upload")
                     if finished:
                         api._worker_log(f"Watch: uploaded {rel}", "ok", "watch upload", outcome="ok")
                         refreshed_folders.add(posixpath.dirname(rp))
