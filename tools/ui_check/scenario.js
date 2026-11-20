@@ -301,6 +301,68 @@ try{
   ok("watch tag hides after stop",()=>!watching&&$("watchTag").textContent==="");
   const restart=onWatch(); await clickOk(); await restart;
 
+  // Large listings stay virtualized without changing the small-list table contract.
+  // The headless window leaves the panes almost no height, so give the local
+  // pane a fixed visible area for these checks and put it back afterward.
+  $("bodyLocal").style.flex="0 0 400px";
+  const large=await fs("make_empty_files",{side:"local",folder:"large-local",count:20000,prefix:"entry"});
+  await loadLocal(large.local);
+  ok("large local folder renders a bounded row window",()=>state.local.entries.length===20000&&$("tbodyLocal").querySelectorAll("tr").length<=300,()=>$("tbodyLocal").querySelectorAll("tr").length);
+  $("bodyLocal").scrollTop=$("bodyLocal").scrollHeight; await sleep(100);
+  ok("large local folder bottom draws the last view entry",()=>$("tbodyLocal").textContent.includes("entry-19999.txt"),()=>$("tbodyLocal").textContent.slice(-200));
+  // A row still in range must be the same element after a scroll redraw:
+  // replacing the row under the pointer stops the wheel after a direction change.
+  const drawnIdx=()=>[...$("tbodyLocal").querySelectorAll("tr[data-idx]")].map(r=>+r.dataset.idx);
+  $("bodyLocal").scrollTop=5000*state.local.rowHeight; await sleep(100);
+  const mid=$("tbodyLocal").querySelector(`tr[data-idx="${state.local.view[5005]}"]`);
+  $("bodyLocal").scrollTop-=10*state.local.rowHeight; await sleep(100);
+  ok("scrolling keeps rows still in range as the same elements",()=>mid&&mid.isConnected&&$("tbodyLocal").querySelector(`tr[data-idx="${state.local.view[5005]}"]`)===mid);
+  const drawn=drawnIdx(), firstPos=state.local.view.indexOf(drawn[0]);
+  ok("drawn rows stay in view order after edge-only updates",()=>drawn.length>0&&drawn.every((idx,i)=>idx===state.local.view[firstPos+i]),()=>drawn.slice(0,5));
+  $("bodyLocal").scrollTop=0; await sleep(100);
+  const clickIndex=async(pos,shift=false)=>{const idx=state.local.view[pos]; scrollViewPosition("local",pos); await sleep(80); const row=$("tbodyLocal").querySelector(`tr[data-idx="${idx}"]`); row&&row.dispatchEvent(new MouseEvent("click",{bubbles:true,shiftKey:shift}));};
+  await clickIndex(9); await clickIndex(14999,true);
+  const selectedLarge=selNames("local");
+  ok("shift-click selects a range across undrawn rows",()=>selectedLarge.length===14991&&selectedLarge.includes("entry-00009.txt")&&selectedLarge.includes("entry-14999.txt"),()=>selectedLarge.length);
+  await sleep(900); for(const key of "entry-19999"){typeToJump("local",{key,ctrlKey:false,altKey:false,metaKey:false,preventDefault(){}});} await sleep(80);
+  ok("type-to-jump draws and selects a late entry",()=>selNames("local")[0]==="entry-19999.txt"&&$("tbodyLocal").textContent.includes("entry-19999.txt"),()=>selNames("local"));
+  const kept=selNames("local"); state.local.sort="size"; state.local.dir=1; renderPane("local"); state.local.sort="name"; state.local.dir=1; renderPane("local");
+  ok("sorting keeps selected names",()=>JSON.stringify(selNames("local"))===JSON.stringify(kept),()=>selNames("local"));
+  const small=await fs("make_empty_files",{side:"local",folder:"small-local",count:4,prefix:"small"}); await loadLocal(small.local);
+  ok("small folder has one table row per view entry",()=>$("tbodyLocal").querySelectorAll("tr").length===state.local.view.length&&[...$("tbodyLocal").querySelectorAll("tr")].every((r,i)=>r.dataset.idx===String(state.local.view[i])),()=>$("tbodyLocal").innerHTML);
+  $("bodyLocal").style.flex="";
+
+  try{
+    await fs("set_browse_limit",{limit:5});
+    const remoteLarge=await fs("make_empty_files",{side:"server",folder:"remote-truncated",count:8,prefix:"remote"});
+    await loadRemote(remoteLarge.remote);
+    ok("truncated remote listing shows its server notice",()=>state.remote.entries.length===5&&$("noticeRemote").classList.contains("show")&&$("noticeRemote").textContent.includes("Showing the first 5 items")&&$("noticeRemote").textContent.includes("server"),()=>$("noticeRemote").textContent);
+    refresh("remote"); await waitFor(()=>!state.remote.refreshing,5000);
+    ok("Refresh keeps the truncated remote notice",()=>$("noticeRemote").classList.contains("show"));
+    await loadRemote("/other"); ok("navigating to a small remote folder hides its notice",()=>!$("noticeRemote").classList.contains("show"));
+
+    await fs("write",{path:remoteLarge.local+"\\hidden-upload.txt",data:"remote"});
+    await fs("write",{path:small.local+"\\hidden-upload.txt",data:"local"}); await loadLocal(small.local); await loadRemote(remoteLarge.remote);
+    select("local",["hidden-upload.txt"]); const uploadPrompt=startTransfer("upload");
+    const uploadSeen=await waitFor(()=>$('diffModal').classList.contains('show')&&$("dfBody").textContent.includes("hidden-upload.txt"),3000);
+    $("dfCancel").click(); await uploadPrompt;
+    ok("truncated remote destination checks hidden overwrite names",()=>uploadSeen,()=>$('dfBody').textContent);
+
+    const localLarge=await fs("make_empty_files",{side:"local",folder:"local-truncated",count:8,prefix:"local"});
+    await fs("write",{path:localLarge.local+"\\hidden-download.txt",data:"local"});
+    await fs("write",{path:remoteLarge.local.replace(/[\\/]remote-truncated$/,"")+"\\other\\hidden-download.txt",data:"remote"});
+    await loadLocal(localLarge.local); await loadRemote("/other"); select("remote",["hidden-download.txt"]);
+    const downloadPrompt=startTransfer("download"); const downloadSeen=await waitFor(()=>$('diffModal').classList.contains('show')&&$("dfBody").textContent.includes("hidden-download.txt"),3000);
+    $("dfCancel").click(); await downloadPrompt;
+    ok("truncated local destination checks hidden overwrite names",()=>downloadSeen,()=>$('dfBody').textContent);
+
+    await loadRemote("/other"); const beforeUp=(await fs("calls")).list_remote||0; await nav("remote","up"); await waitFor(()=>state.remote.cwd==="/",5000); const afterUp=(await fs("calls")).list_remote||0;
+    ok("Up uses the stored parent with one remote listing",()=>afterUp-beforeUp===1,()=>afterUp-beforeUp);
+    await fs("make_empty_files",{side:"server",folder:"late-a",count:8,prefix:"a"}); await fs("make_empty_files",{side:"server",folder:"late-b",count:1,prefix:"b"});
+    await fs("delay",{method:"list_remote",ms:1500}); loadRemote("/late-a"); await sleep(100); await loadRemote("/late-b"); await sleep(1700);
+    ok("late remote reply leaves the newer folder and notice state",()=>state.remote.cwd==="/late-b"&&!state.remote.truncated&&!$("noticeRemote").classList.contains("show"),()=>JSON.stringify({cwd:state.remote.cwd,truncated:state.remote.truncated}));
+  } finally { await fs("set_browse_limit",{limit:null}); }
+
   // Disconnect while watching.
   await onConn(); await sleep(1500);
   ok("Watch button reset after disconnect",()=>!watching&&$("watchBtn").textContent==="Watch",()=>$("watchBtn").textContent);

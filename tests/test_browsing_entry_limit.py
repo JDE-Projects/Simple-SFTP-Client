@@ -1,5 +1,6 @@
 """Bounds for local and remote browser directory listings."""
 
+import os
 import stat
 
 import pytest
@@ -155,3 +156,36 @@ def test_remote_error_mid_listing_still_closes(sftp_env, monkeypatch):
 
     assert result["ok"] is False
     assert browsing.CMD_CLOSE in requests
+
+
+def test_existing_names_local(sftp_env):
+    api, _server_root, local_dir = sftp_env
+    (local_dir / "present.txt").write_text("x", encoding="utf-8")
+
+    result = api.existing_names("local", str(local_dir),
+                                ["present.txt", "absent.txt", "..", "a/b", "CON"])
+
+    assert result == {"ok": True, "existing": ["present.txt"]}
+    case_only = api.existing_names("local", str(local_dir), ["PRESENT.TXT"])
+    assert case_only["existing"] == (["PRESENT.TXT"] if os.name == "nt" else [])
+
+
+def test_existing_names_remote(sftp_env):
+    api, server_root, _local_dir = sftp_env
+    (server_root / "present.txt").write_text("x", encoding="utf-8")
+
+    result = api.existing_names("remote", "/", ["present.txt", "absent.txt", "..", "a/b"])
+
+    assert result == {"ok": True, "existing": ["present.txt"]}
+    api._connected = False
+    assert api.existing_names("remote", "/", ["present.txt"])["ok"] is False
+
+
+def test_existing_names_refuses_oversized_list(sftp_env, monkeypatch):
+    api, _server_root, local_dir = sftp_env
+    monkeypatch.setattr(browsing, "BROWSE_ENTRY_LIMIT", 2)
+
+    result = api.existing_names("local", str(local_dir), ["a", "b", "c"])
+
+    assert result["ok"] is False
+    assert result["error"] == "Too many names to check."

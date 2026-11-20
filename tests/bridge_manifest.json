@@ -29,6 +29,7 @@
     "token"
   ],
   "disconnect": [],
+  "existing_names": [],
   "drain_debug_warnings": [],
   "enqueue": [
     "jobs",

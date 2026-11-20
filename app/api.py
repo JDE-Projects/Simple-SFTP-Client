@@ -241,6 +241,10 @@ class Api:
 
     # ───────────── file ops ─────────────
     @_browsing
+    def existing_names(self, side, folder, names):
+        return services.browsing.existing_names(self, side, folder, names)
+
+    @_browsing
     def make_dir(self, side, path, name):
         return services.browsing.make_dir(self, side, path, name)
 

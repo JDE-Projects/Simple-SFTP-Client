@@ -180,6 +180,38 @@ def list_remote(api, path):
         return {"ok": False, "error": friendly_error(e)}
 
 
+def existing_names(api, side, folder, names):
+    """Return the requested safe leaf names that currently exist in a folder."""
+    if len(names) > BROWSE_ENTRY_LIMIT:
+        return {"ok": False, "error": "Too many names to check."}
+    if side == "remote" and not api._connected:
+        return {"ok": False, "error": "Not connected."}
+    existing = []
+    try:
+        for name in names:
+            if side == "local":
+                try:
+                    path = safe_local_child(folder, name, folder)
+                except ValueError:
+                    continue
+                if os.path.lexists(path):
+                    existing.append(name)
+            else:
+                if remote_leaf_problem(name):
+                    continue
+                try:
+                    api._sftp.lstat(posixpath.join(folder, name))
+                except IOError as e:
+                    if getattr(e, "errno", None) == 2:
+                        continue
+                    raise
+                else:
+                    existing.append(name)
+        return {"ok": True, "existing": existing}
+    except Exception as e:
+        return {"ok": False, "error": friendly_error(e)}
+
+
 def make_dir(api, side, path, name):
     try:
         if side == "local":

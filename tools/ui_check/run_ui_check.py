@@ -38,6 +38,7 @@ import paramiko  # noqa: E402
 from app.api import Api  # noqa: E402
 from app.debug import debug  # noqa: E402
 from app.services import scanning as scanning_service  # noqa: E402
+from app.services import browsing as browsing_service  # noqa: E402
 from simple_sftp_client import APP_VERSION  # noqa: E402
 from tools import sftp_server_core  # noqa: E402
 from tools.sftp_server_core import PASSWORD, USER  # noqa: E402
@@ -138,6 +139,7 @@ def main(argv):
     server_root, targets = make_fixture(work)
     unreadable_folder = os.path.join(targets["incomplete"], "top", "denied")
     real_os_scandir = scanning_service.os.scandir
+    original_browse_limit = browsing_service.BROWSE_ENTRY_LIMIT
     base_fs = sftp_server_core.make_fs(server_root)
 
     class RefusingFS(base_fs):
@@ -222,6 +224,18 @@ def main(argv):
                     return self._send({"ok": True})
                 if op == "calls":
                     return self._send(dict(calls))
+                if op == "make_empty_files":
+                    root = targets["local"] if body["side"] == "local" else server_root
+                    folder = os.path.join(root, body["folder"])
+                    os.makedirs(folder, exist_ok=True)
+                    for index in range(body["count"]):
+                        open(os.path.join(folder, f"{body.get('prefix', 'entry')}-{index:05d}.txt"), "w").close()
+                    return self._send({"ok": True, "local": folder,
+                                       "remote": "/" + body["folder"].replace("\\", "/")})
+                if op == "set_browse_limit":
+                    browsing_service.BROWSE_ENTRY_LIMIT = (original_browse_limit if body.get("limit") is None
+                                                          else body["limit"])
+                    return self._send({"ok": True})
                 if op == "make_size_fixture":
                     # Made on request, after the compare checks, which read
                     # the whole server folder and would trip on the refused
