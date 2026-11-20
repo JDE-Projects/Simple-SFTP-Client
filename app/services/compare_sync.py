@@ -666,7 +666,7 @@ def _run_compare(api, cid, local_dir, remote_dir, stop_event, direction=None, ch
                     f"{', '.join(excluded[:200])}", "warn", "link skipped")
             if omissions["count"]:
                 api._worker_log(
-                    f"{omissions['count']} remote entries not compared "
+                    f"{omissions['count']} entries not compared "
                     f"(skipped folders include everything inside them): "
                     f"{', '.join(item['name'] for item in omissions['entries'])}",
                     "warn")
@@ -687,7 +687,7 @@ def _run_compare(api, cid, local_dir, remote_dir, stop_event, direction=None, ch
                     f"{', '.join(excluded[:200])}", "warn", "link skipped")
             if data["not_compared_count"]:
                 api._worker_log(
-                    f"{data['not_compared_count']} remote entries not compared "
+                    f"{data['not_compared_count']} entries not compared "
                     f"(skipped folders include everything inside them): "
                     f"{', '.join(item['name'] for item in data['not_compared'])}",
                     "warn")
@@ -792,7 +792,7 @@ def _stream_sync_transfers(api, transfers, direction, on_conflict, scan_id, stop
                     break
         flush()
         suffix = f", {clash_count} name clash(es) not downloaded" if clash_count else ""
-        omission_suffix = (f", {not_compared_count} remote entries not compared"
+        omission_suffix = (f", {not_compared_count} entries not compared"
                            if not_compared_count else "")
         if stop_event.is_set():
             api._worker_log(f"Sync stopped ({found} item(s) queued before stopping{suffix}{omission_suffix})", "warn", "sync", outcome="stopped", items=found)

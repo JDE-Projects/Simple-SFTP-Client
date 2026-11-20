@@ -1,5 +1,5 @@
 """Compare and sync report unsafe remote names and hold back Windows-name
-clash groups so omitted remote entries cannot cause unsafe one-sided transfers."""
+clash groups so omitted entries cannot cause unsafe one-sided transfers."""
 
 import os
 import stat
@@ -261,7 +261,7 @@ def test_stream_sync_final_line_reports_not_compared(tmp_path, monkeypatch):
                            not_compared_count=3)
     with api._console_lock:
         empty_line = api._console_buffer[-1]
-    assert "3 remote entries not compared" in empty_line["msg"]
+    assert "3 entries not compared" in empty_line["msg"]
     assert empty_line["level"] == "warn" and logged[-1]["outcome"] == "incomplete"
 
     monkeypatch.setattr(api, "_enqueue_files", lambda batch, *_args, **_kwargs: (len(batch), 0))
@@ -270,7 +270,7 @@ def test_stream_sync_final_line_reports_not_compared(tmp_path, monkeypatch):
                            "overwrite", scan_id, stop, 2, not_compared_count=3)
     with api._console_lock:
         queued_line = api._console_buffer[-1]
-    assert "3 remote entries not compared" in queued_line["msg"]
+    assert "3 entries not compared" in queued_line["msg"]
     assert queued_line["level"] == "warn" and logged[-1]["outcome"] == "incomplete"
 
 

@@ -511,8 +511,8 @@ async function openScanProblems(reportId){
 }
 function omissionCount(result){ return Number(result.not_compared_count)||0; }
 function omissionItems(result){ return (result.not_compared||[]).map(item=>`${item.name||""}${item.is_dir?"/":""}${item.reason==="unsafe name"?" (name Windows cannot use)":" (same name on Windows as another entry)"}`); }
-function omissionSummary(count){ return `${count} remote entries were not compared. Skipped folders include everything inside them.`; }
-function openOmissions(result){ scanProblemsRequest++; const count=omissionCount(result), items=omissionItems(result); showScanProblems("Remote entries not compared",omissionSummary(count),items,Math.max(0,count-items.length)); }
+function omissionSummary(count){ return `${count} entries were not compared. Skipped folders include everything inside them.`; }
+function openOmissions(result){ scanProblemsRequest++; const count=omissionCount(result), items=omissionItems(result); showScanProblems("Entries not compared",omissionSummary(count),items,Math.max(0,count-items.length)); }
 async function copyScanProblems(){
   try{
     if(!navigator.clipboard||!navigator.clipboard.writeText)throw new Error("Clipboard is unavailable.");
@@ -1201,7 +1201,7 @@ function applyCompareResult(result){
   if(compareMap.notComparedCount>0)remote.push(`<span id="remoteOmissions" style="color:var(--amber);cursor:pointer">${compareMap.notComparedCount} not compared</span>`);
   if(links.length)local.push(`<span style="color:var(--amber)">${links.length} link(s) left out</span>`);
   const localText=`${c.newer_local} newer here, ${c.local_only} local-only${c.conflict?`, ${c.conflict} name clash${c.conflict===1?"":"es"}`:""}${links.length?`, ${links.length} link(s) left out: ${links.join(", ")}`:""}`;
-  const remoteText=`${c.newer_remote} newer remote, ${c.remote_only} remote-only${c.conflict?`, ${c.conflict} name clash${c.conflict===1?"":"es"}`:""}${compareMap.notComparedCount?`, ${compareMap.notComparedCount} remote entries not compared (skipped folders include everything inside them)`:""}`;
+  const remoteText=`${c.newer_remote} newer remote, ${c.remote_only} remote-only${c.conflict?`, ${c.conflict} name clash${c.conflict===1?"":"es"}`:""}${compareMap.notComparedCount?`, ${compareMap.notComparedCount} entries not compared (skipped folders include everything inside them)`:""}`;
   $("localCompare").innerHTML=local.join(", "); $("localCompare").title=localText;
   $("remoteCompare").innerHTML=remote.join(", "); $("remoteCompare").title=remoteText;
   const omissions=$("remoteOmissions");
@@ -1404,18 +1404,18 @@ function confirmSyncPlan(result,noTransfer=false){
   }
   const omissions=omissionCount(result);
   if(noTransfer){
-    text=`Nothing to transfer, but ${omissions} remote entries were not compared. Skipped folders include everything inside them.`;
+    text=`Nothing to transfer, but ${omissions} entries were not compared. Skipped folders include everything inside them.`;
     if(links.length){ const names=links.map(n=>esc(n)).join(", "); const more=result.excluded_more>0?` and ${result.excluded_more} more`:""; text+=`<br><br><span style="color:var(--amber)">${links.length+(result.excluded_more||0)} local link(s) left out, not synced in either direction: ${names}${more}</span>`; }
   }
   $("syTitle").textContent="Sync preview";
   $("syText").innerHTML=text;
   $("syTableWrap").style.display=noTransfer?"none":"";
   $("syOmissions").style.display=omissions?"":"none";
-  $("syOmissionsText").textContent=omissions&&!noTransfer?`${omissions} remote entries were not compared and will not be synced in either direction. Skipped folders include everything inside them.`:"";
+  $("syOmissionsText").textContent=omissions&&!noTransfer?`${omissions} entries were not compared and will not be synced in either direction. Skipped folders include everything inside them.`:"";
   $("syOmissionsText").style.display=noTransfer?"none":"";
   $("syShowOmissions").onclick=()=>openOmissions(result);
   $("syAcknowledgeWrap").style.display=omissions&&!noTransfer?"":"none";
-  $("syAcknowledgeText").textContent=`I understand ${omissions} remote entries were not compared`;
+  $("syAcknowledgeText").textContent=`I understand ${omissions} entries were not compared`;
   $("syAcknowledge").checked=false;
   $("syOk").style.display=noTransfer?"none":"";
   $("syOk").textContent=`Transfer (${result.count} item${result.count===1?"":"s"})`;
