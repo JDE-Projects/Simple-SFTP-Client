@@ -76,7 +76,8 @@ def make_fixture(work):
     with open(os.path.join(local, "Report.txt"), "w") as f:
         f.write("local")
     return server_root, {"local": local, "sub": os.path.join(local, "sub"), "other": other_local,
-                         "incomplete": os.path.join(work, "incomplete")}
+                         "incomplete": os.path.join(work, "incomplete"),
+                         "size_folder": "Size incomplete", "refused_size_folder": "/Size incomplete/Private"}
 
 
 def build_page(page_path, targets):
@@ -107,8 +108,15 @@ def main(argv):
     server_root, targets = make_fixture(work)
     unreadable_folder = os.path.join(targets["incomplete"], "top", "denied")
     real_os_scandir = scanning_service.os.scandir
-    fs_cls = sftp_server_core.make_fs(server_root)
-    srv_sock, port = sftp_server_core.start(fs_cls, paramiko.RSAKey.generate(2048))
+    base_fs = sftp_server_core.make_fs(server_root)
+
+    class RefusingFS(base_fs):
+        def list_folder(self, path):
+            if path.rstrip("/") == targets["refused_size_folder"]:
+                return paramiko.sftp.SFTP_PERMISSION_DENIED
+            return super().list_folder(path)
+
+    srv_sock, port = sftp_server_core.start(RefusingFS, paramiko.RSAKey.generate(2048))
 
     api = Api(APP_VERSION)
     debug.on_warning = api._on_debug_warning
@@ -184,6 +192,16 @@ def main(argv):
                     return self._send({"ok": True})
                 if op == "calls":
                     return self._send(dict(calls))
+                if op == "make_size_fixture":
+                    # Made on request, after the compare checks, which read
+                    # the whole server folder and would trip on the refused
+                    # subfolder.
+                    size_folder = os.path.join(server_root, targets["size_folder"])
+                    os.makedirs(os.path.join(size_folder, "Private"))
+                    for rel, data in (("readable.txt", "readable"), ("Private/hidden.txt", "hidden")):
+                        with open(os.path.join(size_folder, rel), "w") as f:
+                            f.write(data)
+                    return self._send({"ok": True})
                 if op == "queue_clash":
                     api._queue.add_clash(
                         "download", r"C:\ui-check\report.txt", "/report.txt",
