@@ -24,6 +24,10 @@ MTIME_TOL = 2
 # each side's map, so a folder too large to hold in memory is refused with a
 # clear message instead of running out of memory partway through.
 COMPARE_SYNC_ENTRY_LIMIT = 500_000
+# Browsing keeps a bounded reply, and stops reading after this many raw names
+# so skipped scratch or unsafe names cannot make a directory read unbounded.
+BROWSE_ENTRY_LIMIT = 50_000
+BROWSE_EXAMINE_LIMIT = 100_000
 
 
 # Weak / deprecated / CVE-prone algorithms we refuse (secure-or-fail).

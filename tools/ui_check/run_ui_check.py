@@ -38,6 +38,7 @@ import paramiko  # noqa: E402
 from app.api import Api  # noqa: E402
 from app.debug import debug  # noqa: E402
 from app.services import scanning as scanning_service  # noqa: E402
+from app.services import browsing as browsing_service  # noqa: E402
 from simple_sftp_client import APP_VERSION  # noqa: E402
 from tools import sftp_server_core  # noqa: E402
 from tools.sftp_server_core import PASSWORD, USER  # noqa: E402
@@ -53,6 +54,36 @@ def long_path(path):
     """Edge's profile nests past the 260-character limit; the \\\\?\\ form
     lets the cleanup reach it."""
     return "\\\\?\\" + os.path.abspath(path) if os.name == "nt" else path
+
+
+def profile_edge_pids(profile):
+    """Ids of every Edge process whose command line names this run's profile
+    folder. Edge hands work to child processes that outlive the one started
+    here, and each child carries the profile path on its command line."""
+    script = ("$p=$env:SFTP_UI_CHECK_PROFILE; Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
+              "Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($p, "
+              "[StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { $_.ProcessId }")
+    out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                         capture_output=True, text=True,
+                         env={**os.environ, "SFTP_UI_CHECK_PROFILE": profile})
+    if out.returncode != 0:
+        raise RuntimeError(f"could not list Edge processes: {out.stderr.strip()}")
+    return [int(x) for x in out.stdout.split() if x.isdigit()]
+
+
+def stop_profile_edge(profile):
+    """Stop every Edge process using this profile folder. Returns the ids
+    still running after the last try (empty when all are gone)."""
+    pids = []
+    for _ in range(10):
+        pids = profile_edge_pids(profile)
+        if not pids:
+            return []
+        for pid in pids:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.5)
+    return profile_edge_pids(profile)
 
 
 def make_fixture(work):
@@ -108,6 +139,7 @@ def main(argv):
     server_root, targets = make_fixture(work)
     unreadable_folder = os.path.join(targets["incomplete"], "top", "denied")
     real_os_scandir = scanning_service.os.scandir
+    original_browse_limit = browsing_service.BROWSE_ENTRY_LIMIT
     base_fs = sftp_server_core.make_fs(server_root)
 
     class RefusingFS(base_fs):
@@ -192,6 +224,27 @@ def main(argv):
                     return self._send({"ok": True})
                 if op == "calls":
                     return self._send(dict(calls))
+                if op == "make_empty_files":
+                    root = os.path.abspath(targets["local"] if body["side"] == "local" else server_root)
+                    folder = os.path.abspath(os.path.join(root, body["folder"]))
+                    prefix = str(body.get("prefix", "entry"))
+                    # The folder must sit inside the side's test root and the
+                    # prefix must be a plain name, so a request cannot write
+                    # anywhere else on the PC.
+                    if not folder.startswith(root + os.sep) or not prefix.isalnum():
+                        return self._send({"ok": False, "error": "outside the check's temp folder"})
+                    os.makedirs(folder, exist_ok=True)
+                    for index in range(body["count"]):
+                        name = os.path.abspath(os.path.join(folder, f"{prefix}-{index:05d}.txt"))
+                        if not name.startswith(folder + os.sep):
+                            return self._send({"ok": False, "error": "outside the check's temp folder"})
+                        open(name, "w").close()
+                    return self._send({"ok": True, "local": folder,
+                                       "remote": "/" + body["folder"].replace("\\", "/")})
+                if op == "set_browse_limit":
+                    browsing_service.BROWSE_ENTRY_LIMIT = (original_browse_limit if body.get("limit") is None
+                                                          else body["limit"])
+                    return self._send({"ok": True})
                 if op == "make_size_fixture":
                     # Made on request, after the compare checks, which read
                     # the whole server folder and would trip on the refused
@@ -245,15 +298,22 @@ def main(argv):
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{httpd.server_address[1]}/"
+    profile = os.path.join(work, "edge")
     edge = subprocess.Popen(
-        [edge_exe, "--headless=new", f"--user-data-dir={os.path.join(work, 'edge')}",
+        [edge_exe, "--headless=new", f"--user-data-dir={profile}",
          "--no-first-run", "--no-default-browser-check", "--disable-extensions", url],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    edge_left = []
+    edge_error = None
     try:
         finished = done.wait(TIMEOUT_S)
     finally:
         subprocess.run(["taskkill", "/PID", str(edge.pid), "/T", "/F"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            edge_left = stop_profile_edge(profile)
+        except Exception as e:
+            edge_error = str(e)
         try:
             api._shutdown()
         except Exception:
@@ -275,6 +335,11 @@ def main(argv):
         if not os.path.exists(work):
             break
         time.sleep(0.5)
+    if edge_error:
+        print("Edge processes NOT checked:", edge_error)
+    if edge_left:
+        print(f"Edge processes NOT stopped (profile {profile}):",
+              ", ".join(str(p) for p in edge_left))
     if os.path.exists(work):
         print("Temp folder NOT removed:", work)
 

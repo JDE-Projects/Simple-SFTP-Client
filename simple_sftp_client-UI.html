@@ -106,7 +106,9 @@
   .icon-btn{padding:5px 8px;font-size:12px;background:var(--panel-2);border:1px solid var(--border-2);color:var(--text-dim);border-radius:7px;}
   .icon-btn:hover:not(:disabled){color:var(--text);border-color:var(--accent);}
   .filter input{width:100%;padding:5px 9px;font-size:11.5px;}
-  .pane-body{flex:1 1 auto;overflow:auto;outline:none;}
+  .browse-notice{display:none;padding:7px 11px;color:var(--amber);background:var(--panel-2);border-bottom:1px solid var(--border);font-size:11px;line-height:1.45;}
+  .browse-notice.show{display:block;}
+  .pane-body{flex:1 1 auto;overflow:auto;outline:none;overscroll-behavior-y:contain;}
   table{border-collapse:collapse;width:100%;font-size:12px;}
   thead th{position:sticky;top:0;z-index:1;text-align:left;font-weight:600;font-size:10.5px;color:var(--text-dim);
     background:var(--bg-2);padding:7px 10px;border-bottom:1px solid var(--border);cursor:pointer;white-space:nowrap;}
@@ -290,6 +292,7 @@
         </div>
         <div class="filter"><input id="filterLocal" type="text" placeholder="Filter this folder..."></div>
       </div>
+      <div class="browse-notice" id="noticeLocal"></div>
       <div class="pane-body" id="bodyLocal" tabindex="0"><table><thead><tr><th data-k="name">Name</th><th data-k="size">Size</th><th data-k="mtime">Modified</th></tr></thead><tbody id="tbodyLocal"></tbody></table></div>
     </div>
 
@@ -315,6 +318,7 @@
         </div>
         <div class="filter"><input id="filterRemote" type="text" placeholder="Filter this folder..." disabled></div>
       </div>
+      <div class="browse-notice" id="noticeRemote"></div>
       <div class="pane-body" id="bodyRemote" tabindex="0"><table><thead><tr><th data-k="name">Name</th><th data-k="size">Size</th><th data-k="mtime">Modified</th></tr></thead><tbody id="tbodyRemote"></tbody></table></div>
     </div>
   </div>
@@ -403,8 +407,9 @@ function queueActive(){ return queuePending>0; }
 function updateCancelBtn(){ $("cancelBtn").disabled=!(queuePending>0); }
 function updatePauseBtn(){ const b=$("pauseBtn"); b.disabled=!(queuePending>0); b.textContent=queuePaused?"Resume":"Pause"; }
 let authMode="password", rememberPw=false;
-const state={ local:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],anchor:null,navSeq:0,refreshing:false,refreshAgain:false,refreshManualAgain:false},
-              remote:{cwd:"",entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],anchor:null,navSeq:0,refreshing:false,refreshAgain:false,refreshManualAgain:false} };
+const SMALL_VIEW_ROWS=500, VIRTUAL_MARGIN_ROWS=50;
+const paneState=()=>({cwd:"",parent:null,truncated:false,entries:[],sel:new Set(),hist:[],hi:-1,filter:"",sort:"name",dir:1,view:[],viewKey:null,anchor:null,navSeq:0,refreshing:false,refreshAgain:false,refreshManualAgain:false,rowHeight:0,renderFrame:0});
+const state={local:paneState(),remote:paneState()};
 // {rootLocal, rootRemote, files:{rel:status}, folders:{rel:"has_changes"}} or
 // null. rel keys are posix paths relative to the folder Compare was run
 // against, so coloring stays anchored to that folder as the user browses
@@ -784,6 +789,8 @@ async function init(){
     $("filter"+cap(side)).addEventListener("input",e=>{state[side].filter=e.target.value.toLowerCase();renderPane(side);});
     document.querySelectorAll(`#pane${cap(side)} .icon-btn`).forEach(b=>b.onclick=()=>nav(side,b.dataset.act));
     document.querySelectorAll(`#pane${cap(side)} thead th`).forEach(th=>th.onclick=()=>{const k=th.dataset.k;const s=state[side];if(s.sort===k)s.dir=-s.dir;else{s.sort=k;s.dir=1;}renderPane(side);});
+    $("body"+cap(side)).addEventListener("scroll",()=>{ const s=state[side]; if(s.view.length<=SMALL_VIEW_ROWS||s.renderFrame)return; s.renderFrame=requestAnimationFrame(()=>{s.renderFrame=0;scrollRender(side);}); });
+    new ResizeObserver(()=>{const s=state[side];if(s.view.length>SMALL_VIEW_ROWS)scrollRender(side);}).observe($("body"+cap(side)));
     setupDrop(side);
     $("crumbs"+cap(side)).onclick=()=>startEditPath(side);
     const inp=$("edit"+cap(side));
@@ -847,7 +854,7 @@ async function onConn(){
     ["upBtn","downBtn","compareBtn","syncUpBtn","syncDownBtn","watchBtn","filterRemote"].forEach(i=>$(i).disabled=true);
     watching=false; $("watchBtn").classList.remove("btn-primary"); $("watchBtn").classList.add("btn-ghost"); $("watchBtn").textContent="Watch";
     clearCompare(); updateWatchTag();
-    state.remote.entries=[]; renderPane("remote"); $("crumbsRemote").textContent="(not connected)"; $("latency").textContent=""; return; }
+    state.remote.entries=[]; state.remote.parent=null; state.remote.truncated=false; renderPane("remote"); $("crumbsRemote").textContent="(not connected)"; $("latency").textContent=""; return; }
   setConn("busy","Connecting..."); $("connBtn").disabled=true;
   clog("Connecting to "+($("user").value.trim())+"@"+($("host").value.trim())+"...");
   await doConnect();
@@ -916,10 +923,11 @@ function pollHealth(){ clearTimeout(pollTimer); if(!connected)return;
     else { $("connDot").className="dot live"; $("latency").textContent=r.ms+" ms"; } pollTimer=setTimeout(pollHealth,5000); }); }
 
 /* ───── listing/nav ───── */
+function setListing(s,r){ s.cwd=r.cwd; s.parent=r.parent; s.truncated=!!r.truncated; s.entries=r.entries; s.viewKey=null; }
 async function loadLocal(path){ const s=state.local, nav=++s.navSeq, r=await API.list_local(path); if(nav!==s.navSeq)return false; if(!r.ok){toast(r.error,true);return false;}
-  pushHist("local",r.cwd); s.cwd=r.cwd; s.entries=r.entries; s.sel=new Set(); s.anchor=null; if(!insideComparedRoot("local",r.cwd))clearCompare(); renderPane("local"); setCrumbs("local",r.cwd); return true; }
+  pushHist("local",r.cwd); setListing(s,r); s.sel=new Set(); s.anchor=null; $("bodyLocal").scrollTop=0; if(!insideComparedRoot("local",r.cwd))clearCompare(); renderPane("local"); setCrumbs("local",r.cwd); return true; }
 async function loadRemote(path){ if(!connected)return false; const s=state.remote, nav=++s.navSeq, r=await API.list_remote(path); if(nav!==s.navSeq||!connected)return false; if(!r.ok){toast(r.error,true);return false;}
-  pushHist("remote",r.cwd); s.cwd=r.cwd; s.entries=r.entries; s.sel=new Set(); s.anchor=null; if(!insideComparedRoot("remote",r.cwd))clearCompare(); renderPane("remote"); setCrumbs("remote",r.cwd); return true; }
+  pushHist("remote",r.cwd); setListing(s,r); s.sel=new Set(); s.anchor=null; $("bodyRemote").scrollTop=0; if(!insideComparedRoot("remote",r.cwd))clearCompare(); renderPane("remote"); setCrumbs("remote",r.cwd); return true; }
 function refresh(side,automatic=false){
   const s=state[side];
   if(side==="remote"&&!connected)return;
@@ -941,7 +949,7 @@ async function refreshPane(side,automatic){
       if(automatic)clog(msg,"warn"); else toast(msg,true);
       return;
     }
-    s.entries=r.entries;
+    setListing(s,r);
     s.sel=new Set(r.entries.map((e,i)=>selectedNames.has(e.name)?i:null).filter(i=>i!==null));
     s.anchor=anchorName==null?null:r.entries.findIndex(e=>e.name===anchorName);
     if(s.anchor===-1)s.anchor=null;
@@ -961,10 +969,10 @@ function startEditPath(side){ if(side==="remote"&&!connected)return;
 function endEditPath(side){ $("edit"+cap(side)).style.display="none"; $("crumbs"+cap(side)).style.display=""; }
 async function nav(side,act){ const s=state[side];
   if(act==="refresh"){refresh(side);return;}
-  if(act==="up"){ const nav=++s.navSeq, cwd=s.cwd, r=await (side==="local"?API.list_local(cwd):API.list_remote(cwd)); if(nav!==s.navSeq)return; const parent=r.parent; if(parent!=null) (side==="local"?loadLocal:loadRemote)(parent); return; }
+  if(act==="up"){ if(s.parent!=null)(side==="local"?loadLocal:loadRemote)(s.parent); return; }
   if(act==="back"&&s.hi>0){ s.hi--; gotoHist(side); } if(act==="fwd"&&s.hi<s.hist.length-1){ s.hi++; gotoHist(side); } }
 function gotoHist(side){ const s=state[side], cwd=s.hist[s.hi], nav=++s.navSeq;
-  (side==="local"?API.list_local(cwd):API.list_remote(cwd)).then(r=>{ if(nav!==s.navSeq||(side==="remote"&&!connected))return; if(r.ok){ s.cwd=r.cwd; s.entries=r.entries; s.sel=new Set(); s.anchor=null; if(!insideComparedRoot(side,r.cwd))clearCompare(); renderPane(side); setCrumbs(side,r.cwd);} }); }
+  (side==="local"?API.list_local(cwd):API.list_remote(cwd)).then(r=>{ if(nav!==s.navSeq||(side==="remote"&&!connected))return; if(r.ok){ setListing(s,r); s.sel=new Set(); s.anchor=null; $("body"+cap(side)).scrollTop=0; if(!insideComparedRoot(side,r.cwd))clearCompare(); renderPane(side); setCrumbs(side,r.cwd);} }); }
 
 // The rel key a pane entry would have in compareMap.files/folders: only
 // defined when this pane's cwd is inside the matching compare root, so a
@@ -1007,34 +1015,68 @@ function updateWatchTag(){
   tag.textContent="Watching → "+state.remote.cwd;
   tag.title=`Watching local: ${state.local.cwd}\nRemote: ${state.remote.cwd}`;
 }
-function renderPane(side){
-  const s=state[side]; const tb=$("tbody"+cap(side)); tb.innerHTML="";
-  let entries=s.entries.slice();
-  if(s.filter) entries=entries.filter(e=>e.name.toLowerCase().includes(s.filter));
-  entries.sort((a,b)=>{ if(a.is_dir!==b.is_dir)return a.is_dir?-1:1; let x=a[s.sort],y=b[s.sort];
+function ensureView(s){ const key=[s.entries,s.entries.length,s.filter,s.sort,s.dir];
+  if(s.viewKey&&s.viewKey.every((v,i)=>v===key[i]))return;
+  s.view=s.entries.map((entry,index)=>({entry,index}));
+  if(s.filter)s.view=s.view.filter(x=>x.entry.name.toLowerCase().includes(s.filter));
+  s.view.sort((a,b)=>{ if(a.entry.is_dir!==b.entry.is_dir)return a.entry.is_dir?-1:1; let x=a.entry[s.sort],y=b.entry[s.sort];
     if(s.sort==="name"){x=(""+x).toLowerCase();y=(""+y).toLowerCase();} return x<y?-s.dir:x>y?s.dir:0; });
-  s.view=entries.map(e=>s.entries.indexOf(e));
-  const frag=document.createDocumentFragment();
-  entries.forEach((e,pos)=>{ const idx=s.view[pos]; const tr=document.createElement("tr");
-    if(s.sel.has(idx))tr.className="sel";
-    if(compareMap){
-      const rel=compareRel(side,e);
-      if(rel!=null){
-        if(!e.is_dir&&compareMap.files&&compareMap.files[rel]) tr.classList.add("c-"+compareMap.files[rel]);
-        else if(e.is_dir&&compareMap.folders&&compareMap.folders[rel]) tr.classList.add("c-"+compareMap.folders[rel]);
-      }
-    }
-    tr.draggable=!e.is_dir||true;
-    tr.innerHTML=`<td class="name"><span class="ic ${e.is_dir?'':'file'}">${e.is_dir?'\u25B8':'\u00B7'}</span>${esc(e.name)}</td>`+
-      `<td class="size">${e.is_dir?'':hsize(e.size)}</td><td class="mod">${fmod(e.mtime)}</td>`;
-    tr.onclick=(ev)=>{ if(ev.shiftKey&&s.anchor!=null){ selectRange(side,s.anchor,idx); }
-      else if(ev.ctrlKey||ev.metaKey){ s.sel.has(idx)?s.sel.delete(idx):s.sel.add(idx); s.anchor=idx; }
-      else { s.sel=new Set([idx]); s.anchor=idx; } renderPane(side); updateXfer(); };
-    tr.ondblclick=async()=>{ if(e.is_dir){ (side==="local"?loadLocal:loadRemote)(joinp(side,s.cwd,e.name)); } else if(side==="remote"){ startTransfer("download",[idx]); } else { await openLocal(e.name); } };
-    tr.oncontextmenu=(ev)=>{ ev.preventDefault(); if(!s.sel.has(idx)){s.sel=new Set([idx]);s.anchor=idx;renderPane(side);updateXfer();} showCtx(ev,side,e); };
-    tr.ondragstart=(ev)=>{ if(!s.sel.has(idx)){s.sel=new Set([idx]);s.anchor=idx;renderPane(side);updateXfer();} ev.dataTransfer.setData("text/side",side); };
-    frag.appendChild(tr); });
-  tb.appendChild(frag);
+  s.view=s.view.map(x=>x.index); s.viewKey=key;
+}
+function updateNotice(side){ const s=state[side], notice=$("notice"+cap(side));
+  notice.classList.toggle("show",s.truncated);
+  if(s.truncated)notice.textContent=`This folder is too large to list in full. Showing the first ${s.entries.length.toLocaleString()} items in the order the ${side==="local"?"computer":"server"} returned them. Sort, filter and Select all cover only these, and Refresh may show a different set. Copying or comparing this folder from its parent still includes everything.`;
+}
+function makeRow(side,idx){ const s=state[side], e=s.entries[idx], tr=document.createElement("tr"); tr.dataset.idx=idx;
+  if(s.sel.has(idx))tr.className="sel";
+  if(compareMap){ const rel=compareRel(side,e); if(rel!=null){ if(!e.is_dir&&compareMap.files&&compareMap.files[rel])tr.classList.add("c-"+compareMap.files[rel]); else if(e.is_dir&&compareMap.folders&&compareMap.folders[rel])tr.classList.add("c-"+compareMap.folders[rel]); } }
+  tr.draggable=true;
+  tr.innerHTML=`<td class="name"><span class="ic ${e.is_dir?'':'file'}">${e.is_dir?'\u25B8':'\u00B7'}</span>${esc(e.name)}</td>`+`<td class="size">${e.is_dir?'':hsize(e.size)}</td><td class="mod">${fmod(e.mtime)}</td>`;
+  tr.onclick=ev=>{ if(ev.shiftKey&&s.anchor!=null)selectRange(side,s.anchor,idx); else if(ev.ctrlKey||ev.metaKey){s.sel.has(idx)?s.sel.delete(idx):s.sel.add(idx);s.anchor=idx;}else{s.sel=new Set([idx]);s.anchor=idx;} updateSelectionClasses(side); updateXfer(); };
+  tr.ondblclick=async()=>{ if(e.is_dir)(side==="local"?loadLocal:loadRemote)(joinp(side,s.cwd,e.name)); else if(side==="remote")startTransfer("download",[idx]); else await openLocal(e.name); };
+  tr.oncontextmenu=ev=>{ev.preventDefault();if(!s.sel.has(idx)){s.sel=new Set([idx]);s.anchor=idx;updateSelectionClasses(side);updateXfer();}showCtx(ev,side,e);};
+  tr.ondragstart=ev=>{if(!s.sel.has(idx)){s.sel=new Set([idx]);s.anchor=idx;updateSelectionClasses(side);updateXfer();}ev.dataTransfer.setData("text/side",side);};
+  return tr;
+}
+function updateSelectionClasses(side){ const s=state[side]; $("tbody"+cap(side)).querySelectorAll("tr[data-idx]").forEach(row=>row.classList.toggle("sel",s.sel.has(+row.dataset.idx))); }
+// The rows a large view draws: the visible range plus a margin each side.
+function drawRange(s,body){ const rh=s.rowHeight||30, top=body.scrollTop, h=body.clientHeight;
+  return [Math.max(0,Math.floor(top/rh)-VIRTUAL_MARGIN_ROWS), Math.min(s.view.length,Math.ceil((top+h)/rh)+VIRTUAL_MARGIN_ROWS)]; }
+function makeSpacer(){ const tr=document.createElement("tr"), td=document.createElement("td"); td.colSpan=3; tr.className="vspacer"; tr.appendChild(td); return tr; }
+function sizeSpacer(tr,height){ tr.style.display=height>0?"":"none"; tr.firstChild.style.cssText=`height:${Math.max(0,height)}px;padding:0;border:0`; }
+function renderPane(side){ const s=state[side], body=$("body"+cap(side)), tb=$("tbody"+cap(side)); ensureView(s); updateNotice(side);
+  // Read the scroll position before the rows are replaced: emptying the
+  // table first would shrink it and snap the scroll back to the top.
+  const virtual=s.view.length>SMALL_VIEW_ROWS, rowHeight=s.rowHeight||30;
+  const [start,end]=virtual?drawRange(s,body):[0,s.view.length];
+  const frag=document.createDocumentFragment(); let top=null, bottom=null;
+  if(virtual){ top=makeSpacer(); sizeSpacer(top,start*rowHeight); frag.appendChild(top); }
+  for(let pos=start;pos<end;pos++)frag.appendChild(makeRow(side,s.view[pos]));
+  if(virtual){ bottom=makeSpacer(); sizeSpacer(bottom,(s.view.length-end)*rowHeight); frag.appendChild(bottom); }
+  tb.replaceChildren(frag);
+  s.drawn=virtual?{view:s.view,rowHeight,start,end,top,bottom}:null;
+  // Row pitch is the average over every drawn row: a single row's height
+  // varies by a fraction of a pixel with its position, and small changes
+  // are ignored so the pane does not keep redrawing.
+  const rows=tb.querySelectorAll("tr[data-idx]");
+  if(rows.length){ const h=(rows[rows.length-1].getBoundingClientRect().bottom-rows[0].getBoundingClientRect().top)/rows.length;
+    if(h>0&&Math.abs(h-s.rowHeight)>0.5){ s.rowHeight=h; if(virtual)requestAnimationFrame(()=>renderPane(side)); } }
+}
+// Scrolling a large view adds and removes rows only at the edges of the drawn
+// range. Rows still in range, including the one under the pointer, are kept:
+// replacing that row makes the next wheel turn after a change of direction
+// do nothing until the mouse moves.
+function scrollRender(side){ const s=state[side], body=$("body"+cap(side)); ensureView(s); const d=s.drawn;
+  if(!d||d.view!==s.view||d.rowHeight!==(s.rowHeight||30)||!d.top.isConnected){ renderPane(side); return; }
+  const [start,end]=drawRange(s,body);
+  if(start===d.start&&end===d.end)return;
+  if(start>=d.end||end<=d.start){ renderPane(side); return; }
+  for(let pos=d.start;pos<start;pos++)d.top.nextElementSibling.remove();
+  for(let pos=end;pos<d.end;pos++)d.bottom.previousElementSibling.remove();
+  const above=document.createDocumentFragment(); for(let pos=start;pos<d.start;pos++)above.appendChild(makeRow(side,s.view[pos])); d.top.after(above);
+  const below=document.createDocumentFragment(); for(let pos=Math.max(d.end,start);pos<end;pos++)below.appendChild(makeRow(side,s.view[pos])); d.bottom.before(below);
+  sizeSpacer(d.top,start*d.rowHeight); sizeSpacer(d.bottom,(s.view.length-end)*d.rowHeight);
+  d.start=start; d.end=end;
 }
 function selectRange(side,anchor,idx){ const s=state[side]; const a=s.view.indexOf(anchor); const b=s.view.indexOf(idx);
   if(a===-1||b===-1){ s.sel=new Set([idx]); return; }
@@ -1055,8 +1097,7 @@ function typeToJump(side,e){
     if(en&&en.name.toLowerCase().startsWith(jumpBuf[side])){ pos=p; break; } }
   if(pos===-1)return;
   e.preventDefault();
-  const idx=s.view[pos]; s.sel=new Set([idx]); s.anchor=idx; renderPane(side); updateXfer();
-  const row=$("tbody"+cap(side)).children[pos]; if(row)scrollRowIntoView(side,row);
+  const idx=s.view[pos]; s.sel=new Set([idx]); s.anchor=idx; scrollViewPosition(side,pos); renderPane(side); updateXfer();
 }
 // keep the row visible below the sticky header (scrollIntoView hides it under the header)
 function scrollRowIntoView(side,row){
@@ -1066,6 +1107,8 @@ function scrollRowIntoView(side,row){
   if(rr.top<br.top+headH) body.scrollTop-=(br.top+headH-rr.top);
   else if(rr.bottom>br.bottom) body.scrollTop+=(rr.bottom-br.bottom);
 }
+function scrollViewPosition(side,pos){ const s=state[side], body=$("body"+cap(side)), rowHeight=s.rowHeight||30, head=body.querySelector("thead"); const headH=head?head.getBoundingClientRect().height:0;
+  const top=pos*rowHeight, bottom=top+rowHeight; if(top<body.scrollTop+headH)body.scrollTop=Math.max(0,top-headH); else if(bottom>body.scrollTop+body.clientHeight)body.scrollTop=bottom-body.clientHeight; }
 function esc(s){return (s+"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
 function joinp(side,cwd,name){ if(side==="local"){ if(cwd==="DRIVES")return name; return cwd.replace(/[\\/]+$/,"")+"\\"+name; } return (cwd==="/"?"":cwd)+"/"+name; }
 function updateXfer(){ $("upBtn").disabled=!(connected&&state.local.sel.size); $("downBtn").disabled=!(connected&&state.remote.sel.size); }
@@ -1091,6 +1134,13 @@ async function startTransfer(direction,forceIdx){
     const destNames=new Set(state[destSide].entries.map(e=>e.name));
     collide=jobs.filter(j=>destNames.has(j.name));
   }
+  const destination=state[destSide];
+  if(destination.truncated){
+    const loaded=new Set(collide.map(j=>j.name));
+    const check=jobs.filter(j=>!loaded.has(j.name)).map(j=>j.name);
+    if(check.length){ const found=await API.existing_names(destSide,destination.cwd,check); if(!found||!found.ok){toast((found&&found.error)||"Could not check destination names",true);return;}
+      const present=new Set(found.existing||[]); jobs.forEach(j=>{if(present.has(j.name)&&!loaded.has(j.name)){collide.push(j);loaded.add(j.name);if(direction==="download")matches[j.name]=j.name;}}); }
+  }
   let policy="overwrite";
   if(collide.length){ const srcSide=direction==="upload"?"local":"remote"; const choice=await confirmDiff(collide,srcSide,destSide,matches);
     if(choice===null)return; policy=choice; }
@@ -1105,6 +1155,9 @@ async function externalUpload(paths){
   const base=p=>p.replace(/[\\/]+$/,"").split(/[\\/]/).pop();
   const names=paths.map(base); const destNames=new Set(state.remote.entries.map(e=>e.name));
   const collide=names.filter(n=>destNames.has(n));
+  if(state.remote.truncated){ const loaded=new Set(collide), check=names.filter(n=>!loaded.has(n));
+    if(check.length){const found=await API.existing_names("remote",state.remote.cwd,check);if(!found||!found.ok){toast((found&&found.error)||"Could not check destination names",true);return;} (found.existing||[]).forEach(n=>{if(!loaded.has(n)){collide.push(n);loaded.add(n);}});}
+  }
   let policy="overwrite";
   if(collide.length){ const choice=await confirm3("Overwrite existing files?", collide.length+" item(s) here already exist at the destination. Skip existing sends only files that are new or changed (by size and time), anywhere inside this selection; Overwrite re-sends every file.","Overwrite","Skip existing");
     if(choice===null)return;

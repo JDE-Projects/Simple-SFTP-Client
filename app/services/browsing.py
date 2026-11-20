@@ -1,5 +1,6 @@
 """Service functions for the browsing area."""
 
+import contextlib
 import os
 import posixpath
 import shutil
@@ -7,6 +8,9 @@ import stat
 import time
 import paramiko
 import webview
+from paramiko.sftp import CMD_CLOSE, CMD_HANDLE, CMD_NAME, CMD_OPENDIR, CMD_READDIR
+from paramiko.sftp_attr import SFTPAttributes
+from app.constants import BROWSE_ENTRY_LIMIT, BROWSE_EXAMINE_LIMIT
 from app.errors import friendly_error
 from app.formatting import human_size
 from app.paths import remote_leaf_problem, safe_local_child
@@ -50,29 +54,85 @@ def ping(api):
         return {"ok": False}
 
 
+def _iter_remote_dir(api, path):
+    """Yield remote attributes with one request in flight and always close it."""
+    sftp = api._sftp
+    handle = None
+    try:
+        # Paramiko 5.0.0's listdir_iter prefetches 50 READDIR requests. A
+        # bounded browser must stop early, so use its private synchronous
+        # listdir_attr protocol loop instead and close the handle immediately.
+        adjusted_path = sftp._adjust_cwd(path)
+        response_type, message = sftp._request(CMD_OPENDIR, adjusted_path)
+        if response_type != CMD_HANDLE:
+            raise paramiko.SFTPError("Expected handle")
+        handle = message.get_binary()
+        while True:
+            try:
+                response_type, message = sftp._request(CMD_READDIR, handle)
+            except EOFError:
+                return
+            if response_type != CMD_NAME:
+                raise paramiko.SFTPError("Expected name response")
+            for _ in range(message.get_int()):
+                filename = message.get_text()
+                longname = message.get_text()
+                if filename not in (".", ".."):
+                    yield SFTPAttributes._from_msg(message, filename, longname)
+                else:
+                    SFTPAttributes._from_msg(message, filename, longname)
+    finally:
+        if handle is not None:
+            try:
+                sftp._request(CMD_CLOSE, handle)
+            except Exception as close_error:
+                # Logged, not raised: the entries already read are valid, and
+                # raising here would hide an error that ended the read.
+                api._vlog(f"could not close remote directory {path}: {close_error}", "warn",
+                          event="remote list close failed")
+
+
 def list_local(api, path):
     if path in ("", "DRIVES") and os.name == "nt":
         import string
         drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
         return {"ok": True, "cwd": "DRIVES", "parent": None,
-                "entries": [{"name": d, "is_dir": True, "size": 0, "mtime": 0} for d in drives]}
+                "entries": [{"name": d, "is_dir": True, "size": 0, "mtime": 0} for d in drives],
+                "truncated": False, "limit": BROWSE_ENTRY_LIMIT}
     path = path or os.path.expanduser("~")
     try:
         entries = []
-        for name in os.listdir(path):
-            full = os.path.join(path, name)
-            if is_active_local(full):
-                continue
-            try:
-                st = os.stat(full)
-                entries.append({"name": name, "is_dir": os.path.isdir(full),
+        truncated = False
+        examined = 0
+        with os.scandir(path) as scan:
+            for item in scan:
+                examined += 1
+                full = item.path
+                if is_active_local(full):
+                    if examined >= BROWSE_EXAMINE_LIMIT:
+                        truncated = True
+                        break
+                    continue
+                try:
+                    st = os.stat(full)
+                except Exception:
+                    if examined >= BROWSE_EXAMINE_LIMIT:
+                        truncated = True
+                        break
+                    continue
+                if len(entries) >= BROWSE_ENTRY_LIMIT:
+                    truncated = True
+                    break
+                entries.append({"name": item.name, "is_dir": os.path.isdir(full),
                                 "size": st.st_size, "mtime": int(st.st_mtime)})
-            except Exception:
-                continue
+                if examined >= BROWSE_EXAMINE_LIMIT:
+                    truncated = True
+                    break
         parent = os.path.dirname(path.rstrip("\\/")) or ("DRIVES" if os.name == "nt" else "/")
         if os.name == "nt" and len(path.rstrip("\\/")) <= 2:
             parent = "DRIVES"
-        return {"ok": True, "cwd": path, "parent": parent, "entries": entries}
+        return {"ok": True, "cwd": path, "parent": parent, "entries": entries,
+                "truncated": truncated, "limit": BROWSE_ENTRY_LIMIT}
     except Exception as e:
         return {"ok": False, "error": friendly_error(e)}
 
@@ -83,22 +143,71 @@ def list_remote(api, path):
     try:
         path = api._sftp.normalize(path or ".")
         entries = []
-        dropped = []
-        for a in api._sftp.listdir_attr(path):
-            if remote_leaf_problem(a.filename):
-                dropped.append(a.filename)
-                continue
-            if api._is_active_remote_scratch(posixpath.join(path, a.filename)):
-                continue
-            entries.append({"name": a.filename, "is_dir": stat.S_ISDIR(a.st_mode),
-                            "size": a.st_size, "mtime": int(a.st_mtime or 0)})
-        if dropped:
-            examples = ", ".join(repr(name) for name in dropped[:3])
-            api._vlog(f"skipped {len(dropped)} unsafe remote name(s): {examples}", "warn",
-                      event="unsafe remote list", items=len(dropped))
+        dropped_count = 0
+        dropped_examples = []
+        examined = 0
+        truncated = False
+        with contextlib.closing(_iter_remote_dir(api, path)) as remote_entries:
+            for a in remote_entries:
+                examined += 1
+                if remote_leaf_problem(a.filename):
+                    dropped_count += 1
+                    if len(dropped_examples) < 3:
+                        dropped_examples.append(a.filename)
+                elif api._is_active_remote_scratch(posixpath.join(path, a.filename)):
+                    pass
+                elif len(entries) >= BROWSE_ENTRY_LIMIT:
+                    truncated = True
+                    break
+                else:
+                    entries.append({"name": a.filename, "is_dir": stat.S_ISDIR(a.st_mode),
+                                    "size": a.st_size, "mtime": int(a.st_mtime or 0)})
+                if examined >= BROWSE_EXAMINE_LIMIT:
+                    truncated = True
+                    break
+        if dropped_count:
+            examples = ", ".join(repr(name) for name in dropped_examples)
+            api._vlog(f"skipped {dropped_count} unsafe remote name(s): {examples}", "warn",
+                      event="unsafe remote list", items=dropped_count)
+        if truncated:
+            api._vlog(f"remote list truncated for {path}: {len(entries)} item(s) loaded", "warn",
+                      event="remote list truncated", items=len(entries))
         parent = posixpath.dirname(path.rstrip("/")) or "/"
         api._vlog(f"ls {path} → {len(entries)} item(s)", event="remote list", items=len(entries))
-        return {"ok": True, "cwd": path, "parent": parent, "entries": entries}
+        return {"ok": True, "cwd": path, "parent": parent, "entries": entries,
+                "truncated": truncated, "limit": BROWSE_ENTRY_LIMIT}
+    except Exception as e:
+        return {"ok": False, "error": friendly_error(e)}
+
+
+def existing_names(api, side, folder, names):
+    """Return the requested safe leaf names that currently exist in a folder."""
+    if len(names) > BROWSE_ENTRY_LIMIT:
+        return {"ok": False, "error": "Too many names to check."}
+    if side == "remote" and not api._connected:
+        return {"ok": False, "error": "Not connected."}
+    existing = []
+    try:
+        for name in names:
+            if side == "local":
+                try:
+                    path = safe_local_child(folder, name, folder)
+                except ValueError:
+                    continue
+                if os.path.lexists(path):
+                    existing.append(name)
+            else:
+                if remote_leaf_problem(name):
+                    continue
+                try:
+                    api._sftp.lstat(posixpath.join(folder, name))
+                except IOError as e:
+                    if getattr(e, "errno", None) == 2:
+                        continue
+                    raise
+                else:
+                    existing.append(name)
+        return {"ok": True, "existing": existing}
     except Exception as e:
         return {"ok": False, "error": friendly_error(e)}
 
