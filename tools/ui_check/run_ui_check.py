@@ -225,11 +225,20 @@ def main(argv):
                 if op == "calls":
                     return self._send(dict(calls))
                 if op == "make_empty_files":
-                    root = targets["local"] if body["side"] == "local" else server_root
-                    folder = os.path.join(root, body["folder"])
+                    root = os.path.abspath(targets["local"] if body["side"] == "local" else server_root)
+                    folder = os.path.abspath(os.path.join(root, body["folder"]))
+                    prefix = str(body.get("prefix", "entry"))
+                    # The folder must sit inside the side's test root and the
+                    # prefix must be a plain name, so a request cannot write
+                    # anywhere else on the PC.
+                    if not folder.startswith(root + os.sep) or not prefix.isalnum():
+                        return self._send({"ok": False, "error": "outside the check's temp folder"})
                     os.makedirs(folder, exist_ok=True)
                     for index in range(body["count"]):
-                        open(os.path.join(folder, f"{body.get('prefix', 'entry')}-{index:05d}.txt"), "w").close()
+                        name = os.path.abspath(os.path.join(folder, f"{prefix}-{index:05d}.txt"))
+                        if not name.startswith(folder + os.sep):
+                            return self._send({"ok": False, "error": "outside the check's temp folder"})
+                        open(name, "w").close()
                     return self._send({"ok": True, "local": folder,
                                        "remote": "/" + body["folder"].replace("\\", "/")})
                 if op == "set_browse_limit":
