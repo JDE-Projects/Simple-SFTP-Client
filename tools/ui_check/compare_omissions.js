@@ -1,5 +1,5 @@
 // ui_drive scenario "compare-omissions". It verifies Compare and Sync expose
-// remote names that were intentionally not compared.
+// names that were intentionally not compared.
 
 async function rowSelector(side, name, { evaluate }) {
   const tbody = side === "local" ? "tbodyLocal" : "tbodyRemote";
@@ -36,7 +36,7 @@ export default async function compareOmissions(helpers) {
   check("Compare shows three not compared", await ok(waitFor("$('remoteCompare').textContent.includes('3 not compared')", 20000)),
     await evaluate("$('remoteCompare').textContent"));
   await evaluate("$('remoteOmissions').click()");
-  check("omission popup has three entries and Copy list", await ok(waitFor(`${popupOpen} && $('scanProblemsTitle').textContent === 'Remote entries not compared' && $('scanProblemsList').children.length === 3 && !$('scanProblemsCopy').disabled`, 5000)),
+  check("omission popup has three entries and Copy list", await ok(waitFor(`${popupOpen} && $('scanProblemsTitle').textContent === 'Entries not compared' && $('scanProblemsList').children.length === 3 && !$('scanProblemsCopy').disabled`, 5000)),
     await evaluate("$('scanProblemsSummary').textContent + ' | ' + $('scanProblemsList').textContent"));
   await screenshot("compare-omissions-list");
   const startLight = await evaluate("document.body.classList.contains('light')");
