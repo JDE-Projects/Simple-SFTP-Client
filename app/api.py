@@ -1,9 +1,10 @@
 """The bridge object the page calls."""
 
-import threading
 from collections import OrderedDict
 import functools
 import posixpath
+import threading
+import time
 
 
 from app import services
@@ -24,7 +25,40 @@ def _browsing(method):
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
         with self._sftp_lock:
-            return method(self, *args, **kwargs)
+            error = None
+            try:
+                result = method(self, *args, **kwargs)
+            except Exception as caught:
+                result = None
+                error = caught
+            outcome = services.browse_session.reset_browsing_session(self, method.__name__)
+            if outcome is None:
+                if error is not None:
+                    raise error
+                return result
+            if outcome == "stale":
+                message = "The connection changed while the server was not answering. Try again."
+            elif outcome == "lost":
+                message = "The server stopped answering and the connection could not be restored. Reconnect to continue."
+            else:
+                message = "The server stopped answering, so the file pane's connection to it was reset."
+            if method.__name__ == "ping":
+                if outcome == "reset":
+                    try:
+                        started = time.time()
+                        self._sftp.stat(".")
+                        return {"ok": True, "ms": int((time.time() - started) * 1000)}
+                    except Exception:
+                        self._connected = False
+                return {"ok": False}
+            if method.__name__ == "delete":
+                result.setdefault("errors", []).append(message)
+                return result
+            if outcome == "stale":
+                return {"ok": False, "error": message}
+            uncertain = method.__name__ in {"make_dir", "rename", "install_pubkey"}
+            suffix = " It may or may not have finished. Refresh to check." if uncertain else " Try again."
+            return {"ok": False, "error": message + suffix}
     return wrapper
 
 
@@ -35,6 +69,7 @@ class Api:
         self._connected = False
         self._client = None
         self._sftp = None
+        self._conn_generation = 0
         self._cred_pass = ""
         # Set only after a successful PASSWORD login: (host, port, username,
         # "password"), all stripped. save_session may write the remembered

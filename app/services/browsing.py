@@ -4,6 +4,7 @@ import contextlib
 import os
 import posixpath
 import shutil
+import socket
 import stat
 import time
 import paramiko
@@ -50,7 +51,8 @@ def ping(api):
         api._sftp.stat(".")
         return {"ok": True, "ms": int((time.time() - t0) * 1000)}
     except Exception:
-        api._connected = False
+        if not getattr(api._sftp, "timed_out", False):
+            api._connected = False
         return {"ok": False}
 
 
@@ -85,6 +87,8 @@ def _iter_remote_dir(api, path):
         if handle is not None:
             try:
                 sftp._request(CMD_CLOSE, handle)
+            except socket.timeout:
+                raise
             except Exception as close_error:
                 # Logged, not raised: the entries already read are valid, and
                 # raising here would hide an error that ended the read.
@@ -257,7 +261,7 @@ def rename(api, side, path, old, new):
 
 def delete(api, side, path, items):
     errs = []
-    for it in items:
+    for index, it in enumerate(items):
         try:
             if side == "local":
                 full = safe_local_child(path, it["name"], path)
@@ -276,6 +280,13 @@ def delete(api, side, path, items):
             errs.append(f"{it['name']}: {message}")
         except Exception as e:
             errs.append(f"{it['name']}: {e}")
+        if side == "remote" and getattr(api._sftp, "timed_out", False):
+            errs.append(f"{it['name']}: the server stopped answering; it may or may not be deleted. Refresh to check.")
+            remaining = items[index + 1:]
+            if remaining:
+                examples = ", ".join(entry["name"] for entry in remaining[:3])
+                errs.append(f"{len(remaining)} item(s) not attempted: {examples}")
+            break
     return {"ok": True, "errors": errs}
 
 

@@ -3,6 +3,7 @@
 import os
 import socket
 import paramiko
+from app.services.browse_session import open_browsing_sftp
 from app import paths
 from app.constants import DISABLED_ALGORITHMS
 from app.debug import log_event
@@ -118,7 +119,7 @@ def connect(api, p):
     new_sftp = None
     try:
         new_client = api._open(host, port, username, password, key_path, passphrase)
-        new_sftp = new_client.open_sftp()
+        new_sftp = open_browsing_sftp(new_client)
         # Run every remaining fallible setup step on the new, still-
         # unpublished objects. Home normalization can fail (a dropped
         # transport, a server that refuses the request); if it does, the
@@ -136,6 +137,7 @@ def connect(api, p):
         api._client = new_client
         api._sftp = new_sftp
         api._connected = True
+        api._conn_generation += 1
         api._shutdown_done = False
         api._conn_dead_reported = False
         # Cache the password only now that the login has fully succeeded,
