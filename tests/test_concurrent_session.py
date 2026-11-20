@@ -388,7 +388,37 @@ def test_watch_does_not_upload_its_own_scratch_files(sftp_env, wait_until):
     api.stop_watch()
 
     assert not (server_root / scratch.name).exists()
-    assert not (server_root / scratch.name).exists()
+
+
+def test_watch_uploads_a_user_file_named_like_a_scratch_file(sftp_env, wait_until):
+    """Only scratch files a download is still writing are skipped. A user's
+    own file that happens to share the scratch naming shape, with no journal
+    entry, is an ordinary change and is uploaded."""
+    api, server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    (local_dir / ".foo.deadbeef.sxtpart").write_bytes(b"user data")
+
+    wait_until(lambda: (server_root / ".foo.deadbeef.sxtpart").exists())
+    api.stop_watch()
+    assert (server_root / ".foo.deadbeef.sxtpart").read_bytes() == b"user data"
+
+
+def test_watch_uploads_a_file_changed_after_start(sftp_env, wait_until):
+    """A file already present when watching starts is not sent as it is, but
+    an edit made after start is uploaded."""
+    api, server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    existing = local_dir / "existing.txt"
+    existing.write_bytes(b"before")
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    time.sleep(0.3)  # several polls with no change
+    assert not (server_root / "existing.txt").exists()
+
+    existing.write_bytes(b"after the edit")
+    wait_until(lambda: (server_root / "existing.txt").exists())
+    api.stop_watch()
+    assert (server_root / "existing.txt").read_bytes() == b"after the edit"
 
 
 def test_start_watch_refused_while_previous_watch_thread_still_alive(sftp_env):
