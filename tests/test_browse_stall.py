@@ -190,6 +190,60 @@ def test_late_open_after_abandon_is_closed(monkeypatch):
     assert channel.closed is True
 
 
+class HangUntilClosedChannel(OpenChannel):
+    """Mimics paramiko: the subsystem request waits until the channel closes."""
+
+    def invoke_subsystem(self, _name):
+        self.entered.set()
+        self.release.wait()
+        if self.closed:
+            raise EOFError("Channel closed.")
+
+    def close(self):
+        self.closed = True
+        self.release.set()
+
+
+def test_open_timeout_closes_stuck_channel(monkeypatch):
+    monkeypatch.setattr(constants, "BROWSE_REOPEN_TIMEOUT", 0.03)
+    entered, release = threading.Event(), threading.Event()
+    channel = HangUntilClosedChannel(entered, release)
+    monkeypatch.setattr(browse_session, "BrowsingSFTPClient", SimpleSession)
+
+    with pytest.raises(TimeoutError) as raised:
+        open_browsing_sftp(OpenClient(channel))
+
+    # The server never answers: only the give-up path can end the attempt.
+    assert raised.value.opener_done.wait(0.5)
+    assert channel.closed is True
+
+
+class SlowOpenTransport(OpenTransport):
+    def __init__(self, channel, release):
+        super().__init__(channel)
+        self.release = release
+
+    def open_session(self, timeout):
+        self.release.wait()
+        return self.channel
+
+
+def test_channel_opened_after_abandon_is_closed(monkeypatch):
+    monkeypatch.setattr(constants, "BROWSE_REOPEN_TIMEOUT", 0.03)
+    entered, release = threading.Event(), threading.Event()
+    channel = OpenChannel(entered, threading.Event())
+    client = OpenClient(channel)
+    client.transport = SlowOpenTransport(channel, release)
+
+    with pytest.raises(TimeoutError) as raised:
+        open_browsing_sftp(client)
+
+    release.set()
+    assert raised.value.opener_done.wait(0.5)
+    assert channel.closed is True
+    assert not entered.is_set()
+
+
 def test_open_timeout_carries_opener_done(monkeypatch):
     monkeypatch.setattr(constants, "BROWSE_REOPEN_TIMEOUT", 0.03)
     entered, release = threading.Event(), threading.Event()

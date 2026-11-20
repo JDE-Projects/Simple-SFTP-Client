@@ -104,8 +104,15 @@ def close_browsing_sftp(sftp):
 
 def open_browsing_sftp(client):
     """Open one bounded file-pane session without waiting past its deadline."""
-    state = {"lock": threading.Lock(), "abandoned": False, "sftp": None, "error": None}
+    state = {"lock": threading.Lock(), "abandoned": False, "channel": None, "sftp": None,
+             "error": None}
     done = threading.Event()
+
+    def close_channel(channel):
+        try:
+            channel.close()
+        except Exception:
+            pass
 
     def open_session():
         channel = None
@@ -121,6 +128,14 @@ def open_browsing_sftp(client):
                         state["sftp"] = sftp
                 return
             channel = transport.open_session(timeout=constants.BROWSE_REOPEN_TIMEOUT)
+            # Publish the channel so a caller that gives up can close it.
+            # Paramiko's subsystem request waits with no time limit, and only
+            # closing the channel ends that wait and frees the server's slot.
+            with state["lock"]:
+                abandoned = state["abandoned"]
+                state["channel"] = channel
+            if abandoned:
+                raise TimeoutError("File-pane session attempt was abandoned.")
             channel.settimeout(constants.BROWSE_REOPEN_TIMEOUT)
             channel.invoke_subsystem("sftp")
             sftp = BrowsingSFTPClient(channel)
@@ -131,10 +146,7 @@ def open_browsing_sftp(client):
                     state["sftp"] = sftp
         except Exception as error:
             if channel is not None and sftp is None:
-                try:
-                    channel.close()
-                except Exception:
-                    pass
+                close_channel(channel)
             with state["lock"]:
                 state["error"] = error
         finally:
@@ -144,6 +156,11 @@ def open_browsing_sftp(client):
     if not done.wait(constants.BROWSE_REOPEN_TIMEOUT):
         with state["lock"]:
             state["abandoned"] = True
+            channel = state["channel"]
+        if channel is not None:
+            # Closing sends a message to the server, which can itself wait
+            # on a stuck connection, so never block the caller on it.
+            threading.Thread(target=close_channel, args=(channel,), daemon=True).start()
         error = TimeoutError("Could not open a fresh file-pane session in time.")
         error.opener_done = done
         raise error
