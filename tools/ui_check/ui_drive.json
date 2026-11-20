@@ -43,6 +43,11 @@
       "script": "tools/ui_check/window_fit.js",
       "fixture": "tools/ui_check/window_fit_offscreen_fixture.py",
       "timeout_s": 120
+    },
+    "window-fit-minimum": {
+      "script": "tools/ui_check/window_fit.js",
+      "fixture": "tools/ui_check/window_fit_minimum_fixture.py",
+      "timeout_s": 120
     }
   }
 }

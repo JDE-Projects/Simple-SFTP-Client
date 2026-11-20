@@ -3,8 +3,8 @@
 Plants a saved window rectangle before the app launches, then watches the
 app's window (read-only Win32 calls only, nothing is moved or resized) and
 writes where it ended up to window_fit_result.json in UI_DRIVE_OUT_DIR for the
-scenario to check. The case ("oversized" or "offscreen") is chosen by the thin
-wrapper files window_fit_oversized_fixture.py and window_fit_offscreen_fixture.py.
+scenario to check. The case ("oversized", "offscreen", or "minimum") is chosen
+by the thin wrapper files.
 """
 
 import ctypes
@@ -17,7 +17,7 @@ from pathlib import Path
 WINDOW_TITLE = "Simple SFTP Client"
 PREF_FILE = "simple_sftp_client.pref"  # relative to UI_DRIVE_APP_DIR: app/prefs.py _pref_path resolves to exe_dir(), the copy's root
 RESULT_NAME = "window_fit_result.json"
-MIN_SIZE_LOGICAL = (1000, 700)  # min_size passed to create_window in the app
+MIN_SIZE_LOGICAL = (1000, 630)  # min_size passed to create_window in the app
 FIND_TIMEOUT_S = 90
 SETTLE_S = 1.5
 DWMWA_EXTENDED_FRAME_BOUNDS = 9
@@ -52,6 +52,7 @@ def _setup_api() -> None:
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
     user32.GetDpiForWindow.argtypes = [wintypes.HWND]
     user32.GetDpiForWindow.restype = wintypes.UINT
     dwmapi.DwmGetWindowAttribute.argtypes = [
@@ -105,6 +106,9 @@ def _planted_window(case: str, work: dict) -> dict:
         min_h = round(MIN_SIZE_LOGICAL[1] * dpi / 96) + 120
         return {"x": work["right"] - 300, "y": work["bottom"] - 200,
                 "width": max(1150, min_w), "height": max(760, min_h)}
+    if case == "minimum":
+        return {"x": work["left"] + 40, "y": work["top"] + 40,
+                "width": 400, "height": 300}
     raise ValueError(f"unknown case: {case}")
 
 
@@ -135,8 +139,19 @@ def _measure(case: str, work: dict, planted: dict) -> dict:
         return result
     frame = wintypes.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(frame))
+    client = wintypes.RECT()
+    if not user32.GetClientRect(hwnd, ctypes.byref(client)):
+        result["error"] = "GetClientRect failed"
+        return result
     result["visible"] = _rect_dict(visible)
     result["frame"] = _rect_dict(frame)
+    result["client"] = {
+        "width": client.right - client.left,
+        "height": client.bottom - client.top,
+    }
+    result["frame_extra_h"] = (
+        visible.bottom - visible.top - result["client"]["height"]
+    )
     result["work"] = _work_area(user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST))
     dpi = user32.GetDpiForWindow(hwnd) or 96
     result["dpi"] = dpi
@@ -145,7 +160,7 @@ def _measure(case: str, work: dict, planted: dict) -> dict:
     result["min_size"] = {"width": min_w, "height": min_h}
     work_w = result["work"]["right"] - result["work"]["left"]
     work_h = result["work"]["bottom"] - result["work"]["top"]
-    result["work_too_small"] = work_w < min_w or work_h < min_h
+    result["work_too_small"] = work_w < min_w or work_h < min_h + result["frame_extra_h"]
     return result
 
 
