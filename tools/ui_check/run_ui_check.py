@@ -55,6 +55,36 @@ def long_path(path):
     return "\\\\?\\" + os.path.abspath(path) if os.name == "nt" else path
 
 
+def profile_edge_pids(profile):
+    """Ids of every Edge process whose command line names this run's profile
+    folder. Edge hands work to child processes that outlive the one started
+    here, and each child carries the profile path on its command line."""
+    script = ("$p=$env:SFTP_UI_CHECK_PROFILE; Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
+              "Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($p, "
+              "[StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { $_.ProcessId }")
+    out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                         capture_output=True, text=True,
+                         env={**os.environ, "SFTP_UI_CHECK_PROFILE": profile})
+    if out.returncode != 0:
+        raise RuntimeError(f"could not list Edge processes: {out.stderr.strip()}")
+    return [int(x) for x in out.stdout.split() if x.isdigit()]
+
+
+def stop_profile_edge(profile):
+    """Stop every Edge process using this profile folder. Returns the ids
+    still running after the last try (empty when all are gone)."""
+    pids = []
+    for _ in range(10):
+        pids = profile_edge_pids(profile)
+        if not pids:
+            return []
+        for pid in pids:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.5)
+    return profile_edge_pids(profile)
+
+
 def make_fixture(work):
     server_root = os.path.join(work, "server")
     local = os.path.join(work, "local")
@@ -245,15 +275,22 @@ def main(argv):
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{httpd.server_address[1]}/"
+    profile = os.path.join(work, "edge")
     edge = subprocess.Popen(
-        [edge_exe, "--headless=new", f"--user-data-dir={os.path.join(work, 'edge')}",
+        [edge_exe, "--headless=new", f"--user-data-dir={profile}",
          "--no-first-run", "--no-default-browser-check", "--disable-extensions", url],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    edge_left = []
+    edge_error = None
     try:
         finished = done.wait(TIMEOUT_S)
     finally:
         subprocess.run(["taskkill", "/PID", str(edge.pid), "/T", "/F"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            edge_left = stop_profile_edge(profile)
+        except Exception as e:
+            edge_error = str(e)
         try:
             api._shutdown()
         except Exception:
@@ -275,6 +312,11 @@ def main(argv):
         if not os.path.exists(work):
             break
         time.sleep(0.5)
+    if edge_error:
+        print("Edge processes NOT checked:", edge_error)
+    if edge_left:
+        print(f"Edge processes NOT stopped (profile {profile}):",
+              ", ".join(str(p) for p in edge_left))
     if os.path.exists(work):
         print("Temp folder NOT removed:", work)
 
