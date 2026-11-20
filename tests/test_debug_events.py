@@ -8,7 +8,7 @@ from app import paths, prefs
 from app.api import Api
 from app import debug as debug_module
 from app.debug_log import DebugLog
-from app.services import connections, keys, scanning, sessions, updates
+from app.services import connections, keys, scanning, sessions, updates, watching
 from simple_sftp_client import APP_VERSION
 
 
@@ -190,7 +190,14 @@ def test_watch_upload_failure_logs_fixed_event_without_typed_marker(
     def fail(*args, **kwargs):
         raise OSError(13, marker, rf"C:\\{marker}")
 
-    monkeypatch.setattr(api._sftp, "open", fail)
+    real_open_session = watching.open_browsing_sftp
+
+    def failing_session(client):
+        session = real_open_session(client)
+        session.open = fail
+        return session
+
+    monkeypatch.setattr(watching, "open_browsing_sftp", failing_session)
     try:
         assert api.start_watch(str(local_dir), f"/{marker}")["ok"] is True
         (local_dir / f"{marker}.txt").write_bytes(b"payload")

@@ -26,7 +26,7 @@ EVENTS = {
     "host key unknown": {}, "host key changed": {}, "known hosts unreadable": {"error": "error"},
     "host key trusted": {}, "test connection": {}, "disconnected": {},
     "watch start": {}, "watch upload": {"outcome": ("ok", "failed"), "error": "error"},
-    "watch stop delayed": {}, "update check": {"outcome": ("newer", "current", "failed"), "error": "error"},
+    "watch stop delayed": {}, "watch ended": {},"update check": {"outcome": ("newer", "current", "failed"), "error": "error"},
     "open url refused": {}, "transfer": {"outcome": ("ok", "failed", "cancelled", "skipped"), "error": "error"},
     "transfer retry": {"attempt": int, "error": "error"}, "external upload": {"items": int},
     "external drop": {"items": int}, "external drop wired": {}, "external drop failed": {"error": "error"},

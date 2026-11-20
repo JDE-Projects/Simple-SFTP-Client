@@ -606,8 +606,11 @@ function stopQueuePoll(){
 async function queueTick(){
   if(qPolling)return; qPolling=true;
   try{
+    const seq=watchSeq;
     const p=await API.poll_queue();
     (p.console||[]).forEach(line=>clog(line.msg,line.level,line.scan_report));
+    // The watcher ended on its own (its connection went away): show it off.
+    if(watching&&!p.watching&&seq===watchSeq)showWatchOff();
     showDebugWarnings(p.debug_warnings,p.debug_enabled);
     const busy=!!p.scanning||!!p.comparing||p.pending>0;
     // A watcher-only tick: nothing in the queue moved, so leave the footer
@@ -1229,10 +1232,15 @@ async function onSync(direction){ if(!connected)return;
   if(!rr.ok){API.discard_sync(result.token);toast(rr.error||"Could not queue the transfer",true);return;}
   startQueuePoll(); }
 let watching=false;
+// Bumped on every watch start, so a poll already in flight before the start
+// cannot report the new watch as ended.
+let watchSeq=0;
+function showWatchOff(){ watching=false; $("watchBtn").classList.remove("btn-primary"); $("watchBtn").classList.add("btn-ghost"); $("watchBtn").textContent="Watch"; updateWatchTag(); }
 async function onWatch(){ if(!connected)return;
-  if(watching){ await API.stop_watch(); watching=false; $("watchBtn").classList.remove("btn-primary"); $("watchBtn").classList.add("btn-ghost"); $("watchBtn").textContent="Watch"; updateWatchTag(); return; }
+  if(watching){ await API.stop_watch(); showWatchOff(); return; }
   if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
   if(!await confirm2("Watch local folder","Auto-upload changes from this local folder to the current remote folder while on?"))return;
+  watchSeq++;
   const r=await API.start_watch(state.local.cwd,state.remote.cwd); if(!r.ok){toast(r.error,true);return;}
   watching=true; $("watchBtn").classList.add("btn-primary"); $("watchBtn").classList.remove("btn-ghost"); $("watchBtn").textContent="Watching"; updateWatchTag();
   // Carry watcher messages on the poll without treating the start as a batch.
