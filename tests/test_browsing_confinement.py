@@ -113,9 +113,9 @@ def test_remote_backslash_and_colon_names_reach_the_server(sftp_env, monkeypatch
 def test_list_remote_drops_unsafe_server_names(sftp_env, monkeypatch):
     api, _server_root, _local_dir = sftp_env
     lines = []
-    monkeypatch.setattr(api._sftp, "listdir_attr", lambda path: [
+    monkeypatch.setattr("app.services.browsing._iter_remote_dir", lambda api, path: (entry for entry in [
         _attr("good.txt"), _attr(".."), _attr("../x"), _attr("a/b"),
-    ])
+    ]))
     monkeypatch.setattr(api, "_vlog", lambda msg, level="info", **kwargs: lines.append((msg, level, kwargs)))
 
     result = api.list_remote("/")
