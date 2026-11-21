@@ -50,9 +50,10 @@ def cancel(api):
 
 
 def poll_queue(api):
-    """Pulled by the window on a timer (~200ms) while a queue is active.
+    """Pulled by the window on a timer (~200ms) while work or a watch is active.
     This is the only channel from worker threads and the watcher to the UI:
-    it never calls evaluate_js, so it cannot deadlock the window."""
+    it never calls evaluate_js, so it cannot deadlock the window. A stopping
+    watch reports watch_retiring until its thread has actually retired."""
     with api._console_lock:
         lines = api._console_buffer
         api._console_buffer = []
@@ -64,6 +65,10 @@ def poll_queue(api):
                     and api._watch_thread.is_alive()
                     and api._watch_stop is not None
                     and not api._watch_stop.is_set())
+        watch_retiring = (api._watch_thread is not None
+                          and api._watch_thread.is_alive()
+                          and api._watch_stop is not None
+                          and api._watch_stop.is_set())
     items, pending = api._queue.snapshot_and_pending()
     active_ids = [it["id"] for it in items if it["state"] == "active"]
     with api._progress_lock:
@@ -102,6 +107,7 @@ def poll_queue(api):
         "console": lines,
         "watch_refresh": watch_refresh,
         "watching": watching,
+        "watch_retiring": watch_retiring,
         "paused": api._queue.is_paused(),
         # A background scan (enqueue/upload_paths) queues files as it
         # finds them, so the UI needs its own signal to show "Scanning…

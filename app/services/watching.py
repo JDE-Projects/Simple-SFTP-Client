@@ -225,6 +225,8 @@ def start_watch(api, local_dir, remote_dir):
         if not stop.is_set() and connection_gone():
             api._worker_log("Watch stopped: the connection it started on has ended. "
                             "Start the watch again once connected.", "warn", "watch ended")
+        elif stop.is_set():
+            api._worker_log("Watch stopped.", "info", "watch ended")
 
     t = threading.Thread(target=loop, daemon=True)
     with api._watch_lock:

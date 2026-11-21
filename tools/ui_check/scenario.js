@@ -301,8 +301,17 @@ try{
   ok("uploaded file shows in remote pane",()=>names("remote").includes("up.txt"),()=>names("remote"));
   ok("poll slowed to once a second while only watching",()=>qPollDelay===1000&&!!qPollTimer);
 
-  await onWatch();
-  ok("watch tag hides after stop",()=>!watching&&$("watchTag").textContent==="");
+  // A stop that outlasts stop_watch's bounded join must keep the poll alive
+  // through thread retirement, so its final console line is not stranded.
+  await fs("stall_watch_upload");
+  await fs("write",{path:T.local+"\\w-stop.txt",data:"stop"});
+  const stalled=await waitFor(async()=>(await fs("watch_upload_started")).ok,10000);
+  const beforeStop=consoleText();
+  const stopping=onWatch(); await sleep(100);
+  ok("Watch button resets immediately while a stop retires",()=>stalled&&!watching&&$("watchBtn").textContent==="Watch"&&$("watchTag").textContent==="",()=>$("watchBtn").textContent+" | "+$("watchTag").textContent);
+  await sleep(3200); await fs("release_watch_upload"); await stopping;
+  const stopped=await waitFor(()=>consoleText().slice(beforeStop.length).includes("Watch stopped."),10000);
+  ok("a delayed watch stop reaches the console",()=>stopped,()=>consoleText().slice(beforeStop.length));
   const restart=onWatch(); await clickOk(); await restart;
 
   // Large listings stay virtualized without changing the small-list table contract.

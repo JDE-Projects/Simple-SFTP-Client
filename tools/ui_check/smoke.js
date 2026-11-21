@@ -11,10 +11,12 @@
 // server folder downloaded onto a symlinked local folder, with the console
 // warning and the file landing in the link's target; a connect to a closed
 // port failing with a plain-language message; a theme round trip with a
-// screenshot of each theme; and a clean disconnect at the end. The debug log
-// is switched on for the whole run, then read back: it must hold the fixed
-// events for what happened and none of the typed values, paths, or file
-// names. Does not cover sessions, key-based auth, sync/compare, or watch: see
+// screenshot of each theme; starting and stopping a watch, with the console's
+// "Watch stopped." line after Stop and after a disconnect while watching; and
+// a clean disconnect at the end. The debug log is switched on for the whole
+// run, then read back: it must hold the fixed events for what happened and
+// none of the typed values, paths, or file names. Does not cover sessions,
+// key-based auth, sync/compare, or watch uploads: see
 // tools/ui_check/run_ui_check.py's scenario.js for those, driven headlessly
 // against a stand-in bridge instead of the real window.
 
@@ -193,10 +195,37 @@ export default async function smoke(helpers) {
   check("theme toggled back to the starting theme", afterSecondToggle === startLight, String(afterSecondToggle));
   await screenshot(afterSecondToggle ? "theme-light" : "theme-dark");
 
-  // f) disconnect cleanly at the end.
+  // e2) Watch through the real bridge: Stop resets the button and the
+  // console then reports the watch has finished.
+  async function startWatch() {
+    await click("#watchBtn");
+    await waitFor("document.getElementById('confirmModal').classList.contains('show')", 5000);
+    await click("#cfOk");
+    return waitFor("watching === true", 10000).then(() => true).catch(() => false);
+  }
+  check("watch starts", await startWatch());
+  const stopStart = await evaluate(`$("console").textContent.length`);
+  await click("#watchBtn");
+  const buttonReset = await waitFor(`watching === false && $("watchBtn").textContent === "Watch"`, 1000)
+    .then(() => true).catch(() => false);
+  check("Stop resets the Watch button at once", buttonReset, await evaluate(`$("watchBtn").textContent`));
+  const stopLine = await waitFor(`$("console").textContent.slice(${stopStart}).includes("Watch stopped.")`, 10000)
+    .then(() => true).catch(() => false);
+  check("console says the watch stopped after Stop", stopLine,
+    await evaluate(`$("console").textContent.slice(${stopStart})`));
+  check("watch starts again before disconnecting", await startWatch());
+
+  // f) disconnect cleanly at the end, with the watch still on.
+  const disconnectStart = await evaluate(`$("console").textContent.length`);
   await click("#connBtn");
   const disconnected = await waitFor("connected === false", 10000).then(() => true).catch(() => false);
   check("disconnects cleanly with no active session left behind", disconnected);
+  await waitFor(`$("console").textContent.slice(${disconnectStart}).includes("Watch stopped.")`, 10000)
+    .catch(() => {});
+  const afterDisconnect = await evaluate(`$("console").textContent.slice(${disconnectStart})`);
+  check("disconnect while watching shows one stop line and no connection-ended warning",
+    afterDisconnect.split("Watch stopped.").length - 1 === 1
+      && !afterDisconnect.includes("the connection it started on has ended"), afterDisconnect);
 
   // g) the debug log holds fixed events only, never typed values or names.
   await click(".dbg-track");

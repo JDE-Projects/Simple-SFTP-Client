@@ -161,6 +161,67 @@ def test_watch_start_stop_restart_joins_each_thread(sftp_env):
     assert not t2.is_alive()
 
 
+def test_watch_stop_logs_once_after_its_thread_retires(sftp_env, wait_until):
+    api, _server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+
+    assert api.stop_watch()["ok"] is True
+    wait_until(lambda: not api._watch_thread)
+    lines = api.poll_queue()["console"]
+
+    assert [line["msg"] for line in lines].count("Watch stopped.") == 1
+    assert not any(line["msg"].startswith("Watch stopped:") for line in lines)
+
+
+def test_delayed_watch_stop_reports_retirement_until_its_final_line(
+        sftp_env, wait_until, monkeypatch):
+    api, _server_root, local_dir = sftp_env
+    api._watch_interval = 0.01
+    upload_started = threading.Event()
+    release_upload = threading.Event()
+    real_put = api._put_file
+
+    def blocked_upload(*args):
+        upload_started.set()
+        release_upload.wait()
+        return real_put(*args)
+
+    monkeypatch.setattr(api, "_put_file", blocked_upload)
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    (local_dir / "blocked.txt").write_bytes(b"blocked")
+    assert upload_started.wait(5)
+
+    assert api.stop_watch()["ok"] is True
+    retiring = api.poll_queue()
+    assert retiring["watching"] is False
+    assert retiring["watch_retiring"] is True
+    assert not (retiring["watching"] and retiring["watch_retiring"])
+    assert not any(line["msg"] == "Watch stopped." for line in retiring["console"])
+
+    release_upload.set()
+    wait_until(lambda: not api._watch_thread or not api._watch_thread.is_alive())
+    final = api.poll_queue()
+    assert final["watching"] is False
+    assert final["watch_retiring"] is False
+    assert not (final["watching"] and final["watch_retiring"])
+    assert [line["msg"] for line in final["console"]].count("Watch stopped.") == 1
+
+
+def test_restarting_a_watch_logs_the_first_stop_once(sftp_env, wait_until):
+    api, _server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+
+    status = api.poll_queue()
+    assert [line["msg"] for line in status["console"]].count("Watch stopped.") == 1
+    assert status["watching"] is True
+    assert status["watch_retiring"] is False
+    api.stop_watch()
+    wait_until(lambda: not api._watch_thread)
+
+
 def test_rapid_start_stop_never_leaves_a_thread_running(sftp_env):
     """Hammering start/stop must not leave a lingering thread or crash one, which
     the old shared-stop-event teardown could do."""
@@ -306,6 +367,31 @@ def test_shutdown_discards_pending_watch_refresh(sftp_env, wait_until):
 
     assert api._shutdown()["ok"] is True
     assert api.poll_queue()["watch_refresh"] == []
+
+
+def test_disconnect_stops_a_watch_without_connection_lost_warning(sftp_env, wait_until):
+    api, _server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+
+    assert api.disconnect()["ok"] is True
+    wait_until(lambda: not api._watch_thread or not api._watch_thread.is_alive())
+    lines = api.poll_queue()["console"]
+
+    assert [line["msg"] for line in lines].count("Watch stopped.") == 1
+    assert not any(line["msg"].startswith("Watch stopped:") for line in lines)
+
+
+def test_shutdown_while_watching_buffers_at_most_one_stop_line(sftp_env, wait_until):
+    api, _server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+
+    assert api._shutdown()["ok"] is True
+    wait_until(lambda: not api._watch_thread or not api._watch_thread.is_alive())
+    lines = api.poll_queue()["console"]
+
+    assert [line["msg"] for line in lines].count("Watch stopped.") <= 1
 
 
 def test_shutdown_blocks_a_straggling_watcher_from_readding_refresh(
@@ -481,12 +567,14 @@ def test_watch_stops_when_the_connection_is_replaced(sftp_env):
     assert not (server_root / "after-reconnect.txt").exists()
     status = api.poll_queue()
     assert status["watching"] is False
-    assert any(line["msg"].startswith("Watch stopped: the connection it started on has ended.")
-               and line["level"] == "warn" for line in status["console"])
+    assert sum(line["msg"].startswith("Watch stopped: the connection it started on has ended.")
+               and line["level"] == "warn" for line in status["console"]) == 1
+    assert not any(line["msg"] == "Watch stopped." for line in status["console"])
 
 
 def test_a_stopped_watch_does_not_report_its_connection_ended(sftp_env):
-    """A watch the user stops ends quietly, even if the connection then changes."""
+    """A watch the user stops never reports that its connection ended, even if
+    the connection then changes."""
     api, _server_root, local_dir = sftp_env
     api._watch_interval = 0.05
     assert api.start_watch(str(local_dir), "/")["ok"] is True
