@@ -462,25 +462,380 @@ def test_upload_success_writes_correct_bytes_and_no_temp_left(
     assert _remote_temp_files(server_root) == []
 
 
-# ───────────── upload: refuse-and-keep when the server cannot rename ─────────────
+# ───────────── upload: fallback when the server cannot swap ─────────────
 
-def test_upload_refuses_and_keeps_original_when_posix_rename_unsupported(
-        sftp_env_no_posix_rename, wait_for_queue_count, wait_for_drain, state_of):
-    api, server_root, local_dir = sftp_env_no_posix_rename
+def _unsupported_posix_rename(*args, **kwargs):
+    error = IOError("posix-rename unsupported")
+    error.sftp_status = transfer_io.SFTP_OP_UNSUPPORTED
+    raise error
+
+
+def _status_error(status, message="posix-rename failed"):
+    error = IOError(message)
+    error.sftp_status = status
+    return error
+
+
+def _put(api, source, remote):
+    return transfer_io._put_file(
+        api, api._sftp, str(source), remote, lambda *_: None, lambda: False)
+
+
+def test_unsupported_new_file_uses_plain_rename(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    source = local_dir / "new.bin"
+    source.write_bytes(b"new content")
+    rename_calls = []
+    remove_calls = []
+    real_rename = api._sftp.rename
+
+    def recording_rename(oldpath, newpath):
+        rename_calls.append((oldpath, newpath))
+        return real_rename(oldpath, newpath)
+
+    monkeypatch.setattr(transfer_io, "_posix_rename_with_status", _unsupported_posix_rename)
+    monkeypatch.setattr(api._sftp, "rename", recording_rename)
+    monkeypatch.setattr(api._sftp, "remove", lambda path: remove_calls.append(path))
+
+    assert _put(api, source, "/new.bin")
+    assert rename_calls and len(rename_calls) == 1
+    assert remove_calls == []
+    assert (server_root / "new.bin").read_bytes() == b"new content"
+    assert not any("two steps" in line["msg"] for line in api.poll_queue()["console"])
+
+
+def test_unsupported_existing_file_deletes_then_renames(
+        sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
     name = "up.bin"
-    original = b"ORIGINAL SERVER COPY"
-    (server_root / name).write_bytes(original)
-    (local_dir / name).write_bytes(b"new local content that must never land")
+    (server_root / name).write_bytes(b"ORIGINAL SERVER COPY")
+    content = b"new local content"
+    (local_dir / name).write_bytes(content)
+    remove_calls = []
+    rename_calls = []
+    real_remove = api._sftp.remove
+    real_rename = api._sftp.rename
 
-    item_id = _enqueue_one(api, "upload", local_dir, "/", name, "overwrite", wait_for_queue_count)
+    def recording_remove(path):
+        remove_calls.append(path)
+        return real_remove(path)
+
+    def recording_rename(oldpath, newpath):
+        rename_calls.append((oldpath, newpath))
+        return real_rename(oldpath, newpath)
+
+    monkeypatch.setattr(transfer_io, "_posix_rename_with_status", _unsupported_posix_rename)
+    monkeypatch.setattr(api._sftp, "remove", recording_remove)
+    monkeypatch.setattr(api._sftp, "rename", recording_rename)
+
+    assert _put(api, local_dir / name, f"/{name}")
+    assert remove_calls == [f"/{name}"]
+    assert len(rename_calls) == 1
+    assert (server_root / name).read_bytes() == content
+    lines = api.poll_queue()["console"]
+    assert any("no safe replace" in line["msg"] for line in lines)
+    assert _remote_temp_files(server_root) == []
+
+
+@pytest.mark.parametrize("failure", [_status_error(3, "permission denied"), EOFError("connection lost")])
+def test_other_posix_rename_failures_stay_errors(sftp_env, monkeypatch, failure):
+    api, server_root, local_dir = sftp_env
+    source = local_dir / "existing.bin"
+    source.write_bytes(b"new")
+    (server_root / "existing.bin").write_bytes(b"old")
+    remove_calls = []
+    rename_calls = []
+
+    def failing_posix(*args, **kwargs):
+        raise failure
+
+    real_remove = api._sftp.remove
+
+    def recording_remove(path):
+        remove_calls.append(path)
+        return real_remove(path)
+
+    monkeypatch.setattr(transfer_io, "_posix_rename_with_status", failing_posix)
+    monkeypatch.setattr(api._sftp, "remove", recording_remove)
+    monkeypatch.setattr(api._sftp, "rename", lambda *args: rename_calls.append(args))
+
+    with pytest.raises(type(failure)):
+        _put(api, source, "/existing.bin")
+    assert "/existing.bin" not in remove_calls
+    assert rename_calls == []
+    assert (server_root / "existing.bin").read_bytes() == b"old"
+    assert _remote_temp_files(server_root) == []
+
+
+def test_lost_reply_to_delete_rechecks(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    source = local_dir / "lost-delete.bin"
+    source.write_bytes(b"new")
+    (server_root / source.name).write_bytes(b"old")
+    rename_calls = []
+    remove_calls = []
+    real_remove = api._sftp.remove
+    real_rename = api._sftp.rename
+
+    def delete_then_lose_reply(path):
+        remove_calls.append(path)
+        real_remove(path)
+        raise OSError("lost delete reply")
+
+    def recording_rename(oldpath, newpath):
+        rename_calls.append((oldpath, newpath))
+        return real_rename(oldpath, newpath)
+
+    monkeypatch.setattr(transfer_io, "_posix_rename_with_status", _unsupported_posix_rename)
+    monkeypatch.setattr(api._sftp, "remove", delete_then_lose_reply)
+    monkeypatch.setattr(api._sftp, "rename", recording_rename)
+
+    assert _put(api, source, f"/{source.name}")
+    assert remove_calls == [f"/{source.name}"]
+    assert len(rename_calls) == 1
+    assert (server_root / source.name).read_bytes() == b"new"
+
+
+def test_lost_reply_to_delete_target_still_there(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    source = local_dir / "delete-uncertain.bin"
+    source.write_bytes(b"new")
+    (server_root / source.name).write_bytes(b"old")
+    rename_calls = []
+
+    monkeypatch.setattr(transfer_io, "_posix_rename_with_status", _unsupported_posix_rename)
+    monkeypatch.setattr(api._sftp, "remove", lambda path: (_ for _ in ()).throw(OSError("lost reply")))
+    monkeypatch.setattr(api._sftp, "rename", lambda *args: rename_calls.append(args))
+
+    with pytest.raises(transfer_io.UploadRecoveryNeeded, match="recovery needed") as error:
+        _put(api, source, f"/{source.name}")
+    assert "/delete-uncertain.bin" in str(error.value)
+    assert ".sxtpart" in str(error.value)
+    assert rename_calls == []
+    assert len(_remote_temp_files(server_root)) == 1
+
+
+def test_lost_reply_to_rename_rechecks(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    source = local_dir / "lost-rename.bin"
+    source.write_bytes(b"new")
+    (server_root / source.name).write_bytes(b"old")
+    calls = []
+    real_rename = api._sftp.rename
+
+    def rename_then_lose_reply(oldpath, newpath):
+        calls.append((oldpath, newpath))
+        real_rename(oldpath, newpath)
+        raise OSError("lost rename reply")
+
+    monkeypatch.setattr(transfer_io, "_posix_rename_with_status", _unsupported_posix_rename)
+    monkeypatch.setattr(api._sftp, "rename", rename_then_lose_reply)
+
+    assert _put(api, source, f"/{source.name}")
+    assert len(calls) == 1
+    assert (server_root / source.name).read_bytes() == b"new"
+
+
+def test_rename_denied_after_delete_keeps_scratch(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    source = local_dir / "rename-denied.bin"
+    source.write_bytes(b"new")
+    (server_root / source.name).write_bytes(b"old")
+    rename_calls = []
+
+    def refuse_rename(*args):
+        rename_calls.append(args)
+        raise OSError("rename refused")
+
+    monkeypatch.setattr(transfer_io, "_posix_rename_with_status", _unsupported_posix_rename)
+    monkeypatch.setattr(api._sftp, "rename", refuse_rename)
+
+    with pytest.raises(transfer_io.UploadRecoveryNeeded):
+        _put(api, source, f"/{source.name}")
+    assert len(rename_calls) == 2
+    assert not (server_root / source.name).exists()
+    assert len(_remote_temp_files(server_root)) == 1
+
+
+@pytest.mark.parametrize("rename_succeeds", [True, False])
+def test_rename_fails_after_uncertain_delete_rechecks(sftp_env, monkeypatch, rename_succeeds):
+    api, server_root, local_dir = sftp_env
+    source = local_dir / "uncertain-delete.bin"
+    source.write_bytes(b"new")
+    (server_root / source.name).write_bytes(b"old")
+    real_remove = api._sftp.remove
+    real_rename = api._sftp.rename
+    rename_calls = []
+    remove_calls = []
+
+    def delete_then_lose_reply(path):
+        remove_calls.append(path)
+        real_remove(path)
+        raise OSError("lost delete reply")
+
+    def maybe_publish_then_fail(oldpath, newpath):
+        rename_calls.append((oldpath, newpath))
+        if rename_succeeds:
+            real_rename(oldpath, newpath)
+        raise OSError("lost rename reply")
+
+    monkeypatch.setattr(transfer_io, "_posix_rename_with_status", _unsupported_posix_rename)
+    monkeypatch.setattr(api._sftp, "remove", delete_then_lose_reply)
+    monkeypatch.setattr(api._sftp, "rename", maybe_publish_then_fail)
+
+    if rename_succeeds:
+        assert _put(api, source, f"/{source.name}")
+        assert (server_root / source.name).read_bytes() == b"new"
+        assert _remote_temp_files(server_root) == []
+    else:
+        with pytest.raises(transfer_io.UploadRecoveryNeeded):
+            _put(api, source, f"/{source.name}")
+        assert len(_remote_temp_files(server_root)) == 1
+    assert remove_calls == [f"/{source.name}"]
+    assert len(rename_calls) == 1
+
+
+def test_target_appears_mid_publish_is_never_deleted(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    source = local_dir / "appears.bin"
+    source.write_bytes(b"new")
+    real_remove = api._sftp.remove
+
+    def target_appears_then_refuses(oldpath, newpath):
+        (server_root / "appears.bin").write_bytes(b"intruder")
+        raise OSError("target already exists")
+
+    def remove_scratch_only(path):
+        assert path != "/appears.bin"
+        return real_remove(path)
+
+    monkeypatch.setattr(transfer_io, "_posix_rename_with_status", _unsupported_posix_rename)
+    monkeypatch.setattr(api._sftp, "rename", target_appears_then_refuses)
+    monkeypatch.setattr(api._sftp, "remove", remove_scratch_only)
+
+    with pytest.raises(OSError, match="target already exists"):
+        _put(api, source, "/appears.bin")
+    assert (server_root / "appears.bin").read_bytes() == b"intruder"
+    assert _remote_temp_files(server_root) == []
+
+
+def test_scratch_name_collision_retries(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    source = local_dir / "collision.bin"
+    source.write_bytes(b"new")
+    collision = "/.collision.bin.deadbeef.sxtpart"
+    replacement = "/.collision.bin.cafebabe.sxtpart"
+    (server_root / collision[1:]).write_bytes(b"keep")
+    names = iter((collision, replacement))
+    real_open = api._sftp.open
+    active_at_open = []
+
+    def exclusive_collision(path, mode="r", *args, **kwargs):
+        if mode == "x+" and path in collisions:
+            active_at_open.append(api._is_active_remote_scratch(path))
+            raise FileExistsError(errno.EEXIST, "already exists", path)
+        if mode == "x+":
+            active_at_open.append(api._is_active_remote_scratch(path))
+        return real_open(path, mode, *args, **kwargs)
+
+    collisions = {collision}
+    monkeypatch.setattr(transfer_io, "remote_temp_path", lambda path: next(names))
+    monkeypatch.setattr(api._sftp, "open", exclusive_collision)
+
+    assert _put(api, source, "/collision.bin")
+    assert active_at_open == [True, True]
+    assert (server_root / collision[1:]).read_bytes() == b"keep"
+    assert (server_root / "collision.bin").read_bytes() == b"new"
+
+    names = iter((collision, "/.collision.bin.11111111.sxtpart", "/.collision.bin.22222222.sxtpart"))
+    (server_root / ".collision.bin.11111111.sxtpart").write_bytes(b"keep")
+    (server_root / ".collision.bin.22222222.sxtpart").write_bytes(b"keep")
+    collisions = {collision, "/.collision.bin.11111111.sxtpart", "/.collision.bin.22222222.sxtpart"}
+    monkeypatch.setattr(transfer_io, "remote_temp_path", lambda path: next(names))
+    with pytest.raises(IOError, match="unique remote scratch"):
+        _put(api, source, "/another.bin")
+    assert all((server_root / name).read_bytes() == b"keep" for name in (
+        collision[1:], ".collision.bin.11111111.sxtpart", ".collision.bin.22222222.sxtpart"))
+
+
+@pytest.mark.parametrize("cancel_during_failure", [False, True])
+def test_recovery_survives_connection_lost_and_cancel(
+        sftp_env, monkeypatch, wait_for_queue_count, wait_for_drain, state_of,
+        cancel_during_failure):
+    api, _server_root, local_dir = sftp_env
+    source = local_dir / "recovery.bin"
+    source.write_bytes(b"new")
+    calls = []
+
+    def recovery_failure(*args, **kwargs):
+        calls.append(args)
+        if cancel_during_failure:
+            with api._queue._lock:
+                next(iter(api._queue._by_id.values())).cancel_requested = True
+        raise transfer_io.UploadRecoveryNeeded(
+            "recovery needed: the new complete copy is kept at /scratch; "
+            "the destination /recovery.bin may be missing")
+
+    monkeypatch.setattr(api, "_put_file", recovery_failure)
+    item_id = _enqueue_one(api, "upload", local_dir, "/", source.name, "overwrite",
+                           wait_for_queue_count)
     wait_for_drain(api)
 
     entry = state_of(api, item_id)
     assert entry["state"] == FAILED
-    assert "server does not support safe atomic replace" in entry["error"]
-    assert "file not written to protect the existing copy" in entry["error"]
-    assert (server_root / name).read_bytes() == original
-    assert _remote_temp_files(server_root) == []
+    assert "recovery needed" in entry["error"]
+    assert entry["error"] != "Connection lost"
+    assert entry["retryable"] is False
+    assert len(calls) == 1
+
+
+def test_watch_pauses_retries_after_recovery_needed(sftp_env, monkeypatch, wait_until):
+    api, _server_root, local_dir = sftp_env
+    api._watch_interval = 0.05
+    attempts = {"paused.bin": 0, "other.bin": 0}
+
+    def upload_with_recovery_pause(_sftp, _local, remote, _cb, _cancel):
+        name = remote.rsplit("/", 1)[-1]
+        attempts[name] += 1
+        if name == "paused.bin":
+            raise transfer_io.UploadRecoveryNeeded(
+                "recovery needed: the new complete copy is kept at /scratch; "
+                "the destination /paused.bin may be missing")
+        return True
+
+    monkeypatch.setattr(api, "_put_file", upload_with_recovery_pause)
+    assert api.start_watch(str(local_dir), "/")["ok"] is True
+    (local_dir / "paused.bin").write_bytes(b"paused")
+    (local_dir / "other.bin").write_bytes(b"other")
+    wait_until(lambda: attempts["paused.bin"] == 1 and attempts["other.bin"] == 1, timeout=6)
+    time.sleep(0.2)
+    api.stop_watch()
+
+    lines = api.poll_queue()["console"]
+    assert attempts["paused.bin"] == 1
+    assert attempts["other.bin"] == 1
+    assert sum("Watch paused retries for /paused.bin" in line["msg"] for line in lines) == 1
+
+
+def test_chmod_skipped_when_bits_match(sftp_env, monkeypatch):
+    api, server_root, local_dir = sftp_env
+    source = local_dir / "same-bits.bin"
+    source.write_bytes(b"new")
+    (server_root / source.name).write_bytes(b"old")
+    rp = f"/{source.name}"
+    real_stat = api._sftp.stat
+
+    def matching_modes(path):
+        attr = real_stat(path)
+        if path == rp or path.endswith(".sxtpart"):
+            attr.st_mode = 0o100600
+        return attr
+
+    monkeypatch.setattr(api._sftp, "stat", matching_modes)
+    monkeypatch.setattr(api._sftp, "chmod", lambda *args: pytest.fail("chmod must be skipped"))
+
+    assert _put(api, source, rp)
+    assert (server_root / source.name).read_bytes() == b"new"
 
 
 # ───────────── upload: preserve the existing target's permissions ─────────────
@@ -641,15 +996,27 @@ def test_upload_refuses_when_server_refuses_chmod(
     (local_dir / name).write_bytes(b"new content that must never land")
 
     real_chmod = paramiko.SFTPClient.chmod
+    real_stat = paramiko.SFTPClient.stat
+    rp = f"/{name}"
+
+    def private_target_stat(self, path):
+        if path == rp:
+            attr = paramiko.SFTPAttributes()
+            attr.st_mode = 0o100600
+            attr.st_size = len(original)
+            return attr
+        return real_stat(self, path)
 
     def failing_chmod(self, path, mode):
         raise IOError("server refused chmod")
 
+    paramiko.SFTPClient.stat = private_target_stat
     paramiko.SFTPClient.chmod = failing_chmod
     try:
         item_id = _enqueue_one(api, "upload", local_dir, "/", name, "overwrite", wait_for_queue_count)
         wait_for_drain(api)
     finally:
+        paramiko.SFTPClient.stat = real_stat
         paramiko.SFTPClient.chmod = real_chmod
 
     entry = state_of(api, item_id)
@@ -805,11 +1172,9 @@ def test_watch_upload_preserves_source_modification_time(sftp_env, wait_until):
     assert abs(dst_mtime - src_mtime) <= 1
 
 
-def test_watch_upload_refuses_and_keeps_original_when_posix_rename_unsupported(
+def test_watch_upload_uses_fallback_when_posix_rename_unsupported(
         sftp_env_no_posix_rename, wait_until):
-    """A watch upload against a server without the posix-rename extension must
-    be refused rather than risking an unsafe replace: the prior remote copy
-    stays intact and the change is left pending so it is retried."""
+    """Watch uploads use the same confirmed-unsupported fallback."""
     api, server_root, local_dir = sftp_env_no_posix_rename
     api._watch_interval = 0.05
     name = "up.bin"
@@ -821,20 +1186,17 @@ def test_watch_upload_refuses_and_keeps_original_when_posix_rename_unsupported(
 
     lines = []
 
-    def watch_failed():
+    def watch_uploaded():
         lines.extend(api.poll_queue()["console"])
-        return any(line["msg"].startswith(f"Watch error: {name} - ") for line in lines)
+        return any(line["msg"].startswith("Watch: uploaded ") for line in lines)
 
-    wait_until(watch_failed, timeout=6)
+    wait_until(watch_uploaded, timeout=6)
     time.sleep(0.2)
     api.stop_watch()
     lines.extend(api.poll_queue()["console"])
 
-    errors = [line for line in lines if line["msg"].startswith(f"Watch error: {name} - ")]
-    assert errors and all(line["level"] == "error" for line in errors)
-    # never reported success
-    assert not any(line["msg"].startswith("Watch: uploaded ") for line in lines)
-    assert (server_root / name).read_bytes() == original
+    assert not any(line["msg"].startswith(f"Watch error: {name} - ") for line in lines)
+    assert (server_root / name).read_bytes() == b"new local content that must never land"
     assert _remote_temp_files(server_root) == []
 
 

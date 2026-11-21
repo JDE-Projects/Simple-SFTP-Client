@@ -33,7 +33,10 @@ If you enjoyed this project and would like to buy me a coffee, check out my [Ko-
   memory).
 - Safe transfers: files are written to a temporary copy and swapped in only
   when complete, so an interrupted transfer never damages the existing file.
-  Servers that can't swap files safely have uploads refused.
+  On a server without the one-step swap, replacing an existing file deletes it
+  and then renames the complete copy. If that fails partway the file can be
+  missing, but the complete new copy is kept on the server and its path is
+  reported.
 - Before overwriting, a per-file comparison shows each file's size, date, and
   which side is newer, so you can overwrite, skip existing, or cancel.
 - Transfers keep each file's original modification date where the server and

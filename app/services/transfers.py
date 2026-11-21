@@ -15,6 +15,7 @@ from app.paths import (
     safe_local_child,
     windows_destination_key,
 )
+from app.services.transfer_io import UploadRecoveryNeeded
 from app.workers import worker_target
 
 
@@ -435,6 +436,7 @@ def _worker_loop(api):
             ok = False
             res = None
             last_err = ""
+            recovery_needed = False
             for attempt in range(3):
                 if item.cancel_requested:
                     break
@@ -455,6 +457,9 @@ def _worker_loop(api):
                 except Exception as e:
                     last_err = str(e)
                     log_event("transfer retry", attempt=attempt + 1, error=e)
+                    if isinstance(e, UploadRecoveryNeeded):
+                        recovery_needed = True
+                        break
                     if item.cancel_requested:
                         break
                     if api._connection_dead(sftp):
@@ -466,7 +471,10 @@ def _worker_loop(api):
                         api._report_dead_connection()
                         break
                     time.sleep(0.6)
-            if res == "cancelled" or (not ok and item.cancel_requested):
+            if recovery_needed:
+                api._queue.mark_failed(item.id, last_err, retryable=False)
+                api._worker_log(f"failed {item.name}", "error", "transfer", outcome="failed")
+            elif res == "cancelled" or (not ok and item.cancel_requested):
                 # res == "cancelled": the byte loop itself broke early, so
                 # the transfer did not finish; that is the one true source
                 # of truth here, not a flag re-check after the fact, which

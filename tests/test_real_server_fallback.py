@@ -1,0 +1,109 @@
+"""Fallback integration coverage against the separate Simple SFTP Server app."""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import paramiko
+import pytest
+
+from app.api import Api
+from app.services import transfer_io
+from simple_sftp_client import APP_VERSION
+
+
+SERVER_REPO = Path(os.environ.get(
+    "SXT_SERVER_REPO", Path(__file__).resolve().parents[2] / "Simple SFTP Server"))
+if not SERVER_REPO.is_dir():
+    pytest.skip("Simple SFTP Server repository is unavailable", allow_module_level=True)
+
+
+@pytest.fixture
+def real_server(tmp_path):
+    helper = Path(__file__).with_name("real_server_fallback_helper.py")
+    command = [sys.executable, "-B", str(helper), "--server-repo", str(SERVER_REPO),
+               "--root", str(tmp_path)]
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, env=env)
+    try:
+        line = process.stdout.readline().strip()
+        if not line:
+            stderr = process.stderr.read()
+            pytest.skip(f"Simple SFTP Server could not start: {stderr}")
+        yield int(line), tmp_path / "home"
+    finally:
+        if process.stdin:
+            process.stdin.close()
+        process.wait(timeout=10)
+
+
+def _client(port):
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect("127.0.0.1", port=port, username="fallback", password="fallback-password",
+                   look_for_keys=False, allow_agent=False)
+    return client, client.open_sftp()
+
+
+def _put(sftp, source, remote):
+    api = Api(APP_VERSION)
+    return transfer_io._put_file(api, sftp, str(source), remote, lambda *_: None, lambda: False)
+
+
+def test_real_server_new_file_fallback(real_server, tmp_path):
+    port, home = real_server
+    source = tmp_path / "new.txt"
+    source.write_bytes(b"new")
+    client, sftp = _client(port)
+    try:
+        assert _put(sftp, source, "/new.txt")
+    finally:
+        sftp.close()
+        client.close()
+    assert (home / "new.txt").read_bytes() == b"new"
+
+
+def test_real_server_overwrite_fallback(real_server, tmp_path):
+    port, home = real_server
+    (home / "existing.txt").write_bytes(b"old")
+    source = tmp_path / "existing.txt"
+    source.write_bytes(b"new")
+    client, sftp = _client(port)
+    try:
+        assert _put(sftp, source, "/existing.txt")
+    finally:
+        sftp.close()
+        client.close()
+    assert (home / "existing.txt").read_bytes() == b"new"
+
+
+def test_real_server_permission_denied_leaves_no_scratch(tmp_path):
+    helper = Path(__file__).with_name("real_server_fallback_helper.py")
+    command = [sys.executable, "-B", str(helper), "--server-repo", str(SERVER_REPO),
+               "--root", str(tmp_path), "--no-upload"]
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True,
+                               env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+    try:
+        port = int(process.stdout.readline().strip())
+        source = tmp_path / "denied.txt"
+        source.write_bytes(b"new")
+        client, sftp = _client(port)
+        try:
+            with pytest.raises(IOError, match="Permission denied|denied"):
+                _put(sftp, source, "/denied.txt")
+        finally:
+            sftp.close()
+            client.close()
+        assert not list((tmp_path / "home").glob("*.sxtpart"))
+    finally:
+        if process.stdin:
+            process.stdin.close()
+        process.wait(timeout=10)
+
+
+@pytest.mark.skip(reason="waits for Simple SFTP Server task 7")
+def test_real_server_one_step_swap():
+    pass

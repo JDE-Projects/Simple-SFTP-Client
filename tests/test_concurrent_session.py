@@ -332,11 +332,15 @@ def test_watch_refresh_deduplicates_folders_from_one_pass(sftp_env, wait_until):
 
 
 def test_failed_watch_upload_logs_error_without_refresh(
-        sftp_env_no_posix_rename, wait_until):
+        sftp_env, monkeypatch, wait_until):
     """A failed watch upload never tells the page to refresh a remote folder."""
-    api, server_root, local_dir = sftp_env_no_posix_rename
+    api, _server_root, local_dir = sftp_env
     api._watch_interval = 0.05
-    (server_root / "failed.txt").write_bytes(b"old")
+
+    def refusing_upload(*args, **kwargs):
+        raise IOError("remote destination is not writable")
+
+    monkeypatch.setattr(api, "_put_file", refusing_upload)
 
     assert api.start_watch(str(local_dir), "/")["ok"] is True
     (local_dir / "failed.txt").write_bytes(b"new")

@@ -242,8 +242,12 @@ class TransferQueue:
     def mark_completed(self, item_id):
         return self._finish(item_id, COMPLETED)
 
-    def mark_failed(self, item_id, error):
-        return self._finish(item_id, FAILED, error=error)
+    def mark_failed(self, item_id, error, retryable=True):
+        finished = self._finish(item_id, FAILED, error=error)
+        if finished and not retryable:
+            with self._lock:
+                self._find(item_id).retryable = False
+        return finished
 
     def mark_skipped(self, item_id):
         return self._finish(item_id, SKIPPED)
