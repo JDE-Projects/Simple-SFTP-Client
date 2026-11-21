@@ -617,7 +617,7 @@ async function queueTick(){
     // (including a finished batch's summary) exactly as it is.
     if(!busy&&!qWasBusy){
       if((p.watch_refresh||[]).includes(state.remote.cwd))refresh("remote",true);
-      if(p.watching)setQueuePollDelay(1000); else stopQueuePoll();
+      if(p.watching||p.watch_retiring)setQueuePollDelay(1000); else stopQueuePoll();
       return;
     }
     lastProgressById=p.progress||{};
@@ -1237,7 +1237,7 @@ let watching=false;
 let watchSeq=0;
 function showWatchOff(){ watching=false; $("watchBtn").classList.remove("btn-primary"); $("watchBtn").classList.add("btn-ghost"); $("watchBtn").textContent="Watch"; updateWatchTag(); }
 async function onWatch(){ if(!connected)return;
-  if(watching){ await API.stop_watch(); showWatchOff(); return; }
+  if(watching){ const stopping=API.stop_watch(); showWatchOff(); if(!qPollTimer)setQueuePollDelay(1000); await stopping; return; }
   if(queueActive()){ clog("A transfer queue is active. Wait for it to finish.","warn"); return; }
   if(!await confirm2("Watch local folder","Auto-upload changes from this local folder to the current remote folder while on?"))return;
   watchSeq++;

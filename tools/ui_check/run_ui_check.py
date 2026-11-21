@@ -159,6 +159,18 @@ def main(argv):
     debug.log_dir = os.path.join(work, "no_such_debug_folder")
     api._watch_interval = 0.5
     delay_once, calls, results = {}, {}, {}
+    watch_upload_stall = threading.Event()
+    watch_upload_started = threading.Event()
+    watch_upload_release = threading.Event()
+    real_put_file = api._put_file
+
+    def stalled_watch_put(*args):
+        if watch_upload_stall.is_set():
+            watch_upload_started.set()
+            watch_upload_release.wait()
+        return real_put_file(*args)
+
+    api._put_file = stalled_watch_put
     done = threading.Event()
 
     def fake_connect(_params):
@@ -221,6 +233,17 @@ def main(argv):
                     return self._send({"ok": os.path.exists(os.path.join(server_root, body["rel"]))})
                 if op == "delay":
                     delay_once[body["method"]] = body["ms"]
+                    return self._send({"ok": True})
+                if op == "stall_watch_upload":
+                    watch_upload_started.clear()
+                    watch_upload_release.clear()
+                    watch_upload_stall.set()
+                    return self._send({"ok": True})
+                if op == "watch_upload_started":
+                    return self._send({"ok": watch_upload_started.is_set()})
+                if op == "release_watch_upload":
+                    watch_upload_stall.clear()
+                    watch_upload_release.set()
                     return self._send({"ok": True})
                 if op == "calls":
                     return self._send(dict(calls))
