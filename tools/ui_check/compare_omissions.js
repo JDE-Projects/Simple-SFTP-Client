@@ -39,6 +39,10 @@ export default async function compareOmissions(helpers) {
   check("omission popup has three entries and Copy list", await ok(waitFor(`${popupOpen} && $('scanProblemsTitle').textContent === 'Entries not compared' && $('scanProblemsList').children.length === 3 && !$('scanProblemsCopy').disabled`, 5000)),
     await evaluate("$('scanProblemsSummary').textContent + ' | ' + $('scanProblemsList').textContent"));
   await screenshot("compare-omissions-list");
+  const labels = await evaluate(`omissionItems({not_compared:[{name:"x",reason:"uncertain name match"},{name:"y",reason:"name clash"},{name:"z",reason:"something new"}]})`);
+  check("each omission reason has its own label",
+    Array.isArray(labels) && labels[0].includes("not guessed") && labels[1].includes("same name on Windows") && labels[2] === "z (not compared)",
+    JSON.stringify(labels));
   const startLight = await evaluate("document.body.classList.contains('light')");
   await evaluate("$('theme-btn').click()");
   await waitFor(`document.body.classList.contains('light') === ${!startLight}`, 5000).catch(() => {});

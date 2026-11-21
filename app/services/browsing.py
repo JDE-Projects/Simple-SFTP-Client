@@ -260,8 +260,14 @@ def rename(api, side, path, old, new):
 
 
 def delete(api, side, path, items):
+    """Delete each item; `failed` counts items not confirmed deleted.
+
+    `errors` holds every message to show, so it can be longer than `failed`
+    (a stall adds a note about the stalled item and one about the rest)."""
     errs = []
+    failed = 0
     for index, it in enumerate(items):
+        item_failed = False
         try:
             if side == "local":
                 full = safe_local_child(path, it["name"], path)
@@ -273,12 +279,15 @@ def delete(api, side, path, items):
                 if not it["is_dir"]:
                     api._vlog(f"remove {full}", event="remote remove")
         except UnsafeRemoteListing as e:
+            item_failed = True
             errs.append(f"{it['name']}: stopped, the server listed an unsafe name inside it "
                         f"({e.name!r}); some items in it may already be deleted")
         except ValueError:
+            item_failed = True
             message = _local_name_error(it["name"]) if side == "local" else _remote_name_error(it["name"])
             errs.append(f"{it['name']}: {message}")
         except Exception as e:
+            item_failed = True
             errs.append(f"{it['name']}: {e}")
         if side == "remote" and getattr(api._sftp, "timed_out", False):
             errs.append(f"{it['name']}: the server stopped answering; it may or may not be deleted. Refresh to check.")
@@ -286,8 +295,11 @@ def delete(api, side, path, items):
             if remaining:
                 examples = ", ".join(entry["name"] for entry in remaining[:3])
                 errs.append(f"{len(remaining)} item(s) not attempted: {examples}")
+            failed += 1 + len(remaining)
             break
-    return {"ok": True, "errors": errs}
+        if item_failed:
+            failed += 1
+    return {"ok": True, "errors": errs, "failed": failed}
 
 
 def _rremove(api, path):

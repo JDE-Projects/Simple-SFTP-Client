@@ -148,6 +148,7 @@ def test_remote_delete_stops_on_unsafe_nested_name(sftp_env, monkeypatch):
     result = api.delete("remote", "/", [{"name": "folder", "is_dir": True}])
 
     assert "stopped" in result["errors"][0]
+    assert result["failed"] == 1
     assert "may already be deleted" in result["errors"][0]
     assert all(path.startswith("/folder/") for path in calls)
 
@@ -205,3 +206,27 @@ def test_upload_enqueue_skips_unsafe_names_and_keeps_normal_job(sftp_env, wait_f
     assert (server_root / "good.txt").read_text(encoding="utf-8") == "good"
     assert len([line for line in lines if "unsafe upload name" in line[0]]) == 2
     assert all(item["name"] == "good.txt" for item in api._queue.snapshot())
+
+
+def test_remote_delete_counts_only_failed_items(sftp_env):
+    api, server_root, _local_dir = sftp_env
+    (server_root / "a.txt").write_text("a", encoding="utf-8")
+    (server_root / "b.txt").write_text("b", encoding="utf-8")
+    items = [{"name": "a.txt", "is_dir": False},
+             {"name": "missing.txt", "is_dir": False},
+             {"name": "b.txt", "is_dir": False}]
+
+    result = api.delete("remote", "/", items)
+
+    assert result["failed"] == 1
+    assert len(result["errors"]) == 1 and result["errors"][0].startswith("missing.txt:")
+    assert not (server_root / "a.txt").exists() and not (server_root / "b.txt").exists()
+
+
+def test_delete_with_no_failures_reports_zero(sftp_env):
+    api, server_root, _local_dir = sftp_env
+    (server_root / "a.txt").write_text("a", encoding="utf-8")
+
+    result = api.delete("remote", "/", [{"name": "a.txt", "is_dir": False}])
+
+    assert result == {"ok": True, "errors": [], "failed": 0}

@@ -362,6 +362,10 @@ def test_delete_stops_at_stalled_item(browsing_env, monkeypatch):
     assert any("two: the server stopped answering; it may or may not be deleted" in error for error in result["errors"])
     assert "2 item(s) not attempted: three, four" in result["errors"]
     assert any("connection to it was reset" in error for error in result["errors"])
+    # The stalled item and the two not attempted are the only failures, even
+    # though the stall adds more messages than that.
+    assert result["failed"] == 3
+    assert len(result["errors"]) > result["failed"]
     assert not (root / "one").exists()
     assert (root / "three").exists() and (root / "four").exists()
 

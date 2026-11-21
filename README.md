@@ -136,6 +136,12 @@ pipeline from this repo. You can also check the file against the published
 - `servers.json` holds your saved sessions, never passwords. Treat it as
   sensitive: it maps your internal hosts and accounts, so don't share it
   publicly (in a bug report, forum post, or public repo).
+- `scratch-journal.json` (next to the app) lists the temporary file of each
+  download in progress, by its full path on your PC, so a leftover from an
+  interrupted download can be cleaned up safely at the next start. An entry
+  is removed when its download ends or its leftover is dealt with; one on a
+  drive that can't be reached at startup stays until a later start can check
+  it. `scratch-journal.lock` beside it holds no data.
 - "Remember password" is opt-in per session and stores the password in the
   Windows Credential Manager (via `keyring`), not in any file.
 - Only modern, secure key-exchange, ciphers, and MACs are offered; known-weak

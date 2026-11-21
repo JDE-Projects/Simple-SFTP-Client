@@ -31,7 +31,7 @@ from app.geometry import _restore_geometry, _save_geometry
 from app.paths import resource_path
 
 
-APP_VERSION = "1.9.6"
+APP_VERSION = "1.10.0"
 
 
 def _is_remote_debugging_switch(token):
