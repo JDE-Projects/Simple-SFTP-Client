@@ -1265,9 +1265,10 @@ async function openLocal(name){ const r=await API.open_local(state.local.cwd,nam
 async function deleteSel(side){ const items=selItems(side); if(!items.length)return;
   if(!await confirm2("Delete",`Delete ${items.length} item(s) from ${side}? This cannot be undone.`))return;
   const r=await API.delete(side,state[side].cwd,items);
-  const failed=(r.errors&&r.errors.length)||0, okCount=items.length-failed;
-  if(failed){ clog(`Deleted ${okCount}/${items.length} from ${side}, ${failed} could not be deleted`,"error"); (r.errors||[]).forEach(error=>clog(error,"error")); }
+  const errors=r.errors||[], failed=Number(r.failed)||0, okCount=items.length-failed;
+  if(failed) clog(`Deleted ${okCount}/${items.length} from ${side}, ${failed} could not be deleted`,"error");
   else clog(`Deleted ${items.length} item(s) from ${side}`,"ok");
+  errors.forEach(error=>clog(error,failed?"error":"warn"));
   refresh(side); }
 async function calcSize(name){
   if(sizeCalculating){ clog("A folder size is already being calculated.","warn"); return; }
