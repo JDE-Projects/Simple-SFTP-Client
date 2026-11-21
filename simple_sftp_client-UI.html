@@ -512,7 +512,8 @@ async function openScanProblems(reportId){
   showScanProblems("Locations not read",text,problems,more);
 }
 function omissionCount(result){ return Number(result.not_compared_count)||0; }
-function omissionItems(result){ return (result.not_compared||[]).map(item=>`${item.name||""}${item.is_dir?"/":""}${item.reason==="unsafe name"?" (name Windows cannot use)":" (same name on Windows as another entry)"}`); }
+const OMISSION_REASONS={"unsafe name":"name Windows cannot use","name clash":"same name on Windows as another entry","uncertain name match":"may match another entry's name on Windows, not guessed"};
+function omissionItems(result){ return (result.not_compared||[]).map(item=>`${item.name||""}${item.is_dir?"/":""} (${OMISSION_REASONS[item.reason]||"not compared"})`); }
 function omissionSummary(count){ return `${count} entries were not compared. Skipped folders include everything inside them.`; }
 function openOmissions(result){ scanProblemsRequest++; const count=omissionCount(result), items=omissionItems(result); showScanProblems("Entries not compared",omissionSummary(count),items,Math.max(0,count-items.length)); }
 async function copyScanProblems(){
