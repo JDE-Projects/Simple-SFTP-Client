@@ -196,7 +196,7 @@ def test_upload_tracks_active_scratch_then_clears(sftp_env, monkeypatch):
     real_open = paramiko.SFTPClient.open
 
     def observe_open(client, path, mode="r", *args, **kwargs):
-        if mode == "w":
+        if mode == "x+":
             seen.append(api._is_active_remote_scratch(path))
         return real_open(client, path, mode, *args, **kwargs)
 

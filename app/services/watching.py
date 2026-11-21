@@ -9,6 +9,7 @@ from app.errors import friendly_error
 from app.paths import local_link_kind
 from app.scratch_journal import is_active_local
 from app.services.browse_session import close_browsing_sftp, open_browsing_sftp
+from app.services.transfer_io import UploadRecoveryNeeded
 
 
 def snapshot(api, local_dir, excluded):
@@ -123,6 +124,7 @@ def start_watch(api, local_dir, remote_dir):
         # seen_changed: a changed file's state at its previous sighting, used
         # to require one stable poll before uploading.
         seen_changed = {}
+        recovery_paused = set()
         pending_open = None
 
         def connection_gone():
@@ -153,6 +155,8 @@ def start_watch(api, local_dir, remote_dir):
                         continue
                     rel = os.path.relpath(fp, local_dir).replace("\\", "/")
                     rp = posixpath.join(remote_dir, rel)
+                    if rp in recovery_paused:
+                        continue
                     if session is None:
                         if pending_open is not None:
                             if not pending_open.is_set():
@@ -196,6 +200,12 @@ def start_watch(api, local_dir, remote_dir):
                             break
                     except Exception as e:
                         api._worker_log(f"Watch error: {rel} - {friendly_error(e)}", "error", "watch upload", outcome="failed", error=e)
+                        if isinstance(e, UploadRecoveryNeeded):
+                            recovery_paused.add(rp)
+                            api._worker_log(
+                                f"Watch paused retries for {rp} until Watch restarts; "
+                                "recovery is needed for its previous upload.",
+                                "warn", "watch upload", outcome="failed", error=e)
                         # Keep the change pending: leave last unadvanced so a
                         # later poll retries. Reset the stability gate so a
                         # transient failure does not skip the next steadiness

@@ -5,6 +5,8 @@ import os
 import posixpath
 import stat
 
+from paramiko import Message
+
 from app import scratch_journal
 from app.debug import log_event
 from app.errors import friendly_error
@@ -12,6 +14,55 @@ from app.paths import is_local_link, local_temp_path, remote_temp_path
 
 
 DOWNLOAD_READV_BATCH_SIZE = 16 * 1024 * 1024
+SFTP_OP_UNSUPPORTED = 8
+
+
+class UploadRecoveryNeeded(IOError):
+    """A non-atomic replacement may have left its complete scratch copy."""
+
+
+def _posix_rename_with_status(sftp, oldpath, newpath):
+    """Run Paramiko's extension request while retaining its status code."""
+    original_convert_status = sftp._convert_status
+
+    def capture_status(message):
+        # _read_response has already consumed the request number, so only
+        # the remaining status payload begins with the SFTP status code.
+        status = Message(message.get_remainder()).get_int()
+        try:
+            return original_convert_status(message)
+        except IOError as error:
+            error.sftp_status = status
+            raise
+
+    sftp._convert_status = capture_status
+    try:
+        sftp.posix_rename(oldpath, newpath)
+    finally:
+        sftp._convert_status = original_convert_status
+
+
+def _remote_path_state(sftp, path):
+    """Return whether path is present, absent, or cannot safely be known."""
+    try:
+        sftp.stat(path)
+    except Exception as error:
+        if getattr(error, "errno", None) == errno.ENOENT:
+            return "absent"
+        return "unknown"
+    return "present"
+
+
+def _recovery_needed(temp, rp):
+    return UploadRecoveryNeeded(
+        f"recovery needed: the new complete copy is kept at {temp}; "
+        f"the destination {rp} may be missing")
+
+
+def _published_after_failed_rename(sftp, temp, rp):
+    """Whether a failed rename reply actually published the scratch file."""
+    return (_remote_path_state(sftp, temp) == "absent" and
+            _remote_path_state(sftp, rp) == "present")
 
 
 def _put_file(api, sftp, lp, rp, cb, cancel_check):
@@ -28,11 +79,13 @@ def _put_file(api, sftp, lp, rp, cb, cancel_check):
     # upload is refused rather than publishing a file with the wrong
     # permissions; the existing file is left in place. Once the
     # permissions are settled, the local source is checked again before
-    # the scratch file is swapped in with posix_rename, which is atomic:
-    # a cancel, dropped connection, or exhausted retry can only ever leave
-    # the scratch file behind, never a half-written rp. The check compares
-    # local size, nanosecond mtime, and file identity. It cannot catch a
-    # change that finishes with the same size and time.
+    # publication. Servers that support posix-rename use its atomic swap.
+    # On a server that confirms it cannot do that, a new file uses rename;
+    # replacing an existing file deletes it, then renames the complete
+    # scratch copy. If that two-step replacement becomes uncertain, the
+    # scratch copy is kept and its path is reported for recovery. The check
+    # compares local size, nanosecond mtime, and file identity. It cannot
+    # catch a change that finishes with the same size and time.
     #
     # Check cancel_check() only once there is another chunk actually to
     # send, and only after confirming there is more file left (the read
@@ -40,9 +93,11 @@ def _put_file(api, sftp, lp, rp, cb, cancel_check):
     # right after the last real chunk was already written finds nothing
     # left to abort: the next read hits EOF first and the loop exits with
     # finished=True, so a fully-sent file is never mislabeled cancelled.
-    temp = remote_temp_path(rp)
+    temp = None
     finished = True
     published = False
+    created_temp = False
+    keep_temp = False
     path_stat = os.lstat(lp)
     if is_local_link(path_stat):
         raise IOError(f"{lp} is a link; links are not uploaded")
@@ -55,8 +110,24 @@ def _put_file(api, sftp, lp, rp, cb, cancel_check):
                 raise IOError(f"{lp} was replaced; links are not uploaded")
             source_size = source_stat.st_size
             source_mtime = int(source_stat.st_mtime)
-            api._add_active_remote_scratch(temp)
-            with sftp.open(temp, "w") as dst:
+            for _ in range(3):
+                temp = remote_temp_path(rp)
+                api._add_active_remote_scratch(temp)
+                try:
+                    # Paramiko requires '+' with its exclusive-create flag
+                    # to include SFTP_FLAG_WRITE; plain 'x' creates a
+                    # read-only handle in the installed client.
+                    dst = sftp.open(temp, "x+")
+                except Exception as error:
+                    api._discard_active_remote_scratch(temp)
+                    if getattr(error, "errno", None) == errno.EEXIST:
+                        continue
+                    raise
+                created_temp = True
+                break
+            else:
+                raise IOError("could not create a unique remote scratch file")
+            with dst:
                 dst.set_pipelined(True)
                 sent = 0
                 while True:
@@ -92,13 +163,15 @@ def _put_file(api, sftp, lp, rp, cb, cancel_check):
                             "existing file left in place to protect its "
                             "permissions")
                     mode = stat.S_IMODE(existing_attr.st_mode) & 0o777
-                    try:
-                        sftp.chmod(temp, mode)
-                    except Exception as e:
-                        raise IOError(
-                            "server refused to set the target's permissions "
-                            "on the new file; upload refused to protect the "
-                            "existing copy") from e
+                    scratch_mode = stat.S_IMODE(sftp.stat(temp).st_mode) & 0o777
+                    if scratch_mode != mode:
+                        try:
+                            sftp.chmod(temp, mode)
+                        except Exception as e:
+                            raise IOError(
+                                "server refused to set the target's permissions "
+                                "on the new file; upload refused to protect the "
+                                "existing copy") from e
                 try:
                     final_source_stat = os.fstat(src.fileno())
                     final_path_stat = os.stat(lp)
@@ -115,25 +188,65 @@ def _put_file(api, sftp, lp, rp, cb, cancel_check):
                     raise IOError(f"{lp}: source file changed during upload; "
                                   "existing file left in place")
                 try:
-                    sftp.posix_rename(temp, rp)
+                    _posix_rename_with_status(sftp, temp, rp)
                 except Exception as e:
-                    raise IOError(
-                        "server does not support safe atomic replace; "
-                        "file not written to protect the existing copy") from e
+                    if getattr(e, "sftp_status", None) != SFTP_OP_UNSUPPORTED:
+                        raise
+                    if existing_attr is None:
+                        sftp.rename(temp, rp)
+                    else:
+                        api._worker_log(
+                            f"server has no safe replace for {rp}; replacing it "
+                            "in two steps", "warn", "transfer")
+                        try:
+                            sftp.remove(rp)
+                        except Exception as remove_error:
+                            if (_remote_path_state(sftp, temp) == "present" and
+                                    _remote_path_state(sftp, rp) == "absent"):
+                                try:
+                                    sftp.rename(temp, rp)
+                                except Exception as rename_error:
+                                    if _published_after_failed_rename(sftp, temp, rp):
+                                        published = True
+                                    else:
+                                        keep_temp = True
+                                        raise _recovery_needed(temp, rp) from rename_error
+                            else:
+                                keep_temp = True
+                                raise _recovery_needed(temp, rp) from remove_error
+                        else:
+                            try:
+                                sftp.rename(temp, rp)
+                            except Exception as rename_error:
+                                temp_state = _remote_path_state(sftp, temp)
+                                destination_state = _remote_path_state(sftp, rp)
+                                if temp_state == "absent" and destination_state == "present":
+                                    published = True
+                                elif temp_state == "present" and destination_state == "absent":
+                                    try:
+                                        sftp.rename(temp, rp)
+                                    except Exception as retry_error:
+                                        if _published_after_failed_rename(sftp, temp, rp):
+                                            published = True
+                                        else:
+                                            keep_temp = True
+                                            raise _recovery_needed(temp, rp) from retry_error
+                                else:
+                                    keep_temp = True
+                                    raise _recovery_needed(temp, rp) from rename_error
                 published = True
                 api._apply_upload_mtime(sftp, rp, lp, source_mtime, source_size)
         return finished
     finally:
-        # Anything other than a proven, published swap leaves nothing
-        # behind: delete the scratch file (best effort) and, on an
-        # exception, let it propagate so the retry loop tries again with
-        # a brand new scratch file.
-        if not published:
+        # Delete only a scratch this upload created. A recovery-needed
+        # outcome deliberately leaves its complete copy available on server.
+        if created_temp and not published and not keep_temp:
             try:
                 sftp.remove(temp)
             except Exception:
                 pass
-        api._discard_active_remote_scratch(temp)
+        if temp is not None:
+            api._discard_active_remote_scratch(temp)
 
 
 def _get_file(api, sftp, rp, lp, cb, cancel_check):
