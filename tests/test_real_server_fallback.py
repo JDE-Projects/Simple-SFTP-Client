@@ -104,6 +104,25 @@ def test_real_server_permission_denied_leaves_no_scratch(tmp_path):
         process.wait(timeout=10)
 
 
-@pytest.mark.skip(reason="waits for Simple SFTP Server task 7")
-def test_real_server_one_step_swap():
-    pass
+def test_real_server_one_step_swap(real_server, tmp_path, monkeypatch):
+    port, home = real_server
+    (home / "existing.txt").write_bytes(b"old")
+    source = tmp_path / "existing.txt"
+    source.write_bytes(b"new")
+    api = Api(APP_VERSION)
+    logged = []
+    monkeypatch.setattr(api, "_worker_log", lambda msg, *a, **k: logged.append(msg))
+    client, sftp = _client(port)
+    fallback_calls = []
+    monkeypatch.setattr(sftp, "remove", lambda *a: fallback_calls.append(("remove", a)))
+    monkeypatch.setattr(sftp, "rename", lambda *a: fallback_calls.append(("rename", a)))
+    try:
+        assert transfer_io._put_file(api, sftp, str(source), "/existing.txt",
+                                     lambda *_: None, lambda: False)
+    finally:
+        sftp.close()
+        client.close()
+    assert fallback_calls == []
+    assert not [msg for msg in logged if "two steps" in msg]
+    assert (home / "existing.txt").read_bytes() == b"new"
+    assert not list(home.glob("*.sxtpart"))
