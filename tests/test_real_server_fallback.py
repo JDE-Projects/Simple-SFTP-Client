@@ -7,6 +7,7 @@ from pathlib import Path
 
 import paramiko
 import pytest
+from paramiko.sftp import SFTP_OP_UNSUPPORTED
 
 from app.api import Api
 from app.services import transfer_io
@@ -47,36 +48,69 @@ def _client(port):
     return client, client.open_sftp()
 
 
-def _put(sftp, source, remote):
-    api = Api(APP_VERSION)
+def _put(sftp, source, remote, api=None):
+    api = api or Api(APP_VERSION)
     return transfer_io._put_file(api, sftp, str(source), remote, lambda *_: None, lambda: False)
 
 
-def test_real_server_new_file_fallback(real_server, tmp_path):
+@pytest.fixture
+def no_server_swap(monkeypatch):
+    """Make the client see the server refuse posix-rename as unsupported.
+
+    The real server supports the one-step swap, so this is the only way to
+    drive the fallback path against it.
+    """
+    def unsupported(*_args):
+        error = IOError("operation unsupported")
+        error.sftp_status = SFTP_OP_UNSUPPORTED
+        raise error
+
+    monkeypatch.setattr(transfer_io, "_posix_rename_with_status", unsupported)
+
+
+def _logging_api(monkeypatch):
+    api = Api(APP_VERSION)
+    logged = []
+    monkeypatch.setattr(api, "_worker_log", lambda msg, *a, **k: logged.append(msg))
+    return api, logged
+
+
+def test_real_server_new_file_fallback(real_server, tmp_path, monkeypatch, no_server_swap):
     port, home = real_server
     source = tmp_path / "new.txt"
     source.write_bytes(b"new")
+    api, logged = _logging_api(monkeypatch)
     client, sftp = _client(port)
+    renames = []
+    real_rename = sftp.rename
+    monkeypatch.setattr(sftp, "rename",
+                        lambda old, new: (renames.append(new), real_rename(old, new)))
     try:
-        assert _put(sftp, source, "/new.txt")
+        assert _put(sftp, source, "/new.txt", api)
     finally:
         sftp.close()
         client.close()
+    assert renames == ["/new.txt"]
+    assert not [msg for msg in logged if "two steps" in msg]
     assert (home / "new.txt").read_bytes() == b"new"
+    assert not list(home.glob("*.sxtpart"))
 
 
-def test_real_server_overwrite_fallback(real_server, tmp_path):
+def test_real_server_overwrite_fallback(real_server, tmp_path, monkeypatch, no_server_swap):
     port, home = real_server
     (home / "existing.txt").write_bytes(b"old")
     source = tmp_path / "existing.txt"
     source.write_bytes(b"new")
+    api, logged = _logging_api(monkeypatch)
     client, sftp = _client(port)
     try:
-        assert _put(sftp, source, "/existing.txt")
+        assert _put(sftp, source, "/existing.txt", api)
     finally:
         sftp.close()
         client.close()
+    assert [msg for msg in logged if "two steps" in msg]
     assert (home / "existing.txt").read_bytes() == b"new"
+    assert not list(home.glob("*.sxtpart"))
 
 
 def test_real_server_permission_denied_leaves_no_scratch(tmp_path):
@@ -109,16 +143,13 @@ def test_real_server_one_step_swap(real_server, tmp_path, monkeypatch):
     (home / "existing.txt").write_bytes(b"old")
     source = tmp_path / "existing.txt"
     source.write_bytes(b"new")
-    api = Api(APP_VERSION)
-    logged = []
-    monkeypatch.setattr(api, "_worker_log", lambda msg, *a, **k: logged.append(msg))
+    api, logged = _logging_api(monkeypatch)
     client, sftp = _client(port)
     fallback_calls = []
     monkeypatch.setattr(sftp, "remove", lambda *a: fallback_calls.append(("remove", a)))
     monkeypatch.setattr(sftp, "rename", lambda *a: fallback_calls.append(("rename", a)))
     try:
-        assert transfer_io._put_file(api, sftp, str(source), "/existing.txt",
-                                     lambda *_: None, lambda: False)
+        assert _put(sftp, source, "/existing.txt", api)
     finally:
         sftp.close()
         client.close()
