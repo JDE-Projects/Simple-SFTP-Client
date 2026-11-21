@@ -125,6 +125,10 @@ def build_page(page_path, targets):
 
 
 def main(argv):
+    # A check's detail can hold characters the Windows console code page
+    # cannot encode (the watch tag's arrow), which would stop the report
+    # partway. Write it as UTF-8 whatever the console's encoding.
+    sys.stdout.reconfigure(encoding="utf-8")
     page_path = os.path.join(REPO, "simple_sftp_client-UI.html")
     if "--page" in argv:
         page_path = os.path.abspath(argv[argv.index("--page") + 1])
